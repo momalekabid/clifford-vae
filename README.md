@@ -10,20 +10,31 @@ cd clifford-vae
 ### 2. Create and activate a virtual environment
 
 ```sh
-# using uv (recommended)
+# using uv 
 uv venv .venv
 source .venv/bin/activate
 
-# using python directly
+# using python directly, if not using uv
 python3 -m venv .venv
 source .venv/bin/activate
+
+
+# using conda (for SLURM jobs on WatGPU)
+conda env create -f environment.yml
+conda activate clifford-vae # if using SLURM/GPU cluster script, use source instead of conda
 ```
 
 ---
 
-### 3. Install dependencies
+### 3. Install dependencies (ignore if using conda)
+#### **A. With `uv` **
 
-#### **A. With `uv` (Recommended)**
+**Bash/Zsh:**
+```sh
+uv pip install -r <(uv pip compile pyproject.toml)
+```
+
+#### **B. With `uv` **
 
 **Bash/Zsh:**
 ```sh
@@ -36,18 +47,14 @@ uv pip compile pyproject.toml > requirements.tx
 uv pip install -r requirements.txt
 ```
 
-#### **B. With `pip`**
-
-```sh
-pip install -r requirements.txt
-```
 
 #### **C. Install the local `power_spherical` package**
 
 ```sh
+cd src/power_spherical
 uv pip install -e ./src/power_spherical
-# or
-pip install -e ./src/power_spherical
+# OR (if using conda and/or venv)
+pip install -e .
 ```
 
 ---
@@ -58,32 +65,6 @@ pip install -e ./src/power_spherical
 cd src
 python clifford/mnist_clifford.py
 ```
-
-
-## example setup for bash/zsh 
-
-```sh
-uv venv .venv
-source .venv/bin/activate
-uv pip install -e ./src/power_spherical
-uv pip install -r <(uv pip compile pyproject.toml)
-cd src
-python clifford/mnist_clifford.py
-```
-
-
-## example setup (fish) 
-
-```fish
-uv venv .venv
-source .venv/bin/activate
-uv pip install -e ./src/power_spherical
-uv pip compile pyproject.toml > requirements.txt
-uv pip install -r requirements.txt
-cd src
-python clifford/mnist_clifford.py
-```
-
 ---
 
 ## References
