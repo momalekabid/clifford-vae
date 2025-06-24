@@ -56,7 +56,7 @@ pip install -e .
 
 ```sh
 cd src/clifford
-conda run mnist_clifford.py
+conda run python3 mnist_clifford.py
 ```
 ---
 
