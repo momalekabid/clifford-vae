@@ -1,0 +1,7 @@
+src/.venv
+src/clifford_vae.egg-info
+src/power_spherical/power_spherical.egg-info
+.DS_Store
+src/datasets
+src/clifford/__pycache__
+src/power_spherical/__pycache__
