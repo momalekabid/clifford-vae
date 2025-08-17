@@ -358,14 +358,14 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run vMF-VAE experiments on MNIST.")
     
-    parser.add_argument('--d_dims', type=int, nargs='+', default=[2, 5, 10, 20], help='Latent manifold dimensions to test')
+    parser.add_argument('--d_dims', type=int, nargs='+', default=[2, 5, 10, 20, 40], help='Latent manifold dimensions to test')
     parser.add_argument('--h_dim', type=int, default=128, help='Hidden layer size')
     
-    parser.add_argument('--epochs', type=int, default=1, help='Training epochs')
+    parser.add_argument('--epochs', type=int, default=500, help='Training epochs')
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience (0 to disable)')
-    parser.add_argument('--warmup_epochs', type=int, default=1, help='KL annealing warmup epochs')
+    parser.add_argument('--warmup_epochs', type=int, default=100, help='KL annealing warmup epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate') # modified for greater stability at d=40
 
     parser.add_argument('--n_runs', type=int, default=1, help='Number of runs for statistical averaging')
     parser.add_argument('--visualize', action='store_true', help='Generate visualizations')

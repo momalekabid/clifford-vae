@@ -24,8 +24,8 @@ python cnn/train_vcae.py --epochs 100 --batch_size 128 --l1_freq_weight=0.1
 
 **MLP VAE** (MNIST, replicating base experiments from the original paper):
 ```bash
-python mnist/mnist_most.py --d_dims 2 5 10 20 40 --visualize
-python mnist/mnist_vmf.py --d_dims 2 5 10 20 40 --visualize 
+python mnist/mnist_clifpws.py --visualize
+python mnist/mnist_vmf.py --visualize # optionally --no_wandb
 ```
 
 *CNN*
