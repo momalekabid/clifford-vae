@@ -4,28 +4,28 @@ PyTorch implementation of VAEs with different latent priors: Gaussian, PowerSphe
 
 ## Setup
 
-Install PyTorch first, then:
 ```bash
 pip install -r requirements.txt
 ```
-
+## conda (better for SLURM)
 conda:
 ```bash
 bash setup_conda.sh
 conda activate hvae
+cd vmf && pip3 install .
 ```
 
 ## Usage
 
 **CNN VAE** (FashionMNIST, higher dimensions: clifford, powerspherical, gaussian):
 ```bash
-python cnn/train_vcae.py --epochs 10 --batch_size 256
+python cnn/train_vcae.py --epochs 100 --batch_size 128 --l1_freq_weight=0.1 
 ```
 
 **MLP VAE** (MNIST, replicating base experiments from the original paper):
 ```bash
-python mnist/mnist_most.py --d_dims 2 5 10 20 --visualize
-python mnist/mnist_vmf.py --d_dims 2 5 10 20 --visualize  # vMF only
+python mnist/mnist_most.py --d_dims 2 5 10 20 40 --visualize
+python mnist/mnist_vmf.py --d_dims 2 5 10 20 40 --visualize 
 ```
 
 *CNN*
