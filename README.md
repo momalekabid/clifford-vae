@@ -1,68 +1,44 @@
-### 1. Clone the repository
+# Clifford and Hyperspherical VAEs
 
-```sh
-git clone https://github.com/momalekabid/clifford-vae.git
-cd clifford-vae
+PyTorch implementation of VAEs with different latent priors: Gaussian, PowerSpherical, and Clifford-torus. 
+
+## Setup
+
+Install PyTorch first, then:
+```bash
+pip install -r requirements.txt
 ```
 
----
-
-### 2. Create and activate a virtual environment
-```sh
-# using conda (for SLURM jobs on WatGPU)
-conda env create -f environment.yml
-conda activate clifford-vae # if using SLURM/GPU cluster script, use source instead of conda
-
-# using uv 
-uv venv .venv
-source .venv/bin/activate
-
-# using python directly, if not using uv
-python3 -m venv .venv
-source .venv/bin/activate
+conda:
+```bash
+bash setup_conda.sh
+conda activate hvae
 ```
 
+## Usage
 
-
----
-
-### 3. Install dependencies (ignore if using conda)
-#### **A. With `uv` **
-
-**Bash/Zsh:**
-```sh
-uv pip install -r <(uv pip compile pyproject.toml)
+**CNN VAE** (FashionMNIST, higher dimensions: clifford, powerspherical, gaussian):
+```bash
+python cnn/train_vcae.py --epochs 10 --batch_size 256
 ```
 
-**Fish shell:**
-```fish
-uv pip compile pyproject.toml > requirements.tx
-uv pip install -r requirements.txt
+**MLP VAE** (MNIST, replicating base experiments from the original paper):
+```bash
+python mnist/mnist_most.py --d_dims 2 5 10 20 --visualize
+python mnist/mnist_vmf.py --d_dims 2 5 10 20 --visualize  # vMF only
 ```
 
+*CNN*
+- `--recon_loss l1_freq`: L1 + frequency domain loss
+- `--use_perceptual`: add LPIPS perceptual loss (not tested)
+- `--no_wandb`: disable logging
+*MLP*
+- `--visualize`: generate t-SNE, PCA, reconstructions for MLP MNIST experiments
 
-#### **C. Install the local `power_spherical` package**
+## Folder structure 
+- `cnn/`: CNN VAE with advanced reconstruction losses
+- `mnist/`: MLP VAE experiments comparing distributions  
+- `dists/clifford.py`: custom hyperspherical distributions
+- `utils/wandb_utils.py`: Fourier/HRR property testing
 
-```sh
-cd src/power_spherical
-uv pip install -e . # editable mode for -e
-# OR (if using conda and/or venv)
-pip install -e .
-```
-
----
-
-### 4. Run a Clifford/Hyperspherical VAE experiment
-
-```sh
-cd src/clifford
-conda run python3 mnist_clifford.py
-```
----
-
-## References
-
-- [power_spherical github](https://github.com/nicola-decao/power_spherical)
-- [uv documentation](https://github.com/astral-sh/uv)
-- [original hyperspherical VAE paper](https://arxiv.org/abs/1804.00891)
-
+Results saved to `results/` and `visualizations/` with optional w&b logging.

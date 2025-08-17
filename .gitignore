@@ -1,7 +1,50 @@
-src/.venv
-src/clifford_vae.egg-info
-src/power_spherical/power_spherical.egg-info
+# macOS
 .DS_Store
-src/datasets
-src/clifford/__pycache__
-src/power_spherical/__pycache__
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Envs
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Editors / IDEs
+.idea/
+.vscode/
+
+# Data and results
+data/
+datasets/
+results/
+
+# Weights & Biases
+wandb/
+**/wandb/**
+
+# Logs and artifacts
+*.log
+*.ckpt
+*.pt
+*.png
+*.jpg
+*.jpeg
+
+# Jupyter
+.ipynb_checkpoints/

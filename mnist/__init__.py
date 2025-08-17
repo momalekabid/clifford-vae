@@ -1,0 +1,2 @@
+# MNIST MLP VAE package
+
