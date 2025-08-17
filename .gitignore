@@ -48,3 +48,5 @@ wandb/
 
 # Jupyter
 .ipynb_checkpoints/
+test_integration.py
+cnn/experimental/
