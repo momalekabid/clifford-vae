@@ -12,7 +12,7 @@ except Exception:
 
 
 def _conj_symmetry_fraction(F: torch.Tensor, atol: float = 1e-3) -> float:
-    # For real signals, F[k] == conj(F[N-k]) with DC and Nyquist (if even) real
+    # checking F[k] == conj(F[N-k])
     N = F.shape[-1]
     F_rev_conj = torch.conj(torch.flip(F, dims=(-1,)))
     mask = torch.ones(N, dtype=torch.bool, device=F.device)
@@ -39,13 +39,8 @@ def _unbind(ab: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 def test_fourier_properties(model, loader, device, output_dir, mode: str | None = None):
     """
-    Test Fourier/HRR properties of latent representations:
-    - Unit magnitude spectrum |F(z)| ≈ 1
-    - Conjugate symmetry for real signals
-    - Circular convolution binding/unbinding
+    checking that mean ~ |F(z)| ≈ 1
     """
-    # Verbosity control (no call-site changes needed). Set env FOURIER_LOGGING to: off | minimal | full
-    # Default to 'full' to preserve existing behavior; set to 'minimal' or 'off' to reduce logs.
     if mode is None:
         mode = os.getenv("FOURIER_LOGGING", "full").lower()
     mode = mode if mode in {"off", "minimal", "full"} else "full"
@@ -72,7 +67,6 @@ def test_fourier_properties(model, loader, device, output_dir, mode: str | None 
             else:
                 z = out
     except Exception as e:
-        print(f"❌ Error in model forward pass: {e}")
         return {
             'fourier_frac_within_0p05': 0.0,
             'fourier_max_dev': 999.0,
@@ -110,7 +104,7 @@ def test_fourier_properties(model, loader, device, output_dir, mode: str | None 
     mags_bind = torch.abs(torch.fft.fft(ab, dim=-1))
     dev_bind = torch.abs(mags_bind - target).mean().item()
 
-    unitary_ok = (frac_within > 0.95) and (max_dev < 0.2) and (conj_frac > 0.99) and (cos_sim > 0.98)
+    # unitary_ok = (frac_within > 0.95) and (max_dev < 0.2) and (conj_frac > 0.99) and (cos_sim > 0.98)
 
     def safe_hist(ax, data, title, target_line=None):
         data_flat = data.ravel()

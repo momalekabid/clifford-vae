@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms
+import torchvision.utils as tu
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.manifold import TSNE
@@ -34,8 +35,7 @@ def encode_dataset(model, loader, device):
 
 
 def perform_knn_evaluation(model, train_loader, test_loader, device, n_samples_list):
-    """knn classification on latent embeddings with multiple training sample sizes."""
-    print("knn eval in progress")
+    """k-NN classification on latent embeddings with multiple training sample sizes."""
     X_train_full, y_train_full = encode_dataset(model, train_loader, device)
     X_test, y_test = encode_dataset(model, test_loader, device)
     
@@ -43,10 +43,6 @@ def perform_knn_evaluation(model, train_loader, test_loader, device, n_samples_l
     metric = "cosine" if model.distribution in ["powerspherical", "clifford"] else "euclidean"
     
     for n_samples in n_samples_list:
-        if n_samples > len(X_train_full):
-            print(f"Warning: k-NN sample size {n_samples} > training data size {len(X_train_full)}. Skipping.")
-            continue
-
         indices = np.random.choice(len(X_train_full), n_samples, replace=False)
         X_train_sample, y_train_sample = X_train_full[indices], y_train_full[indices]
 
@@ -73,8 +69,7 @@ def plot_reconstructions(model, loader, device, filepath):
         recons = torch.sigmoid(x_recon.cpu()).view_as(originals)
         comparison = torch.cat([originals, recons])
         
-        import torchvision
-        grid = torchvision.utils.make_grid(comparison, nrow=8, pad_value=0.5)
+        grid = tu.make_grid(comparison, nrow=8, pad_value=0.5)
         
         plt.figure(figsize=(10, 3))
         plt.imshow(grid.permute(1, 2, 0))
@@ -99,7 +94,7 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
         interp_z = []
         alphas = torch.linspace(0, 1, steps, device=device)
 
-        if model.distribution == 'clifford':
+        if model.distribution == 'clifford': # 
             delta = z_mean2 - z_mean1
             delta_wrapped = (delta + math.pi) % (2 * math.pi) - math.pi
             interp_angles = z_mean1 + alphas.view(-1, 1) * delta_wrapped
@@ -123,8 +118,7 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
 
         x_recon_interp = torch.sigmoid(model.decoder(interp_z)).view(-1, 1, 28, 28)
         
-        import torchvision
-        grid = torchvision.utils.make_grid(x_recon_interp, nrow=steps, pad_value=0.5)
+        grid = tu.make_grid(x_recon_interp, nrow=steps, pad_value=0.5)
         plt.figure(figsize=(12, 2))
         plt.imshow(grid.cpu().permute(1, 2, 0))
         plt.title(f"Latent Space Interpolation ({model.distribution.upper()})")
@@ -217,8 +211,8 @@ def run(args):
     test_eval_loader = DataLoader(test_dataset, batch_size=1024)
     
     final_results = []
-    distributions_to_test = ["clifford"] #["normal", "powerspherical", "clifford"]
-    knn_samples = [100, 600, 1000]
+    distributions_to_test = ["normal", "powerspherical", "clifford"]
+    knn_samples = [50, 100, 600, 1000]
     logger = WandbLogger(args)
 
     for mdim in args.d_dims:
@@ -234,7 +228,6 @@ def run(args):
                 model_z_dim = mdim
 
             if dist == "clifford" and mdim < 2:
-                print(f"\nSkipping Clifford for d={mdim} (requires d>=2).")
                 continue
 
             print(f"\n--- Testing {dist.upper()}-VAE with d={mdim} (model z_dim={model_z_dim}) ---")
@@ -378,10 +371,10 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run VAE experiments on MNIST, contrasting clifford/gaussian/powerspherical")
     
-    parser.add_argument('--d_dims', type=int, nargs='+', default=[2, 5, 10, 20, 40], help='Latent manifold dimensions to test')
+    parser.add_argument('--d_dims', type=int, nargs='+', default=[2, 5, 10, 20, 40, 80, 128, 256], help='Latent manifold dimensions to test')
     parser.add_argument('--h_dim', type=int, default=128, help='Hidden layer size')
     
-    parser.add_argument('--epochs', type=int, default=500, help='Training epochs')
+    parser.add_argument('--epochs', type=int, default=200, help='Training epochs')
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience (0 to disable)')
     parser.add_argument('--warmup_epochs', type=int, default=100 help='KL annealing warmup epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')

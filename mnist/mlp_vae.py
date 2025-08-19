@@ -18,8 +18,6 @@ from dists.clifford import (
 class MLPVAE(nn.Module):
     def __init__(self, h_dim: int, z_dim: int, distribution: str = "normal"):
         super().__init__()
-        if distribution not in ["normal", "powerspherical", "vmf", "clifford"]:
-            raise ValueError(f"Unsupported distribution: {distribution}")
         self.z_dim = z_dim
         self.distribution = distribution
 

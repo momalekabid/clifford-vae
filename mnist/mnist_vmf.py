@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms
+import torchvision.utils as tu
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.manifold import TSNE
@@ -18,13 +19,11 @@ from mnist.mlp_vae import MLPVAE, vae_loss
 
 
 class BinarizeWithRandomThreshold:
-    """Binarizes a tensor by comparing each element to a random value."""
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         return (x > torch.rand_like(x)).float()
 
 
 def encode_dataset(model, loader, device):
-    """Encodes a full dataset into latent mean representations."""
     model.eval()
     zs, ys = [], []
     with torch.no_grad():
@@ -37,12 +36,11 @@ def encode_dataset(model, loader, device):
 
 def perform_knn_evaluation(model, train_loader, test_loader, device, n_samples_list):
     """k-NN classification on latent embeddings with multiple training sample sizes."""
-    print("Performing k-NN evaluation...")
     X_train_full, y_train_full = encode_dataset(model, train_loader, device)
     X_test, y_test = encode_dataset(model, test_loader, device)
     
     results = {}
-    metric = "cosine"  # vMF uses cosine metric
+    metric = "cosine"
     
     for n_samples in n_samples_list:
         if n_samples > len(X_train_full):
@@ -74,8 +72,7 @@ def plot_reconstructions(model, loader, device, filepath):
         recons = torch.sigmoid(x_recon.cpu()).view_as(originals)
         comparison = torch.cat([originals, recons])
         
-        import torchvision
-        grid = torchvision.utils.make_grid(comparison, nrow=8, pad_value=0.5)
+        grid = tu.make_grid(comparison, nrow=8, pad_value=0.5)
         
         plt.figure(figsize=(10, 3))
         plt.imshow(grid.permute(1, 2, 0))
@@ -108,8 +105,7 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
 
         x_recon_interp = torch.sigmoid(model.decoder(interp_z)).view(-1, 1, 28, 28)
         
-        import torchvision
-        grid = torchvision.utils.make_grid(x_recon_interp, nrow=steps, pad_value=0.5)
+        grid = tu.make_grid(x_recon_interp, nrow=steps, pad_value=0.5)
         plt.figure(figsize=(12, 2))
         plt.imshow(grid.cpu().permute(1, 2, 0))
         plt.title(f"Latent Space Interpolation (vMF)")
@@ -361,7 +357,7 @@ if __name__ == "__main__":
     parser.add_argument('--d_dims', type=int, nargs='+', default=[2, 5, 10, 20, 40], help='Latent manifold dimensions to test')
     parser.add_argument('--h_dim', type=int, default=128, help='Hidden layer size')
     
-    parser.add_argument('--epochs', type=int, default=500, help='Training epochs')
+    parser.add_argument('--epochs', type=int, default=200, help='Training epochs')
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience (0 to disable)')
     parser.add_argument('--warmup_epochs', type=int, default=100, help='KL annealing warmup epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')

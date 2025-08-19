@@ -27,10 +27,9 @@ def _von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
     return torch.log(torch.tensor(2 * math.pi, device=kappa.device, dtype=kappa.dtype)) + log_i0 - kappa * ratio_i1_i0
 
 
-# Prefer PyTorch 2.x runtime compilation for speed; gracefully fall back if unavailable
-try:  # torch.compile is introduced in PyTorch 2.0
-    compiled_von_mises_entropy = torch.compile(_von_mises_entropy)  # type: ignore[attr-defined]
-except Exception:  # noqa: BLE001 - fall back to eager when compile is not available/supported
+try:
+    compiled_von_mises_entropy = torch.compile(_von_mises_entropy) 
+except Exception: 
     compiled_von_mises_entropy = _von_mises_entropy
 
 
@@ -221,7 +220,6 @@ class CliffordTorusDistribution(Distribution):
         theta_collection = self._von_mises.sample(sample_shape)
         n = 2 * self.orig_dim
         theta_s = torch.zeros((*theta_collection.shape[:-1], n), device=self.loc.device, dtype=self.loc.dtype)
-        # conjugate-symmetric phases in frequency domain
         theta_s[..., 1:self.orig_dim] = theta_collection[..., 1:]
         theta_s[..., -self.orig_dim + 1 :] = -torch.flip(theta_collection[..., 1:], dims=(-1,))
         samples_complex = torch.exp(1j * theta_s)

@@ -5,10 +5,13 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+import torchvision.utils as tu
 import matplotlib.pyplot as plt
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
+
 
 import sys
 import os
@@ -63,11 +66,10 @@ def save_reconstructions(model, loader, device, path, n_images=10):
     x = x[:n_images].to(device)
     with torch.no_grad():
         x_recon, _, _, _ = model(x)
-    import torchvision
 
     grid = torch.cat([x.cpu(), x_recon.cpu()], dim=0)
     grid = (grid * 0.5 + 0.5).clamp(0, 1)
-    torchvision.utils.save_image(grid, path, nrow=n_images)
+    tu.save_image(grid, path, nrow=n_images)
     return path
 
 
@@ -95,7 +97,6 @@ def generate_tsne_plot(model, loader, device, path, n_samples=2000):
 
 
 def generate_pca_plot(model, loader, device, path, n_samples=2000):
-    from sklearn.decomposition import PCA
     model.eval()
     latents, labels = [], []
     with torch.no_grad():
@@ -113,7 +114,7 @@ def generate_pca_plot(model, loader, device, path, n_samples=2000):
     
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
     
-    # PCA scatter plot (first 2 components)
+    # 2 component pca
     sc = ax1.scatter(Z_pca[:, 0], Z_pca[:, 1], c=Y, cmap="tab10", s=8, alpha=0.8)
     ax1.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)')
     ax1.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)')
@@ -306,14 +307,14 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--epochs", type=int, default=10)
-    p.add_argument("--warmup_epochs", type=int, default=10)
-    p.add_argument("--batch_size", type=int, default=256)
-    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--epochs", type=int, default=200)
+    p.add_argument("--warmup_epochs", type=int, default=100)
+    p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--recon_loss", type=str, default="l1_freq", choices=["mse", "l1_freq"])
-    p.add_argument("--use_perceptual", action="store_true", help="Use perceptual LPIPS loss")
+    p.add_argument("--use_perceptual", action="store_true", help="Use perceptual LPIPS loss (untested)")
     p.add_argument("--l1_weight", type=float, default=1.0, help="Weight for L1 pixel loss")
-    p.add_argument("--freq_weight", type=float, default=0.25, help="Weight for frequency domain loss")
+    p.add_argument("--freq_weight", type=float, default=0.1, help="Weight for frequency domain loss")
     p.add_argument("--max_beta", type=float, default=1.0)
     p.add_argument("--no_wandb", action="store_true")
     p.add_argument("--wandb_project", type=str, default="aug-17-vcae")
