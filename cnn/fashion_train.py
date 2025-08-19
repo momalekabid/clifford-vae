@@ -15,6 +15,7 @@ from sklearn.decomposition import PCA
 
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cnn.models import VAE
@@ -108,33 +109,37 @@ def generate_pca_plot(model, loader, device, path, n_samples=2000):
                 break
     Z = np.concatenate(latents)[:n_samples]
     Y = np.concatenate(labels)[:n_samples]
-    
+
     pca = PCA(n_components=min(50, Z.shape[1]))
     Z_pca = pca.fit_transform(Z)
-    
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-    
+
     # 2 component pca
     sc = ax1.scatter(Z_pca[:, 0], Z_pca[:, 1], c=Y, cmap="tab10", s=8, alpha=0.8)
-    ax1.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)')
-    ax1.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)')
+    ax1.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)")
+    ax1.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)")
     ax1.set_title("PCA of Latent Means (μ)")
     plt.colorbar(sc, ax=ax1, ticks=np.unique(Y))
-    
+
     # explained variance plot
     n_components = min(20, len(pca.explained_variance_ratio_))
     ax2.bar(range(1, n_components + 1), pca.explained_variance_ratio_[:n_components])
-    ax2.set_xlabel('Principal Component')
-    ax2.set_ylabel('Explained Variance Ratio')
-    ax2.set_title(f'PCA Explained Variance\n(Total: {pca.explained_variance_ratio_.sum():.1%})')
-    
+    ax2.set_xlabel("Principal Component")
+    ax2.set_ylabel("Explained Variance Ratio")
+    ax2.set_title(
+        f"PCA Explained Variance\n(Total: {pca.explained_variance_ratio_.sum():.1%})"
+    )
+
     plt.tight_layout()
-    plt.savefig(path, dpi=200, bbox_inches='tight')
+    plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
     return path
 
 
-def perform_knn_evaluation(model, train_loader, test_loader, device, n_samples_list=[100, 600, 1000, 2048]):
+def perform_knn_evaluation(
+    model, train_loader, test_loader, device, n_samples_list=[100, 600, 1000, 2048]
+):
     """k-nn classification on latent embeddings with multiple training sample sizes."""
     print("knn eval in progress")
     model.eval()
@@ -150,14 +155,20 @@ def perform_knn_evaluation(model, train_loader, test_loader, device, n_samples_l
 
     X_train_full, y_train_full = encode_dataset(train_loader)
     X_test, y_test = encode_dataset(test_loader)
-    
+
     # cosine metric for hyperspherical distributions
-    metric = "cosine" if getattr(model, 'distribution', None) in ["powerspherical", "clifford"] else "euclidean"
-    
+    metric = (
+        "cosine"
+        if getattr(model, "distribution", None) in ["powerspherical", "clifford"]
+        else "euclidean"
+    )
+
     results = {}
     for n_samples in n_samples_list:
         if n_samples > len(X_train_full):
-            print(f"Warning: k-NN sample size {n_samples} > training data size {len(X_train_full)}. Skipping.")
+            print(
+                f"Warning: k-NN sample size {n_samples} > training data size {len(X_train_full)}. Skipping."
+            )
             continue
 
         indices = np.random.choice(len(X_train_full), n_samples, replace=False)
@@ -165,15 +176,15 @@ def perform_knn_evaluation(model, train_loader, test_loader, device, n_samples_l
 
         knn = KNeighborsClassifier(n_neighbors=5, metric=metric)
         knn.fit(X_train_sample, y_train_sample)
-        
+
         y_pred = knn.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
         f1 = f1_score(y_test, y_pred, average="macro")
-        
+
         results[f"knn_acc_{n_samples}"] = float(accuracy)
         results[f"knn_f1_{n_samples}"] = float(f1)
         print(f"knn accuracy with {n_samples} training samples: {accuracy:.4f}")
-        
+
     return results
 
 
@@ -288,6 +299,20 @@ def main(args):
                         model, train_loader, test_loader, DEVICE, [100, 600, 1000, 2048]
                     )
 
+                    fourier_metrics = {
+                        k: v
+                        for k, v in fourier.items()
+                        if isinstance(v, (int, float, bool))
+                    }
+
+                    logger.log_metrics(
+                        {
+                            **knn_metrics,
+                            **fourier_metrics,
+                            "final_best_loss": best,
+                        }
+                    )
+
                     images = {
                         "fft_spectrum": fourier.pop("fft_spectrum_plot_path"),
                         "reconstructions": recon_path,
@@ -301,6 +326,13 @@ def main(args):
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)
+                    # summary = {
+                    #     "final_best_loss": best,
+                    #     **fourier,
+                    #     **knn_metrics,
+                    # }
+                    # logger.log_summary(summary)
+                    # logger.log_images(images)
 
                 logger.finish_run()
 
@@ -311,15 +343,25 @@ if __name__ == "__main__":
     p.add_argument("--warmup_epochs", type=int, default=100)
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--recon_loss", type=str, default="l1_freq", choices=["mse", "l1_freq"])
-    p.add_argument("--use_perceptual", action="store_true", help="Use perceptual LPIPS loss (untested)")
-    p.add_argument("--l1_weight", type=float, default=1.0, help="Weight for L1 pixel loss")
-    p.add_argument("--freq_weight", type=float, default=0.1, help="Weight for frequency domain loss")
+    p.add_argument(
+        "--recon_loss", type=str, default="l1_freq", choices=["mse", "l1_freq"]
+    )
+    p.add_argument(
+        "--use_perceptual",
+        action="store_true",
+        help="Use perceptual LPIPS loss (untested)",
+    )
+    p.add_argument(
+        "--l1_weight", type=float, default=1.0, help="Weight for L1 pixel loss"
+    )
+    p.add_argument(
+        "--freq_weight",
+        type=float,
+        default=0.1,
+        help="Weight for frequency domain loss",
+    )
     p.add_argument("--max_beta", type=float, default=1.0)
     p.add_argument("--no_wandb", action="store_true")
     p.add_argument("--wandb_project", type=str, default="aug-19-fashionmnist")
     args = p.parse_args()
     main(args)
-
-
-
