@@ -62,7 +62,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
             'similarity_after_k_binds_plot_path': None,
         }
 
-    Fz = torch.fft.fft(z, dim=-1)
+    Fz = torch.fft.fft(z, dim=-1, norm="ortho")
     mags = torch.abs(Fz)
     phases = torch.angle(Fz)
     target = 1.0
@@ -151,7 +151,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
     try:
         avg_mag = mags.mean(dim=0).detach().cpu().numpy()
         n = avg_mag.shape[-1]
-        uniform = 1.0 / math.sqrt(n)
+        uniform = 1.0
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -180,7 +180,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
         path_avg = os.path.join(output_dir, 'fourier_avg_spectrum.png')
         plt.figure(figsize=(11, 6))
         plt.plot(avg_mag, label='Average |FFT(z)|')
-        plt.axhline(y=uniform, color='r', linestyle='--', label=f'Uniform value (1/√{n})')
+        plt.axhline(y=uniform, color='r', linestyle='--', label='Uniform value (1.0)')
         plt.title('Average FFT Magnitude Spectrum of Encoded Vectors')
         plt.xlabel('Frequency Index')
         plt.ylabel('Magnitude')
