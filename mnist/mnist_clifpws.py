@@ -376,14 +376,14 @@ if __name__ == "__main__":
     
     parser.add_argument('--epochs', type=int, default=200, help='Training epochs')
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience (0 to disable)')
-    parser.add_argument('--warmup_epochs', type=int, default=100 help='KL annealing warmup epochs')
+    parser.add_argument('--warmup_epochs', type=int, default=100, help='KL annealing warmup epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
 
-    parser.add_argument('--n_runs', type=int, default=1, help='Number of runs for statistical averaging')
+    parser.add_argument('--n_runs', type=int, default=5, help='Number of runs (original paper param is 20)')
     parser.add_argument('--visualize', action='store_true', help='Generate visualizations')
     parser.add_argument('--no_wandb', action='store_true', help='Disable W&B logging')
-    parser.add_argument('--wandb_project', type=str, default='aug-17-mostvae', help='W&B project name')
+    parser.add_argument('--wandb_project', type=str, default='aug-19-mnistclifpws', help='W&B project name')
     
     args = parser.parse_args()
     run(args)
