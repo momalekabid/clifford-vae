@@ -113,24 +113,12 @@ def generate_pca_plot(model, loader, device, path, n_samples=2000):
     pca = PCA(n_components=min(50, Z.shape[1]))
     Z_pca = pca.fit_transform(Z)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-
-    # 2 component pca
-    sc = ax1.scatter(Z_pca[:, 0], Z_pca[:, 1], c=Y, cmap="tab10", s=8, alpha=0.8)
-    ax1.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)")
-    ax1.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)")
-    ax1.set_title("PCA of Latent Means (μ)")
-    plt.colorbar(sc, ax=ax1, ticks=np.unique(Y))
-
-    # explained variance plot
-    n_components = min(20, len(pca.explained_variance_ratio_))
-    ax2.bar(range(1, n_components + 1), pca.explained_variance_ratio_[:n_components])
-    ax2.set_xlabel("Principal Component")
-    ax2.set_ylabel("Explained Variance Ratio")
-    ax2.set_title(
-        f"PCA Explained Variance\n(Total: {pca.explained_variance_ratio_.sum():.1%})"
-    )
-
+    plt.figure(figsize=(8, 6))
+    sc = plt.scatter(Z_pca[:, 0], Z_pca[:, 1], c=Y, cmap="tab10", s=8, alpha=0.8)
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
+    plt.title("PCA of Latent Means (μ)")
+    plt.colorbar(sc, ticks=np.unique(Y))
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -242,10 +230,12 @@ def main(args):
                     use_perceptual_loss=args.use_perceptual,
                     l1_weight=args.l1_weight,
                     freq_weight=args.freq_weight,
+                    fourier_mag_weight=args.fourier_weight,
                 )
                 logger.watch_model(model)
                 optimizer = optim.AdamW(model.parameters(), lr=args.lr)
                 best = float("inf")
+                patience_counter = 0
 
                 for epoch in range(args.epochs):
                     beta = min(1.0, (epoch + 1) / args.warmup_epochs) * args.max_beta
@@ -257,6 +247,9 @@ def main(args):
                     if np.isfinite(val) and val < best:
                         best = val
                         torch.save(model.state_dict(), f"{output_dir}/best_model.pt")
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
                     logger.log_metrics(
                         {
                             "epoch": epoch,
@@ -266,6 +259,10 @@ def main(args):
                             "beta": beta,
                         }
                     )
+
+                    if args.patience > 0 and patience_counter >= args.patience:
+                        print(f"Early stopping at epoch {epoch+1} (no improvement for {args.patience} epochs)")
+                        break
 
                 print(f"best loss: {best:.4f}")
 
@@ -314,11 +311,16 @@ def main(args):
                     )
 
                     images = {
-                        "fft_spectrum": fourier.pop("fft_spectrum_plot_path"),
+                        "fft_spectrum": fourier.pop("fft_spectrum_plot_path", None),
                         "reconstructions": recon_path,
                         "tsne": tsne_path,
                         "pca": pca_path,
                     }
+                    # add similarity-after-k-binds curve if produced
+                    if "similarity_after_k_binds_plot_path" in fourier and fourier["similarity_after_k_binds_plot_path"]:
+                        images["similarity_after_k_binds"] = fourier["similarity_after_k_binds_plot_path"]
+                    if "fft_avg_spectrum_plot_path" in fourier and fourier["fft_avg_spectrum_plot_path"]:
+                        images["fft_avg_spectrum"] = fourier["fft_avg_spectrum_plot_path"]
                     summary = {
                         "final_best_loss": best,
                         **fourier,
@@ -363,5 +365,7 @@ if __name__ == "__main__":
     p.add_argument("--max_beta", type=float, default=1.0)
     p.add_argument("--no_wandb", action="store_true")
     p.add_argument("--wandb_project", type=str, default="aug-19-fashionmnist")
+    p.add_argument("--patience", type=int, default=10)
+    p.add_argument("--fourier_weight", type=float, default=0.0, help="Weight for latent FFT magnitude regularization")
     args = p.parse_args()
     main(args)

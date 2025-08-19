@@ -58,7 +58,7 @@ class Decoder(nn.Module):
 class VAE(nn.Module):
     def __init__(self, latent_dim: int, in_channels: int, distribution: str, device: str,
                  recon_loss_type: str = 'l1_freq', use_perceptual_loss: bool = False, 
-                 l1_weight: float = 1.0, freq_weight: float = 1.0):
+                 l1_weight: float = 1.0, freq_weight: float = 1.0, fourier_mag_weight: float = 0.0):
         super().__init__()
         self.latent_dim = latent_dim
         self.distribution = distribution
@@ -68,6 +68,7 @@ class VAE(nn.Module):
         self.l1_weight = l1_weight
         self.freq_weight = freq_weight
         self.use_perceptual_loss = use_perceptual_loss
+        self.fourier_mag_weight = fourier_mag_weight
         
         self.encoder = Encoder(latent_dim, in_channels=in_channels, distribution=distribution)
         dec_in_dim = 2 * latent_dim if distribution == 'clifford' else latent_dim
@@ -150,6 +151,22 @@ class VAE(nn.Module):
             recon_loss += self.lpips_loss_fn(x_recon_for_loss, x_for_loss).mean()
             
         total_loss = recon_loss + beta * kld
+
+        # optional Fourier magnitude regularization on latent samples when available
+        try:
+            if self.fourier_mag_weight > 0:
+                # get a latent sample deterministically from q_z (mean if possible; else rsample)
+                if hasattr(q_z, 'mean') and isinstance(q_z.mean, torch.Tensor):
+                    z_for_fft = q_z.mean
+                else:
+                    z_for_fft = q_z.rsample()
+                Fz = torch.fft.fft(z_for_fft, dim=-1)
+                mags = torch.abs(Fz)
+                target_mag = torch.ones_like(mags)
+                fourier_mag_penalty = F.l1_loss(mags, target_mag)
+                total_loss = total_loss + self.fourier_mag_weight * fourier_mag_penalty
+        except Exception:
+            pass
         return {
             'total_loss': total_loss,
             'recon_loss': recon_loss,

@@ -306,8 +306,13 @@ def run(args):
                             "Latent PCA": pca_path,
                             "Interpolations": interp_path
                         }
-                        if fourier_results and "fft_spectrum_plot_path" in fourier_results:
-                            images_to_log["Fourier_Analysis"] = fourier_results["fft_spectrum_plot_path"]
+                        if fourier_results:
+                            if "fft_spectrum_plot_path" in fourier_results and fourier_results["fft_spectrum_plot_path"]:
+                                images_to_log["Fourier_Analysis"] = fourier_results["fft_spectrum_plot_path"]
+                            if "fft_avg_spectrum_plot_path" in fourier_results and fourier_results["fft_avg_spectrum_plot_path"]:
+                                images_to_log["Fourier_Avg_Spectrum"] = fourier_results["fft_avg_spectrum_plot_path"]
+                            if "similarity_after_k_binds_plot_path" in fourier_results and fourier_results["similarity_after_k_binds_plot_path"]:
+                                images_to_log["Similarity_After_K_Binds"] = fourier_results["similarity_after_k_binds_plot_path"]
                         logger.log_images(images_to_log)
 
                 if logger.use:

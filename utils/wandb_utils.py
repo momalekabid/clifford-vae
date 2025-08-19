@@ -11,18 +11,6 @@ except Exception:
     wandb = None
 
 
-def _conj_symmetry_fraction(F: torch.Tensor, atol: float = 1e-3) -> float:
-    # checking F[k] == conj(F[N-k])
-    N = F.shape[-1]
-    F_rev_conj = torch.conj(torch.flip(F, dims=(-1,)))
-    mask = torch.ones(N, dtype=torch.bool, device=F.device)
-    mask[0] = False
-    if N % 2 == 0:
-        mask[N // 2] = False
-    diff = torch.abs(F[..., mask] - F_rev_conj[..., mask])
-    return float((diff <= atol).float().mean().item())
-
-
 def _unit_magnitude_fraction(F: torch.Tensor, tol: float = 0.05) -> float:
     mags = torch.abs(F)
     return float((torch.abs(mags - 1.0) < tol).float().mean().item())
@@ -37,15 +25,7 @@ def _unbind(ab: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.fft.ifft(torch.fft.fft(ab, dim=-1) * torch.conj(Fb), dim=-1).real
 
 
-def test_fourier_properties(model, loader, device, output_dir, mode: str | None = None):
-    """
-    checking that mean ~ |F(z)| ≈ 1
-    """
-    if mode is None:
-        mode = os.getenv("FOURIER_LOGGING", "full").lower()
-    mode = mode if mode in {"off", "minimal", "full"} else "full"
-    if mode == "off":
-        return {}
+def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int = 5):
     try:
         model.eval()
         with torch.no_grad():
@@ -71,7 +51,6 @@ def test_fourier_properties(model, loader, device, output_dir, mode: str | None 
             'fourier_frac_within_0p05': 0.0,
             'fourier_max_dev': 999.0,
             'fourier_mean_dev': 999.0,
-            'fourier_conj_symmetry_frac': 0.0,
             'fourier_phase_std': 0.0,
             'binding_unbinding_cosine': 0.0,
             'binding_magnitude_mean_dev': 999.0,
@@ -79,6 +58,8 @@ def test_fourier_properties(model, loader, device, output_dir, mode: str | None 
             'fourier_mean_magnitude': 0.0,
             'fourier_magnitude_std': 0.0,
             'fourier_flatness_mse': 999.0,
+            'binding_k_self_similarity': 0.0,
+            'similarity_after_k_binds_plot_path': None,
         }
 
     Fz = torch.fft.fft(z, dim=-1)
@@ -91,20 +72,28 @@ def test_fourier_properties(model, loader, device, output_dir, mode: str | None 
     mean_dev = dev.mean().item()
     max_dev = dev.max().item()
     frac_within = _unit_magnitude_fraction(Fz, tol=0.05)
-    conj_frac = _conj_symmetry_fraction(Fz, atol=1e-3)
     phase_std = phases.std().item()
     flat_mse = F.mse_loss(mags.mean(dim=0), torch.full_like(mags.mean(dim=0), target)).item()
 
-    # binding/unbinding check
     a = z[:1]
-    b = z[1:2] if z.shape[0] > 1 else z[:1].roll(1, dims=-1)
-    ab = _bind(a, b)
-    a_hat = _unbind(ab, b)
-    cos_sim = torch.nn.functional.cosine_similarity(a_hat, a, dim=-1).mean().item()
-    mags_bind = torch.abs(torch.fft.fft(ab, dim=-1))
-    dev_bind = torch.abs(mags_bind - target).mean().item()
+    ab = a.clone()
+    for _ in range(k_self_bind):
+        ab = _bind(ab, a)
+    for _ in range(k_self_bind):
+        ab = _unbind(ab, a)
+    cos_sim = torch.nn.functional.cosine_similarity(ab, a, dim=-1).mean().item()
 
-    # unitary_ok = (frac_within > 0.95) and (max_dev < 0.2) and (conj_frac > 0.99) and (cos_sim > 0.98)
+    # sim curve over m = 1..k_self_bind
+    sims = []
+    for m in range(1, k_self_bind + 1):
+        cur = a.clone()
+        for _ in range(m):
+            cur = _bind(cur, a)
+        for _ in range(m):
+            cur = _unbind(cur, a)
+        sim_m = torch.nn.functional.cosine_similarity(cur, a, dim=-1).mean().item()
+        sims.append(sim_m)
+
 
     def safe_hist(ax, data, title, target_line=None):
         data_flat = data.ravel()
@@ -157,52 +146,78 @@ def test_fourier_properties(model, loader, device, output_dir, mode: str | None 
         ax.grid(True, alpha=0.3)
 
     path = None
-    if mode == "full":
+    path_avg = None
+    path_bind_curve = None
+    try:
+        avg_mag = mags.mean(dim=0).detach().cpu().numpy()
+        n = avg_mag.shape[-1]
+        uniform = 1.0 / math.sqrt(n)
+
+        os.makedirs(output_dir, exist_ok=True)
+
         try:
             fig, axes = plt.subplots(2, 2, figsize=(11, 8))
             safe_hist(axes[0, 0], mags.cpu().numpy(), '|F(z)|', target)
             safe_hist(axes[0, 1], phases.cpu().numpy(), 'angle(F(z))')
             safe_hist(axes[1, 0], torch.abs(torch.fft.fft(ab, dim=-1)).cpu().numpy(), '|F(bind)|', target)
-            
             try:
                 axes[1, 1].imshow(dev.cpu().numpy(), aspect='auto', cmap='viridis')
-            except:
+            except Exception:
                 dev_flat = dev.cpu().numpy().ravel()
                 axes[1, 1].plot(dev_flat[:min(100, len(dev_flat))], 'o', markersize=2)
                 axes[1, 1].set_xlabel('Sample')
                 axes[1, 1].set_ylabel('Deviation')
             axes[1, 1].set_title('Deviation |F|-1')
-            
-            os.makedirs(output_dir, exist_ok=True)
             path = os.path.join(output_dir, 'fourier_analysis.png')
             plt.tight_layout()
             plt.savefig(path, dpi=200, bbox_inches='tight')
             plt.close()
             print(f"Fourier prop plot saved: {path}")
-        except Exception as e:
-            print(f"Warning: Failed to plot fourier analysis : {e}")
-            if 'fig' in locals():
-                plt.close(fig)
+        except Exception:
+            pass
 
-    if mode == "minimal":
-        return {
-            'fourier_frac_within_0p05': frac_within,
-            'fourier_conj_symmetry_frac': conj_frac,
-        }
-    else:  # full
-        return {
-            'fourier_frac_within_0p05': frac_within,
-            'fourier_max_dev': max_dev,
-            'fourier_mean_dev': mean_dev,
-            'fourier_conj_symmetry_frac': conj_frac,
-            'fourier_phase_std': phase_std,
-            'binding_unbinding_cosine': cos_sim,
-            'binding_magnitude_mean_dev': dev_bind,
-            'fft_spectrum_plot_path': path,
-            'fourier_mean_magnitude': mean_mag,
-            'fourier_magnitude_std': std_mag,
-            'fourier_flatness_mse': flat_mse,
-        }
+        # new avg magnitude spectrum
+        path_avg = os.path.join(output_dir, 'fourier_avg_spectrum.png')
+        plt.figure(figsize=(11, 6))
+        plt.plot(avg_mag, label='Average |FFT(z)|')
+        plt.axhline(y=uniform, color='r', linestyle='--', label=f'Uniform value (1/√{n})')
+        plt.title('Average FFT Magnitude Spectrum of Encoded Vectors')
+        plt.xlabel('Frequency Index')
+        plt.ylabel('Magnitude')
+        plt.legend(loc='upper left')
+        plt.tight_layout()
+        plt.savefig(path_avg, dpi=200, bbox_inches='tight')
+        plt.close()
+        print(f"Fourier average spectrum saved: {path_avg}")
+        # similarity after k binds curve
+        path_bind_curve = os.path.join(output_dir, 'similarity_after_k_binds.png')
+        plt.figure(figsize=(7, 4))
+        xs = np.arange(1, k_self_bind + 1)
+        plt.plot(xs, sims, marker='o')
+        plt.ylim(0.0, 1.05)
+        plt.xlabel('m (bind m times then unbind m times)')
+        plt.ylabel('Cosine similarity to original')
+        plt.title('Similarity After K Binds')
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(path_bind_curve, dpi=200, bbox_inches='tight')
+        plt.close()
+    except Exception as e:
+        print(f"Warning: Failed to plot fourier magnitude spectrum: {e}")
+
+    return {
+        'fourier_frac_within_0p05': frac_within,
+        'fourier_phase_std': phase_std,
+        'fourier_flatness_mse': flat_mse,
+        'binding_k_self_similarity': cos_sim,
+        'fourier_mean_magnitude': mean_mag,
+        'fourier_magnitude_std': std_mag,
+        'fourier_mean_dev': mean_dev,
+        'fourier_max_dev': max_dev,
+        'fft_spectrum_plot_path': path,
+        'fft_avg_spectrum_plot_path': path_avg,
+        'similarity_after_k_binds_plot_path': path_bind_curve,
+    }
 
 
 class WandbLogger:

@@ -7,6 +7,7 @@ from torchvision import datasets, transforms
 import torchvision.utils as tu
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score
+from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import math
@@ -162,7 +163,6 @@ def plot_latent_space(model, loader, device, filepath, n_plot=2000):
 
 def plot_pca_analysis(model, loader, device, filepath, n_plot=2000):
     """PCA analysis: scatter + explained variance."""
-    from sklearn.decomposition import PCA
     print(f"pca analysis for {n_plot} points...")
     X_z, y = encode_dataset(model, loader, device)
     X_z, y = X_z[:n_plot], y[:n_plot]
@@ -319,8 +319,13 @@ def run(args):
                                 "Latent PCA": pca_path,
                                 "Interpolations": interp_path
                             }
-                            if fourier_results and "fft_spectrum_plot_path" in fourier_results:
-                                images_to_log["Fourier_Analysis"] = fourier_results["fft_spectrum_plot_path"]
+                            if fourier_results:
+                                if "fft_spectrum_plot_path" in fourier_results and fourier_results["fft_spectrum_plot_path"]:
+                                    images_to_log["Fourier_Analysis"] = fourier_results["fft_spectrum_plot_path"]
+                                if "similarity_after_k_binds_plot_path" in fourier_results and fourier_results["similarity_after_k_binds_plot_path"]:
+                                    images_to_log["Similarity_After_K_Binds"] = fourier_results["similarity_after_k_binds_plot_path"]
+                                if "fft_avg_spectrum_plot_path" in fourier_results and fourier_results["fft_avg_spectrum_plot_path"]:
+                                    images_to_log["Fourier_Avg_Spectrum"] = fourier_results["fft_avg_spectrum_plot_path"]
                             logger.log_images(images_to_log)
 
                     if logger.use:
@@ -374,16 +379,16 @@ if __name__ == "__main__":
     parser.add_argument('--d_dims', type=int, nargs='+', default=[2, 5, 10, 20, 40, 80, 128, 256], help='Latent manifold dimensions to test')
     parser.add_argument('--h_dim', type=int, default=128, help='Hidden layer size')
     
-    parser.add_argument('--epochs', type=int, default=200, help='Training epochs')
+    parser.add_argument('--epochs', type=int, default=100, help='Training epochs')
     parser.add_argument('--patience', type=int, default=10, help='Early stopping patience (0 to disable)')
     parser.add_argument('--warmup_epochs', type=int, default=100, help='KL annealing warmup epochs')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
 
-    parser.add_argument('--n_runs', type=int, default=5, help='Number of runs (original paper param is 20)')
+    parser.add_argument('--n_runs', type=int, default=1, help='Number of runs (original paper param is 20)')
     parser.add_argument('--visualize', action='store_true', help='Generate visualizations')
     parser.add_argument('--no_wandb', action='store_true', help='Disable W&B logging')
-    parser.add_argument('--wandb_project', type=str, default='aug-19-mnistclifpws', help='W&B project name')
+    parser.add_argument('--wandb_project', type=str, default='bae-1', help='W&B project name')
     
     args = parser.parse_args()
     run(args)
