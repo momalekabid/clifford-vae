@@ -119,6 +119,9 @@ class VAE(nn.Module):
         return x_recon, q_z, p_z, mu
 
     def compute_loss(self, x, x_recon, q_z, p_z, beta=1.0):
+        B = x.size(0)
+
+        # KL: sum across latent dims for Gaussian; others already return per-sample
         if self.distribution == 'gaussian':
             kld = torch.distributions.kl.kl_divergence(q_z, p_z).sum(dim=1).mean()
         else:
@@ -127,12 +130,15 @@ class VAE(nn.Module):
         recon_loss = 0.0
 
         if self.recon_loss_type == 'mse':
-            recon_loss = F.mse_loss(x_recon, x)
+            # sum over pixels, average over batch
+            recon_loss = F.mse_loss(x_recon, x, reduction='sum') / B
+
         elif self.recon_loss_type == 'l1_freq':
+            # pixel L1: sum over pixels, average over batch
             if self.l1_weight > 0:
-                recon_loss += self.l1_weight * F.l1_loss(x_recon, x)
-            
-            # inspired by https://theadamcolton.github.io/your-vae-sucks
+                recon_loss += self.l1_weight * (F.l1_loss(x_recon, x, reduction='sum') / B)
+
+            # frequency L1: sum over all freq bins, average over batch
             if self.freq_weight > 0:
                 h, w = x.shape[-2:]
                 freq_mask = self._create_radial_freq_mask(h, w)
@@ -140,16 +146,16 @@ class VAE(nn.Module):
                 x_recon_fft = torch.fft.fft2(x_recon, dim=(-2, -1))
                 x_fft_mag = torch.abs(x_fft)
                 x_recon_fft_mag = torch.abs(x_recon_fft)
-                loss_freq = F.l1_loss(x_recon_fft_mag * freq_mask, x_fft_mag * freq_mask)
+                loss_freq = F.l1_loss(x_recon_fft_mag * freq_mask, x_fft_mag * freq_mask, reduction='sum') / B
                 recon_loss += self.freq_weight * loss_freq
         else:
             raise ValueError(f"Unknown reconstruction loss type: {self.recon_loss_type}")
-        
+
         if self.use_perceptual_loss:
             x_for_loss = x.repeat(1,3,1,1) if x.size(1)==1 else x
             x_recon_for_loss = x_recon.repeat(1,3,1,1) if x_recon.size(1)==1 else x_recon
             recon_loss += self.lpips_loss_fn(x_recon_for_loss, x_for_loss).mean()
-            
+
         total_loss = recon_loss + beta * kld
 
         # optional Fourier magnitude regularization on latent samples when available
