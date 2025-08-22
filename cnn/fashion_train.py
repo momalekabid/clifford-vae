@@ -304,6 +304,10 @@ def main(args):
                         model, test_loader, DEVICE, output_dir
                     )
 
+                    vsa_results = test_vsa_operations(
+                        model, test_loader, DEVICE, output_dir, n_test_pairs=50
+                    )
+
                     # reconstructions
                     recon_path = save_reconstructions(
                         model, test_loader, DEVICE, f"{output_dir}/reconstructions.png"
@@ -338,18 +342,13 @@ def main(args):
                     )
                     print("mean vector acc: ", mean_vector_acc)
                     print("per class acc: ", per_class_acc)
-                    vsa_results = test_vsa_operations(
-                        model, test_loader, DEVICE, output_dir, n_test_pairs=50
-                    )
+
                     vsa_bind_sim = vsa_results.get("vsa_bind_unbind_similarity", 0.0)
                     vsa_bundle_acc = vsa_results.get("vsa_bundle_retrieval_acc", 0.0)
                     vsa_bundle_sim = vsa_results.get("vsa_bundle_avg_similarity", 0.0)
                     vsa_compositional_acc = vsa_results.get(
                         "vsa_compositional_acc", 0.0
                     )
-                    vsa_path1 = vsa_results.get("vsa_bind_unbind_plot")
-                    vsa_path2 = vsa_results.get("vsa_bundle_plot")
-                    vsa_path3 = vsa_results.get("vsa_compositional_plot")
 
                     fourier_metrics = {
                         k: v
@@ -398,6 +397,10 @@ def main(args):
                         images["bundling_superposition"] = fourier[
                             "bundling_superposition_plot_path"
                         ]
+
+                    vsa_path1 = vsa_results.get("vsa_bind_unbind_plot")
+                    vsa_path2 = vsa_results.get("vsa_bundle_plot")
+                    vsa_path3 = vsa_results.get("vsa_compositional_plot")
                     if vsa_path1:
                         images["vsa_bind_unbind_test"] = vsa_path1
                     if vsa_path2:

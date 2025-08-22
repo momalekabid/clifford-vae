@@ -360,10 +360,13 @@ def run(args):
                         f"visualizations/d_{mdim}/{dist}",
                     )
 
-                    if args.visualize or logger.use:
-                        vis_dir = f"visualizations/d_{mdim}/{dist}"
-                        os.makedirs(vis_dir, exist_ok=True)
+                    vis_dir = f"visualizations/d_{mdim}/{dist}"
+                    os.makedirs(vis_dir, exist_ok=True)
+                    vsa_results = test_vsa_operations(
+                        model, test_eval_loader, device, vis_dir, n_test_pairs=50
+                    )
 
+                    if args.visualize or logger.use:
                         recon_path = plot_reconstructions(
                             model,
                             test_eval_loader,
@@ -390,6 +393,9 @@ def run(args):
                         )
 
                         if logger.use:
+                            vsa_path1 = vsa_results.get("vsa_bind_unbind_plot")
+                            vsa_path2 = vsa_results.get("vsa_bundle_plot")
+                            vsa_path3 = vsa_results.get("vsa_compositional_plot")
                             images_to_log = {
                                 "Reconstructions": recon_path,
                                 "Latent t-SNE": tsne_path,
@@ -467,9 +473,6 @@ def run(args):
                             model, test_eval_loader, device, class_means
                         )
 
-                        vsa_results = test_vsa_operations(
-                            model, test_eval_loader, device, vis_dir, n_test_pairs=50
-                        )
                         vsa_bind_sim = vsa_results.get(
                             "vsa_bind_unbind_similarity", 0.0
                         )
@@ -482,9 +485,6 @@ def run(args):
                         vsa_compositional_acc = vsa_results.get(
                             "vsa_compositional_acc", 0.0
                         )
-                        vsa_path1 = vsa_results.get("vsa_bind_unbind_plot")
-                        vsa_path2 = vsa_results.get("vsa_bundle_plot")
-                        vsa_path3 = vsa_results.get("vsa_compositional_plot")
 
                         logger.log_metrics(
                             {

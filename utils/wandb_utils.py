@@ -453,7 +453,13 @@ def make_good_unitary_key(
     fv = torch.zeros(dim, dtype=torch.complex64, device=device)
     fv[0] = 1
     fv[1 : (dim + 1) // 2] = torch.cos(phi) + 1j * torch.sin(phi)
-    fv[-1 : dim // 2 : -1] = torch.conj(fv[1 : (dim + 1) // 2])
+
+    # Conjugate symmetry for real-valued output from ifft
+    # fv[-k] = conj(fv[k])
+    source_slice = fv[1 : (dim + 1) // 2]
+    flipped_conj = torch.flip(torch.conj(source_slice), dims=[-1])
+    fv[dim - source_slice.shape[0] : dim] = flipped_conj
+
     if dim % 2 == 0:
         fv[dim // 2] = 1
 
