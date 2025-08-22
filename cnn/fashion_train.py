@@ -19,7 +19,14 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cnn.models import VAE
-from utils.wandb_utils import WandbLogger, test_fourier_properties
+from utils.wandb_utils import (
+    WandbLogger,
+    test_fourier_properties,
+    compute_class_means,
+    evaluate_mean_vector_cosine,
+    build_vsa_memory,
+    evaluate_vsa_memory,
+)
 
 
 DEVICE = (
@@ -296,6 +303,17 @@ def main(args):
                         model, train_loader, test_loader, DEVICE, [100, 600, 1000, 2048]
                     )
 
+                    train_subset = torch.utils.data.Subset(train_set, list(range(min(5000, len(train_set)))))
+                    train_subset_loader = DataLoader(train_subset, batch_size=args.batch_size, shuffle=False)
+                    class_means = compute_class_means(model, train_subset_loader, DEVICE, max_per_class=1000)
+                    mean_vector_acc, per_class_acc = evaluate_mean_vector_cosine(model, test_loader, DEVICE, class_means)
+
+                    # VSA memory test (k=3 per class)
+                    mem_train_subset = torch.utils.data.Subset(train_set, list(range(min(6000, len(train_set)))))
+                    mem_loader = DataLoader(mem_train_subset, batch_size=args.batch_size, shuffle=False)
+                    memory, label_vecs, gallery = build_vsa_memory(model, mem_loader, DEVICE, k_per_class=3, seed=42)
+                    vsa_inst_acc, vsa_cos, vsa_n = evaluate_vsa_memory(model, test_loader, DEVICE, memory, label_vecs, k_per_class=3, gallery=gallery)
+
                     fourier_metrics = {
                         k: v
                         for k, v in fourier.items()
@@ -306,6 +324,10 @@ def main(args):
                         {
                             **knn_metrics,
                             **fourier_metrics,
+                            "mean_vector_cosine_acc": float(mean_vector_acc),
+                            "vsa_retrieval_acc": float(vsa_inst_acc),
+                            "vsa_avg_cosine": float(vsa_cos),
+                            "vsa_num_items": int(vsa_n),
                             "final_best_loss": best,
                         }
                     )
@@ -325,6 +347,10 @@ def main(args):
                         "final_best_loss": best,
                         **fourier,
                         **knn_metrics,
+                        "mean_vector_cosine_acc": float(mean_vector_acc),
+                        "vsa_retrieval_acc": float(vsa_inst_acc),
+                        "vsa_avg_cosine": float(vsa_cos),
+                        "vsa_num_items": int(vsa_n),
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)

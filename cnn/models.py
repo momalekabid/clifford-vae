@@ -121,7 +121,6 @@ class VAE(nn.Module):
     def compute_loss(self, x, x_recon, q_z, p_z, beta=1.0):
         B = x.size(0)
 
-        # KL: sum across latent dims for Gaussian; others already return per-sample
         if self.distribution == 'gaussian':
             kld = torch.distributions.kl.kl_divergence(q_z, p_z).sum(dim=1).mean()
         else:

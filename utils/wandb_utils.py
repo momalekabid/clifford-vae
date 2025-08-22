@@ -256,3 +256,181 @@ class WandbLogger:
     def finish_run(self):
         if self.use and self.run is not None:
             self.run.finish()
+
+
+def _extract_latent_mu(model, x: torch.Tensor):
+    out = model(x)
+    if isinstance(out, (tuple, list)):
+        if len(out) == 4 and isinstance(out[0], tuple):
+            # ((z_mean, z_param2), (q_z,p_z), z, x_recon)
+            (z_mean, _), _, _, _ = out
+            return z_mean
+        elif len(out) == 4:
+            # (x_recon, q_z, p_z, mu)
+            _, _, _, mu = out
+            return mu
+        else:
+            return out[-1]
+    return out
+
+
+@torch.no_grad()
+def compute_class_means(model, loader, device, max_per_class: int = 1000):
+    model.eval()
+    sums = {}
+    counts = {}
+    for x, y in loader:
+        x = x.to(device)
+        mu = _extract_latent_mu(model, x)
+        mu = mu.detach()
+        for i, label in enumerate(y.tolist()):
+            if label not in counts:
+                counts[label] = 0
+                sums[label] = torch.zeros_like(mu[i])
+            if counts[label] < max_per_class:
+                sums[label] = sums[label] + mu[i]
+                counts[label] += 1
+    # finalize means
+    means = {}
+    for label, total in sums.items():
+        c = max(1, counts[label])
+        vec = total / c
+        # normalize for cosine comparison
+        means[label] = torch.nn.functional.normalize(vec, p=2, dim=-1)
+    return means
+
+
+@torch.no_grad()
+def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
+    model.eval()
+    labels_sorted = sorted(class_means.keys())
+    mean_vector = torch.stack([class_means[k] for k in labels_sorted], dim=0).to(device)
+    mean_vector = torch.nn.functional.normalize(mean_vector, p=2, dim=-1)
+
+    correct = 0
+    total = 0
+    per_class_correct = {k: 0 for k in labels_sorted}
+    per_class_total = {k: 0 for k in labels_sorted}
+
+    for x, y in loader:
+        x = x.to(device)
+        mu = _extract_latent_mu(model, x)
+        mu = torch.nn.functional.normalize(mu, p=2, dim=-1)
+        sims = torch.einsum('bd,cd->bc', mu, mean_vector)
+        preds = sims.argmax(dim=1).cpu()
+        y_cpu = y.cpu()
+        correct += (preds == y_cpu).sum().item()
+        total += y_cpu.numel()
+        for yi, pi in zip(y_cpu.tolist(), preds.tolist()):
+            per_class_total[yi] += 1
+            if yi == labels_sorted[pi]:
+                per_class_correct[yi] += 1
+
+    acc = correct / max(1, total)
+    per_class_acc = {
+        k: (per_class_correct[k] / max(1, per_class_total[k])) for k in labels_sorted
+    }
+    return acc, per_class_acc
+
+
+
+def vsa_bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return _bind(a, b)
+
+def vsa_unbind(ab: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return _unbind(ab, b)
+
+
+@torch.no_grad()
+def build_vsa_memory(model, loader, device, k_per_class: int = 3, seed: int = 0):
+    """
+    For each class c, take k examples V_{c,i} and create unique labels L_{c,i}; bundle M = Σ bind(L_{c,i}, V_{c,i}).
+    Returns: memory, label_vectors [... f"{c}_{i}"], dict {c: [V_{c,0},...,V_{c,k-1}]}.
+    """
+    torch.manual_seed(seed)
+    model.eval()
+    # collect k items per class
+    bucket = {}
+    for x, y in loader:
+        x = x.to(device)
+        mu = _extract_latent_mu(model, x)
+        for i, label in enumerate(y.tolist()):
+            if label not in bucket:
+                bucket[label] = []
+            if len(bucket[label]) < k_per_class:
+                bucket[label].append(mu[i].detach())
+        if all(len(bucket.get(c, [])) >= k_per_class for c in set(bucket.keys())) and len(bucket) >= 10:
+            break
+
+    # create random label vectors per instance (keys)
+    label_vectors = {}
+    # build memory by bundling bound pairs
+    memory = None
+    for label, vecs in bucket.items():
+        for i, v in enumerate(vecs):
+            key_name = f"{label}_{i}"
+            key_vec = torch.randn_like(v)
+            key_vec = torch.nn.functional.normalize(key_vec, p=2, dim=-1)
+            label_vectors[key_name] = key_vec
+            bound = vsa_bind(key_vec.unsqueeze(0), v.unsqueeze(0))
+            memory = bound if memory is None else (memory + bound)
+    if memory is None:
+        return None, label_vectors, bucket
+    return memory.detach(), label_vectors, bucket
+
+
+@torch.no_grad()
+def evaluate_vsa_memory(model, loader, device, memory: torch.Tensor, label_vectors: dict, k_per_class: int = 3, lov: dict | None = None):
+    """
+    For each key f"c_i", unbind memory with that key and check top-1 among that class's k items equals i.
+    Returns: instance_retrieval_acc, avg_cosine_to_true, num_items.
+    """
+    if memory is None:
+        return 0.0, 0.0, 0
+    model.eval()
+
+    if lov is None:
+        lov = {}
+        counts = {}
+        for x, y in loader:
+            x = x.to(device)
+            mu = _extract_latent_mu(model, x).detach()
+            for i, label in enumerate(y.tolist()):
+                if label not in counts:
+                    counts[label] = 0
+                    lov[label] = []
+                if counts[label] < k_per_class:
+                    lov[label].append(mu[i])
+                    counts[label] += 1
+            if all(c >= k_per_class for c in counts.values()) and len(counts) >= 10:
+                break
+
+    total = 0
+    correct = 0
+    cos_accum = 0.0
+
+    for key_name, key_vec in label_vectors.items():
+        # parse class and instance index
+        try:
+            class_label_str, inst_idx_str = key_name.split('_')
+            class_label = int(class_label_str)
+            inst_idx = int(inst_idx_str)
+        except Exception:
+            # skip non-instance keys if any
+            continue
+        if class_label not in lov:
+            continue
+        candidates = torch.stack(lov[class_label], dim=0)
+        recovered = vsa_unbind(memory, key_vec.unsqueeze(0))
+        recovered_norm = torch.nn.functional.normalize(recovered, p=2, dim=-1)
+        candidates_norm = torch.nn.functional.normalize(candidates, p=2, dim=-1)
+        sims = torch.einsum('bd,kd->bk', recovered_norm, candidates_norm).squeeze(0)
+        pred_idx = int(torch.argmax(sims).item())
+        cos_true = float(sims[inst_idx].item()) if inst_idx < sims.numel() else 0.0
+        cos_accum += cos_true
+        correct += int(pred_idx == inst_idx)
+        total += 1
+
+    instance_acc = correct / max(1, total)
+    avg_cosine = cos_accum / max(1, total)
+    return instance_acc, avg_cosine, total
