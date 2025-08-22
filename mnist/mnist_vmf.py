@@ -1,4 +1,3 @@
-import math
 import argparse
 import os
 import numpy as np
@@ -108,7 +107,7 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
         grid = tu.make_grid(x_recon_interp, nrow=steps, pad_value=0.5)
         plt.figure(figsize=(12, 2))
         plt.imshow(grid.cpu().permute(1, 2, 0))
-        plt.title(f"Latent Space Interpolation (vMF)")
+        plt.title("Latent Space Interpolation (vMF)")
         plt.axis('off')
         plt.savefig(filepath, dpi=300, bbox_inches='tight')
         plt.close()
@@ -140,7 +139,7 @@ def plot_latent_space(model, loader, device, filepath, n_plot=2000):
         ax.set_xticks([])
         ax.set_yticks([])
 
-    fig.suptitle(f"t-SNE of Latent Space (μ) for vMF-VAE", fontsize=16)
+    fig.suptitle("t-SNE of Latent Space (μ) for vMF-VAE", fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout to make room for suptitle
     plt.savefig(filepath, dpi=300, bbox_inches='tight')
     plt.close()

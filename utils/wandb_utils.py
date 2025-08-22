@@ -1,5 +1,4 @@
 import os
-import math
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -21,8 +20,8 @@ def _bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 def _unbind(ab: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    Fb = torch.fft.fft(b, dim=-1)
-    return torch.fft.ifft(torch.fft.fft(ab, dim=-1) * torch.conj(Fb), dim=-1).real
+    # pseudo-inverse 
+    return _bind(ab, vsa_invert(b))
 
 
 def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int = 15):
@@ -46,7 +45,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
                     z = out[-1]
             else:
                 z = out
-    except Exception as e:
+    except Exception:
         return {
             'fourier_frac_within_0p05': 0.0,
             'fourier_max_dev': 999.0,
@@ -231,7 +230,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
                 plt.tight_layout()
                 plt.savefig(path_bundle_curve, dpi=200, bbox_inches='tight')
                 plt.close()
-        except Exception as e:
+        except Exception:
             pass
     except Exception as e:
         print(f"Warning: Failed to plot fourier magnitude spectrum: {e}")
@@ -370,6 +369,15 @@ def vsa_bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 def vsa_unbind(ab: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return _unbind(ab, b)
+
+def vsa_invert(a: torch.Tensor) -> torch.Tensor:
+    return torch.flip(a, dims=[-1])
+
+def vsa_make_unitary(x: torch.Tensor) -> torch.Tensor: # unused, copied from ssp in case needed
+    Fx = torch.fft.fft(x, dim=-1, norm="ortho")
+    mags = torch.abs(Fx)
+    Fx_unit = Fx / torch.clamp(mags, min=1e-8)
+    return torch.fft.ifft(Fx_unit, dim=-1, norm="ortho").real
 
 
 @torch.no_grad()
