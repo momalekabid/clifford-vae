@@ -24,6 +24,7 @@ from utils.wandb_utils import (
     test_fourier_properties,
     compute_class_means,
     evaluate_mean_vector_cosine,
+    test_vsa_operations,
 )
 
 
@@ -242,14 +243,13 @@ def main(args):
                 best = float("inf")
                 patience_counter = 0
 
-                # Cyclical KL beta (monotonic warmup followed by triangular cycles)
                 def kl_beta_for_epoch(e: int) -> float:
                     # initial warmup
                     if e < args.warmup_epochs:
                         return min(1.0, (e + 1) / max(1, args.warmup_epochs)) * args.max_beta
                     if args.cycle_epochs <= 0:
                         return args.max_beta
-                    # triangular schedule in [min_beta, max_beta]
+                    # cyclical annealing option, tri-schedule in [min_beta, max_beta]
                     cycle_pos = (e - args.warmup_epochs) % args.cycle_epochs
                     half = max(1, args.cycle_epochs // 2)
                     if cycle_pos <= half:
@@ -321,12 +321,11 @@ def main(args):
                     train_subset_loader = DataLoader(train_subset, batch_size=args.batch_size, shuffle=False)
                     class_means = compute_class_means(model, train_subset_loader, DEVICE, max_per_class=1000)
                     mean_vector_acc, per_class_acc = evaluate_mean_vector_cosine(model, test_loader, DEVICE, class_means)
-
-                    # mem_train_subset = torch.utils.data.Subset(train_set, list(range(min(6000, len(train_set)))))
-                    # mem_loader = DataLoader(mem_train_subset, batch_size=args.batch_size, shuffle=False)
-                    # memory, label_vecs, gallery = build_vsa_memory(model, mem_loader, DEVICE, k_per_class=3, seed=42)
-                    # vsa_inst_acc, vsa_cos, vsa_n = evaluate_vsa_memory(model, test_loader, DEVICE, memory, label_vecs, k_per_class=3, gallery=gallery)
-                    vsa_inst_acc, vsa_cos, vsa_n = 0.0, 0.0, 0
+                    print("mean vector acc: ", mean_vector_acc)
+                    print("per class acc: ", per_class_acc)
+                    vsa_bind_sim, vsa_bundle_acc, vsa_bundle_sim, vsa_path1, vsa_path2 = test_vsa_operations(
+                        model, test_loader, DEVICE, output_dir, n_test_pairs=50
+                    )
 
                     fourier_metrics = {
                         k: v
@@ -339,9 +338,9 @@ def main(args):
                             **knn_metrics,
                             **fourier_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
-                            "vsa_retrieval_acc": float(vsa_inst_acc),
-                            "vsa_avg_cosine": float(vsa_cos),
-                            "vsa_num_items": int(vsa_n),
+                            "vsa_bind_unbind_similarity": float(vsa_bind_sim),
+                            "vsa_bundle_retrieval_acc": float(vsa_bundle_acc),
+                            "vsa_bundle_avg_similarity": float(vsa_bundle_sim),
                             "final_best_loss": best,
                         }
                     )
@@ -352,31 +351,28 @@ def main(args):
                         "tsne": tsne_path,
                         "pca": pca_path,
                     }
-                    # add similarity-after-k-binds curve if produced
+                    # similarity-after-k-binds curve 
                     if "similarity_after_k_binds_plot_path" in fourier and fourier["similarity_after_k_binds_plot_path"]:
                         images["similarity_after_k_binds"] = fourier["similarity_after_k_binds_plot_path"]
                     if "fft_avg_spectrum_plot_path" in fourier and fourier["fft_avg_spectrum_plot_path"]:
                         images["fft_avg_spectrum"] = fourier["fft_avg_spectrum_plot_path"]
                     if "bundling_superposition_plot_path" in fourier and fourier["bundling_superposition_plot_path"]:
                         images["bundling_superposition"] = fourier["bundling_superposition_plot_path"]
+                    if vsa_path1:
+                        images["vsa_bind_unbind_test"] = vsa_path1
+                    if vsa_path2:
+                        images["vsa_bundle_capacity"] = vsa_path2
                     summary = {
                         "final_best_loss": best,
                         **fourier,
                         **knn_metrics,
                         "mean_vector_cosine_acc": float(mean_vector_acc),
-                        "vsa_retrieval_acc": float(vsa_inst_acc),
-                        "vsa_avg_cosine": float(vsa_cos),
-                        "vsa_num_items": int(vsa_n),
+                        "vsa_bind_unbind_similarity": float(vsa_bind_sim),
+                        "vsa_bundle_retrieval_acc": float(vsa_bundle_acc),
+                        "vsa_bundle_avg_similarity": float(vsa_bundle_sim),
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)
-                    # summary = {
-                    #     "final_best_loss": best,
-                    #     **fourier,
-                    #     **knn_metrics,
-                    # }
-                    # logger.log_summary(summary)
-                    # logger.log_images(images)
 
                 logger.finish_run()
 

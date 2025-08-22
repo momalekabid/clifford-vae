@@ -205,21 +205,16 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
         plt.savefig(path_bind_curve, dpi=200, bbox_inches='tight')
         plt.close()
 
-        # bundling superposition sanity-check: cos(q, a+b) ≈ (cos(q,a)+cos(q,b))/2
         try:
             if z.shape[0] >= 3:
                 a_vec = z[0].detach()
                 b_vec = z[1].detach()
-                q = z[: min(256, z.shape[0])].detach()  # queries from the same batch
+                q = z[: min(256, z.shape[0])].detach()
                 bundle = a_vec + b_vec
-                q_n = torch.nn.functional.normalize(q, p=2, dim=-1)
-                a_n = torch.nn.functional.normalize(a_vec.unsqueeze(0), p=2, dim=-1)
-                b_n = torch.nn.functional.normalize(b_vec.unsqueeze(0), p=2, dim=-1)
-                bundle_n = torch.nn.functional.normalize(bundle.unsqueeze(0), p=2, dim=-1)
-
-                sim_a = torch.einsum('qd,1d->q', q_n, a_n)
-                sim_b = torch.einsum('qd,1d->q', q_n, b_n)
-                sim_bundle = torch.einsum('qd,1d->q', q_n, bundle_n)
+                
+                sim_a = torch.nn.functional.cosine_similarity(q, a_vec.unsqueeze(0), dim=-1)
+                sim_b = torch.nn.functional.cosine_similarity(q, b_vec.unsqueeze(0), dim=-1)
+                sim_bundle = torch.nn.functional.cosine_similarity(q, bundle.unsqueeze(0), dim=-1)
                 target = (sim_a + sim_b) / 2.0
                 bundle_mse = torch.mean((sim_bundle - target) ** 2).item()
 
@@ -333,8 +328,8 @@ def compute_class_means(model, loader, device, max_per_class: int = 1000):
     for label, total in sums.items():
         c = max(1, counts[label])
         vec = total / c
-        # normalize for cosine comparison
-        means[label] = torch.nn.functional.normalize(vec, p=2, dim=-1)
+        # removed normalization 
+        means[label] = vec
     return means
 
 
@@ -343,7 +338,6 @@ def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
     model.eval()
     labels_sorted = sorted(class_means.keys())
     mean_vector = torch.stack([class_means[k] for k in labels_sorted], dim=0).to(device)
-    mean_vector = torch.nn.functional.normalize(mean_vector, p=2, dim=-1)
 
     correct = 0
     total = 0
@@ -353,8 +347,7 @@ def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
     for x, y in loader:
         x = x.to(device)
         mu = _extract_latent_mu(model, x)
-        mu = torch.nn.functional.normalize(mu, p=2, dim=-1)
-        sims = torch.einsum('bd,cd->bc', mu, mean_vector)
+        sims = torch.nn.functional.cosine_similarity(mu.unsqueeze(1), mean_vector.unsqueeze(0), dim=-1)
         preds = sims.argmax(dim=1).cpu()
         y_cpu = y.cpu()
         correct += (preds == y_cpu).sum().item()
@@ -380,77 +373,155 @@ def vsa_unbind(ab: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def build_vsa_memory(model, loader, device, k_per_class: int = 3, seed: int = 0):
-    torch.manual_seed(seed)
+def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 50):
+    """
+     bind random keys with latent vectors, bundle them, then unbind and check retrieval accuracy.
+    tests: 1) bind/unbind fidelity, 2) bundling interference, 3) key-value storage capacity
+    """
     model.eval()
-    bucket = {}
-    for x, y in loader:
+    
+    latents = []
+    for x, _ in loader:
         x = x.to(device)
         mu = _extract_latent_mu(model, x)
-        for i, label in enumerate(y.tolist()):
-            if label not in bucket:
-                bucket[label] = []
-            if len(bucket[label]) < k_per_class:
-                bucket[label].append(mu[i].detach())
-        if all(len(bucket.get(c, [])) >= k_per_class for c in set(bucket.keys())) and len(bucket) >= 10:
+        latents.append(mu.detach())
+        if len(torch.cat(latents, 0)) >= n_test_pairs * 2:
             break
-    label_vectors = {}
-    memory = None
-    for label, vecs in bucket.items():
-        for i, v in enumerate(vecs):
-            key_name = f"{label}_{i}"
-            key_vec = torch.randn_like(v)
-            key_vec = torch.nn.functional.normalize(key_vec, p=2, dim=-1)
-            label_vectors[key_name] = key_vec
-            bound = vsa_bind(key_vec.unsqueeze(0), v.unsqueeze(0))
-            memory = bound if memory is None else (memory + bound)
-    if memory is None:
-        return None, label_vectors, bucket
-    return memory.detach(), label_vectors, bucket
-
-
-@torch.no_grad()
-def evaluate_vsa_memory(model, loader, device, memory: torch.Tensor, label_vectors: dict, k_per_class: int = 3, gallery: dict | None = None, **kwargs):
-    if memory is None:
-        return 0.0, 0.0, 0
-    model.eval()
-    if gallery is None:
-        gallery = {}
-        counts = {}
-        for x, y in loader:
-            x = x.to(device)
-            mu = _extract_latent_mu(model, x).detach()
-            for i, label in enumerate(y.tolist()):
-                if label not in counts:
-                    counts[label] = 0
-                    gallery[label] = []
-                if counts[label] < k_per_class:
-                    gallery[label].append(mu[i])
-                    counts[label] += 1
-            if all(c >= k_per_class for c in counts.values()) and len(counts) >= 10:
+    
+    if not latents:
+        return 0.0, 0.0, 0.0, None, None
+        
+    z_all = torch.cat(latents, 0)[:n_test_pairs * 2]
+    if z_all.shape[0] < 2:
+        return 0.0, 0.0, 0.0, None, None
+    
+    d = z_all.shape[-1]
+    
+    single_bind_sims = []
+    for i in range(min(n_test_pairs, z_all.shape[0] // 2)):
+        key = torch.randn(d, device=device)
+        # key = torch.nn.functional.normalize(key, p=2, dim=-1)
+        value = z_all[i]
+        
+        bound = _bind(key.unsqueeze(0), value.unsqueeze(0))
+        recovered = _unbind(bound, key.unsqueeze(0))
+        
+        sim = torch.nn.functional.cosine_similarity(recovered, value.unsqueeze(0), dim=-1).item()
+        single_bind_sims.append(sim)
+    
+    avg_single_sim = np.mean(single_bind_sims) if single_bind_sims else 0.0
+    
+    # test #2, bundling multiple pairs and test retrieval
+    n_bundle = min(5, z_all.shape[0] // 2)
+    bundle_results = []
+    
+    for test_run in range(min(10, n_test_pairs // 5)):
+        keys = []
+        values = []
+        for i in range(n_bundle):
+            idx = test_run * n_bundle + i
+            if idx >= z_all.shape[0]:
                 break
-    total = 0
-    correct = 0
-    cos_accum = 0.0
-    for key_name, key_vec in label_vectors.items():
-        try:
-            class_label_str, inst_idx_str = key_name.split('_')
-            class_label = int(class_label_str)
-            inst_idx = int(inst_idx_str)
-        except Exception:
+            key = torch.randn(d, device=device)
+            # key = torch.nn.functional.normalize(key, p=2, dim=-1)
+            keys.append(key)
+            values.append(z_all[idx])
+        
+        if len(keys) < 2:
             continue
-        if class_label not in gallery:
-            continue
-        candidates = torch.stack(gallery[class_label], dim=0)
-        recovered = vsa_unbind(memory, key_vec.unsqueeze(0))
-        recovered_norm = torch.nn.functional.normalize(recovered, p=2, dim=-1)
-        candidates_norm = torch.nn.functional.normalize(candidates, p=2, dim=-1)
-        sims = torch.einsum('bd,kd->bk', recovered_norm, candidates_norm).squeeze(0)
-        pred_idx = int(torch.argmax(sims).item())
-        cos_true = float(sims[inst_idx].item()) if inst_idx < sims.numel() else 0.0
-        cos_accum += cos_true
-        correct += int(pred_idx == inst_idx)
-        total += 1
-    instance_acc = correct / max(1, total)
-    avg_cosine = cos_accum / max(1, total)
-    return instance_acc, avg_cosine, total
+            
+        memory = None
+        for key, value in zip(keys, values):
+            bound = _bind(key.unsqueeze(0), value.unsqueeze(0))
+            memory = bound if memory is None else (memory + bound)
+        
+        # test retrieval 
+        correct_retrievals = 0
+        retrieval_sims = []
+        
+        for i, (test_key, true_value) in enumerate(zip(keys, values)):
+            recovered = _unbind(memory, test_key.unsqueeze(0))
+            
+            recovered_flat = recovered.squeeze(0)
+            values_stack = torch.stack(values, 0)
+            
+            sims = torch.nn.functional.cosine_similarity(recovered_flat.unsqueeze(0), values_stack, dim=-1)
+            best_idx = torch.argmax(sims).item()
+            
+            if best_idx == i:
+                correct_retrievals += 1
+            
+            true_sim = sims[i].item()
+            retrieval_sims.append(true_sim)
+        
+        bundle_acc = correct_retrievals / len(keys) if keys else 0.0
+        bundle_results.append((bundle_acc, np.mean(retrieval_sims) if retrieval_sims else 0.0))
+    
+    avg_bundle_acc = np.mean([r[0] for r in bundle_results]) if bundle_results else 0.0
+    avg_bundle_sim = np.mean([r[1] for r in bundle_results]) if bundle_results else 0.0
+    
+    path_vsa_test = None
+    path_capacity_test = None
+    
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # single bind 
+        if single_bind_sims:
+            path_vsa_test = os.path.join(output_dir, 'vsa_bind_unbind_test.png')
+            plt.figure(figsize=(10, 4))
+            
+            plt.subplot(1, 2, 1)
+            plt.hist(single_bind_sims, bins=20, alpha=0.7, edgecolor='black')
+            plt.axvline(np.mean(single_bind_sims), color='red', linestyle='--', 
+                       label=f'Mean: {np.mean(single_bind_sims):.3f}')
+            plt.xlabel('Cosine Similarity')
+            plt.ylabel('Count')
+            plt.title('Bind-Unbind Fidelity')
+            plt.legend()
+            plt.grid(alpha=0.3)
+            
+            plt.subplot(1, 2, 2)
+            plt.plot(single_bind_sims, 'o-', alpha=0.7, markersize=4)
+            plt.axhline(np.mean(single_bind_sims), color='red', linestyle='--', alpha=0.8)
+            plt.xlabel('Test Index')
+            plt.ylabel('Cosine Similarity')
+            plt.title('Per-Test Similarity')
+            plt.grid(alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(path_vsa_test, dpi=200, bbox_inches='tight')
+            plt.close()
+        
+        if bundle_results:
+            path_capacity_test = os.path.join(output_dir, 'vsa_bundle_capacity.png')
+            accs = [r[0] for r in bundle_results]
+            sims = [r[1] for r in bundle_results]
+            
+            plt.figure(figsize=(10, 4))
+            
+            plt.subplot(1, 2, 1)
+            plt.scatter(accs, sims, alpha=0.7, s=50)
+            plt.xlabel('Bundle Retrieval Accuracy')
+            plt.ylabel('Average Similarity')
+            plt.title(f'Bundle Test (n={n_bundle} items)')
+            plt.grid(alpha=0.3)
+            
+            plt.subplot(1, 2, 2)
+            x_pos = np.arange(len(bundle_results))
+            plt.bar(x_pos, accs, alpha=0.7, label='Accuracy')
+            plt.axhline(np.mean(accs), color='red', linestyle='--', alpha=0.8, label=f'Mean: {np.mean(accs):.3f}')
+            plt.xlabel('Test Run')
+            plt.ylabel('Retrieval Accuracy')
+            plt.title('Bundle Retrieval Performance')
+            plt.legend()
+            plt.grid(alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(path_capacity_test, dpi=200, bbox_inches='tight')
+            plt.close()
+    
+    except Exception as e:
+        print(f"Warning: VSA test plotting failed: {e}")
+    
+    return avg_single_sim, avg_bundle_acc, avg_bundle_sim, path_vsa_test, path_capacity_test

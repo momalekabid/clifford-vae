@@ -20,6 +20,7 @@ from utils.wandb_utils import (
     test_fourier_properties,
     compute_class_means,
     evaluate_mean_vector_cosine,
+    test_vsa_operations,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss
 
@@ -333,6 +334,10 @@ def run(args):
                                     images_to_log["Fourier_Avg_Spectrum"] = fourier_results["fft_avg_spectrum_plot_path"]
                                 if "bundling_superposition_plot_path" in fourier_results and fourier_results["bundling_superposition_plot_path"]:
                                     images_to_log["Bundling_Superposition"] = fourier_results["bundling_superposition_plot_path"]
+                            if vsa_path1:
+                                images_to_log["VSA_Bind_Unbind_Test"] = vsa_path1
+                            if vsa_path2:
+                                images_to_log["VSA_Bundle_Capacity"] = vsa_path2
                             logger.log_images(images_to_log)
 
                     if logger.use:
@@ -345,19 +350,17 @@ def run(args):
                         class_means = compute_class_means(model, train_subset_loader, device, max_per_class=1000)
                         mean_vector_acc, per_class_acc = evaluate_mean_vector_cosine(model, test_eval_loader, device, class_means)
 
-                        # mem_train_subset = torch.utils.data.Subset(train_dataset, list(range(min(6000, len(train_dataset)))))
-                        # mem_loader = DataLoader(mem_train_subset, batch_size=256, shuffle=False)
-                        # memory, label_vecs, gallery = build_vsa_memory(model, mem_loader, device, k_per_class=3, seed=42)
-                        # vsa_inst_acc, vsa_cos, vsa_n = evaluate_vsa_memory(model, test_eval_loader, device, memory, label_vecs, k_per_class=3, gallery=gallery)
-                        vsa_inst_acc, vsa_cos, vsa_n = 0.0, 0.0, 0
+                        vsa_bind_sim, vsa_bundle_acc, vsa_bundle_sim, vsa_path1, vsa_path2 = test_vsa_operations(
+                            model, test_eval_loader, device, vis_dir, n_test_pairs=50
+                        )
                         
                         logger.log_metrics({
                             **knn_metrics,
                             **fourier_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
-                            "vsa_retrieval_acc": float(vsa_inst_acc),
-                            "vsa_avg_cosine": float(vsa_cos),
-                            "vsa_num_items": int(vsa_n),
+                            "vsa_bind_unbind_similarity": float(vsa_bind_sim),
+                            "vsa_bundle_retrieval_acc": float(vsa_bundle_acc),
+                            "vsa_bundle_avg_similarity": float(vsa_bundle_sim),
                             "final_val_loss": best_val_loss,
                         })
                         
@@ -366,9 +369,9 @@ def run(args):
                             "final_val_loss": best_val_loss,
                             **fourier_results,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
-                            "vsa_retrieval_acc": float(vsa_inst_acc),
-                            "vsa_avg_cosine": float(vsa_cos),
-                            "vsa_num_items": int(vsa_n),
+                            "vsa_bind_unbind_similarity": float(vsa_bind_sim),
+                            "vsa_bundle_retrieval_acc": float(vsa_bundle_acc),
+                            "vsa_bundle_avg_similarity": float(vsa_bundle_sim),
                         }
                         logger.log_summary(summary_metrics)
                         logger.finish_run()
