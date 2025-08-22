@@ -25,7 +25,7 @@ def _unbind(ab: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.fft.ifft(torch.fft.fft(ab, dim=-1) * torch.conj(Fb), dim=-1).real
 
 
-def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int = 5):
+def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int = 15):
     try:
         model.eval()
         with torch.no_grad():
@@ -148,6 +148,8 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
     path = None
     path_avg = None
     path_bind_curve = None
+    path_bundle_curve = None
+    bundle_mse = None
     try:
         avg_mag = mags.mean(dim=0).detach().cpu().numpy()
         n = avg_mag.shape[-1]
@@ -202,6 +204,40 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
         plt.tight_layout()
         plt.savefig(path_bind_curve, dpi=200, bbox_inches='tight')
         plt.close()
+
+        # bundling superposition sanity-check: cos(q, a+b) ≈ (cos(q,a)+cos(q,b))/2
+        try:
+            if z.shape[0] >= 3:
+                a_vec = z[0].detach()
+                b_vec = z[1].detach()
+                q = z[: min(256, z.shape[0])].detach()  # queries from the same batch
+                bundle = a_vec + b_vec
+                q_n = torch.nn.functional.normalize(q, p=2, dim=-1)
+                a_n = torch.nn.functional.normalize(a_vec.unsqueeze(0), p=2, dim=-1)
+                b_n = torch.nn.functional.normalize(b_vec.unsqueeze(0), p=2, dim=-1)
+                bundle_n = torch.nn.functional.normalize(bundle.unsqueeze(0), p=2, dim=-1)
+
+                sim_a = torch.einsum('qd,1d->q', q_n, a_n)
+                sim_b = torch.einsum('qd,1d->q', q_n, b_n)
+                sim_bundle = torch.einsum('qd,1d->q', q_n, bundle_n)
+                target = (sim_a + sim_b) / 2.0
+                bundle_mse = torch.mean((sim_bundle - target) ** 2).item()
+
+                path_bundle_curve = os.path.join(output_dir, 'bundling_superposition.png')
+                plt.figure(figsize=(7, 4))
+                idx = torch.argsort(target).cpu().numpy()
+                plt.plot(target[idx].cpu().numpy(), label='(cos(q,a)+cos(q,b))/2')
+                plt.plot(sim_bundle[idx].cpu().numpy(), label='cos(q, a+b)')
+                plt.title('Bundling Superposition Check')
+                plt.xlabel('Query index (sorted by target)')
+                plt.ylabel('Similarity')
+                plt.legend()
+                plt.grid(alpha=0.3)
+                plt.tight_layout()
+                plt.savefig(path_bundle_curve, dpi=200, bbox_inches='tight')
+                plt.close()
+        except Exception as e:
+            pass
     except Exception as e:
         print(f"Warning: Failed to plot fourier magnitude spectrum: {e}")
 
@@ -210,6 +246,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
         'fourier_phase_std': phase_std,
         'fourier_flatness_mse': flat_mse,
         'binding_k_self_similarity': cos_sim,
+        'bundling_superposition_mse': bundle_mse if bundle_mse is not None else 0.0,
         'fourier_mean_magnitude': mean_mag,
         'fourier_magnitude_std': std_mag,
         'fourier_mean_dev': mean_dev,
@@ -217,6 +254,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
         'fft_spectrum_plot_path': path,
         'fft_avg_spectrum_plot_path': path_avg,
         'similarity_after_k_binds_plot_path': path_bind_curve,
+        'bundling_superposition_plot_path': path_bundle_curve,
     }
 
 
@@ -343,13 +381,8 @@ def vsa_unbind(ab: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def build_vsa_memory(model, loader, device, k_per_class: int = 3, seed: int = 0):
-    """
-    For each class c, take k examples V_{c,i} and create unique labels L_{c,i}; bundle M = Σ bind(L_{c,i}, V_{c,i}).
-    Returns: memory, label_vectors [... f"{c}_{i}"], dict {c: [V_{c,0},...,V_{c,k-1}]}.
-    """
     torch.manual_seed(seed)
     model.eval()
-    # collect k items per class
     bucket = {}
     for x, y in loader:
         x = x.to(device)
@@ -361,10 +394,7 @@ def build_vsa_memory(model, loader, device, k_per_class: int = 3, seed: int = 0)
                 bucket[label].append(mu[i].detach())
         if all(len(bucket.get(c, [])) >= k_per_class for c in set(bucket.keys())) and len(bucket) >= 10:
             break
-
-    # create random label vectors per instance (keys)
     label_vectors = {}
-    # build memory by bundling bound pairs
     memory = None
     for label, vecs in bucket.items():
         for i, v in enumerate(vecs):
@@ -381,14 +411,9 @@ def build_vsa_memory(model, loader, device, k_per_class: int = 3, seed: int = 0)
 
 @torch.no_grad()
 def evaluate_vsa_memory(model, loader, device, memory: torch.Tensor, label_vectors: dict, k_per_class: int = 3, gallery: dict | None = None, **kwargs):
-    """
-    For each key f"c_i", unbind memory with that key and check top-1 among that class's k items equals i.
-    Returns: instance_retrieval_acc, avg_cosine_to_true, num_items.
-    """
     if memory is None:
         return 0.0, 0.0, 0
     model.eval()
-
     if gallery is None:
         gallery = {}
         counts = {}
@@ -404,19 +429,15 @@ def evaluate_vsa_memory(model, loader, device, memory: torch.Tensor, label_vecto
                     counts[label] += 1
             if all(c >= k_per_class for c in counts.values()) and len(counts) >= 10:
                 break
-
     total = 0
     correct = 0
     cos_accum = 0.0
-
     for key_name, key_vec in label_vectors.items():
-        # parse class and instance index
         try:
             class_label_str, inst_idx_str = key_name.split('_')
             class_label = int(class_label_str)
             inst_idx = int(inst_idx_str)
         except Exception:
-            # skip non-instance keys if any
             continue
         if class_label not in gallery:
             continue
@@ -430,7 +451,6 @@ def evaluate_vsa_memory(model, loader, device, memory: torch.Tensor, label_vecto
         cos_accum += cos_true
         correct += int(pred_idx == inst_idx)
         total += 1
-
     instance_acc = correct / max(1, total)
     avg_cosine = cos_accum / max(1, total)
     return instance_acc, avg_cosine, total

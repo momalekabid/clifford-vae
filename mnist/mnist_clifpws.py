@@ -20,8 +20,6 @@ from utils.wandb_utils import (
     test_fourier_properties,
     compute_class_means,
     evaluate_mean_vector_cosine,
-    build_vsa_memory,
-    evaluate_vsa_memory,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss
 
@@ -333,6 +331,8 @@ def run(args):
                                     images_to_log["Similarity_After_K_Binds"] = fourier_results["similarity_after_k_binds_plot_path"]
                                 if "fft_avg_spectrum_plot_path" in fourier_results and fourier_results["fft_avg_spectrum_plot_path"]:
                                     images_to_log["Fourier_Avg_Spectrum"] = fourier_results["fft_avg_spectrum_plot_path"]
+                                if "bundling_superposition_plot_path" in fourier_results and fourier_results["bundling_superposition_plot_path"]:
+                                    images_to_log["Bundling_Superposition"] = fourier_results["bundling_superposition_plot_path"]
                             logger.log_images(images_to_log)
 
                     if logger.use:
@@ -345,10 +345,11 @@ def run(args):
                         class_means = compute_class_means(model, train_subset_loader, device, max_per_class=1000)
                         mean_vector_acc, per_class_acc = evaluate_mean_vector_cosine(model, test_eval_loader, device, class_means)
 
-                        mem_train_subset = torch.utils.data.Subset(train_dataset, list(range(min(6000, len(train_dataset)))))
-                        mem_loader = DataLoader(mem_train_subset, batch_size=256, shuffle=False)
-                        memory, label_vecs, gallery = build_vsa_memory(model, mem_loader, device, k_per_class=3, seed=42)
-                        vsa_inst_acc, vsa_cos, vsa_n = evaluate_vsa_memory(model, test_eval_loader, device, memory, label_vecs, k_per_class=3, gallery=gallery)
+                        # mem_train_subset = torch.utils.data.Subset(train_dataset, list(range(min(6000, len(train_dataset)))))
+                        # mem_loader = DataLoader(mem_train_subset, batch_size=256, shuffle=False)
+                        # memory, label_vecs, gallery = build_vsa_memory(model, mem_loader, device, k_per_class=3, seed=42)
+                        # vsa_inst_acc, vsa_cos, vsa_n = evaluate_vsa_memory(model, test_eval_loader, device, memory, label_vecs, k_per_class=3, gallery=gallery)
+                        vsa_inst_acc, vsa_cos, vsa_n = 0.0, 0.0, 0
                         
                         logger.log_metrics({
                             **knn_metrics,
