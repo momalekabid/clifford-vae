@@ -5,6 +5,7 @@ from typing import Tuple
 
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dists.clifford import (
@@ -23,8 +24,10 @@ class MLPVAE(nn.Module):
 
         # encoder: 784 -> 256 -> 128
         self.encoder = nn.Sequential(
-            nn.Linear(784, 256), nn.ReLU(),
-            nn.Linear(256, 128), nn.ReLU(),
+            nn.Linear(784, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
         )
 
         if self.distribution == "normal":
@@ -37,8 +40,10 @@ class MLPVAE(nn.Module):
         # decoder: (z or 2z) -> 128 -> 256 -> 784
         decoder_in_dim = 2 * z_dim if self.distribution == "clifford" else z_dim
         self.decoder = nn.Sequential(
-            nn.Linear(decoder_in_dim, 128), nn.ReLU(),
-            nn.Linear(128, 256), nn.ReLU(),
+            nn.Linear(decoder_in_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 256),
+            nn.ReLU(),
             nn.Linear(256, 784),
         )
 
@@ -48,6 +53,7 @@ class MLPVAE(nn.Module):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+
         self.apply(init_weights)
 
     def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -70,7 +76,9 @@ class MLPVAE(nn.Module):
         if self.distribution == "normal":
             std = torch.exp(0.5 * z_param2) + 1e-6
             q_z = torch.distributions.Normal(z_mean, std)
-            p_z = torch.distributions.Normal(torch.zeros_like(z_mean), torch.ones_like(std))
+            p_z = torch.distributions.Normal(
+                torch.zeros_like(z_mean), torch.ones_like(std)
+            )
         elif self.distribution == "powerspherical":
             q_z = PowerSpherical(z_mean, z_param2.squeeze(-1))
             p_z = HypersphericalUniform(self.z_dim, device=device, validate_args=False)
@@ -97,8 +105,8 @@ class MLPVAE(nn.Module):
 
 def vae_loss(model: MLPVAE, x: torch.Tensor, beta: float = 1.0) -> torch.Tensor:
     _, (q_z, p_z), _, x_recon = model(x)
-    recon = F.binary_cross_entropy_with_logits(x_recon, x.view(-1, 784), reduction="sum") / x.size(0)
+    recon = F.binary_cross_entropy_with_logits(
+        x_recon, x.view(-1, 784), reduction="sum"
+    ) / x.size(0)
     kl = torch.distributions.kl.kl_divergence(q_z, p_z).mean()
     return recon + beta * kl
-
-

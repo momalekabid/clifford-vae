@@ -246,7 +246,10 @@ def main(args):
                 def kl_beta_for_epoch(e: int) -> float:
                     # initial warmup
                     if e < args.warmup_epochs:
-                        return min(1.0, (e + 1) / max(1, args.warmup_epochs)) * args.max_beta
+                        return (
+                            min(1.0, (e + 1) / max(1, args.warmup_epochs))
+                            * args.max_beta
+                        )
                     if args.cycle_epochs <= 0:
                         return args.max_beta
                     # cyclical annealing option, tri-schedule in [min_beta, max_beta]
@@ -255,7 +258,9 @@ def main(args):
                     if cycle_pos <= half:
                         t = cycle_pos / half
                     else:
-                        t = (args.cycle_epochs - cycle_pos) / max(1, args.cycle_epochs - half)
+                        t = (args.cycle_epochs - cycle_pos) / max(
+                            1, args.cycle_epochs - half
+                        )
                     return args.min_beta + (args.max_beta - args.min_beta) * t
 
                 for epoch in range(args.epochs):
@@ -282,7 +287,9 @@ def main(args):
                     )
 
                     if args.patience > 0 and patience_counter >= args.patience:
-                        print(f"Early stopping at epoch {epoch+1} (no improvement for {args.patience} epochs)")
+                        print(
+                            f"Early stopping at epoch {epoch+1} (no improvement for {args.patience} epochs)"
+                        )
                         break
 
                 print(f"best loss: {best:.4f}")
@@ -317,15 +324,32 @@ def main(args):
                         model, train_loader, test_loader, DEVICE, [100, 600, 1000, 2048]
                     )
 
-                    train_subset = torch.utils.data.Subset(train_set, list(range(min(5000, len(train_set)))))
-                    train_subset_loader = DataLoader(train_subset, batch_size=args.batch_size, shuffle=False)
-                    class_means = compute_class_means(model, train_subset_loader, DEVICE, max_per_class=1000)
-                    mean_vector_acc, per_class_acc = evaluate_mean_vector_cosine(model, test_loader, DEVICE, class_means)
+                    train_subset = torch.utils.data.Subset(
+                        train_set, list(range(min(5000, len(train_set))))
+                    )
+                    train_subset_loader = DataLoader(
+                        train_subset, batch_size=args.batch_size, shuffle=False
+                    )
+                    class_means = compute_class_means(
+                        model, train_subset_loader, DEVICE, max_per_class=1000
+                    )
+                    mean_vector_acc, per_class_acc = evaluate_mean_vector_cosine(
+                        model, test_loader, DEVICE, class_means
+                    )
                     print("mean vector acc: ", mean_vector_acc)
                     print("per class acc: ", per_class_acc)
-                    vsa_bind_sim, vsa_bundle_acc, vsa_bundle_sim, vsa_path1, vsa_path2 = test_vsa_operations(
+                    vsa_results = test_vsa_operations(
                         model, test_loader, DEVICE, output_dir, n_test_pairs=50
                     )
+                    vsa_bind_sim = vsa_results.get("vsa_bind_unbind_similarity", 0.0)
+                    vsa_bundle_acc = vsa_results.get("vsa_bundle_retrieval_acc", 0.0)
+                    vsa_bundle_sim = vsa_results.get("vsa_bundle_avg_similarity", 0.0)
+                    vsa_compositional_acc = vsa_results.get(
+                        "vsa_compositional_acc", 0.0
+                    )
+                    vsa_path1 = vsa_results.get("vsa_bind_unbind_plot")
+                    vsa_path2 = vsa_results.get("vsa_bundle_plot")
+                    vsa_path3 = vsa_results.get("vsa_compositional_plot")
 
                     fourier_metrics = {
                         k: v
@@ -341,6 +365,7 @@ def main(args):
                             "vsa_bind_unbind_similarity": float(vsa_bind_sim),
                             "vsa_bundle_retrieval_acc": float(vsa_bundle_acc),
                             "vsa_bundle_avg_similarity": float(vsa_bundle_sim),
+                            "vsa_compositional_acc": float(vsa_compositional_acc),
                             "final_best_loss": best,
                         }
                     )
@@ -351,17 +376,34 @@ def main(args):
                         "tsne": tsne_path,
                         "pca": pca_path,
                     }
-                    # similarity-after-k-binds curve 
-                    if "similarity_after_k_binds_plot_path" in fourier and fourier["similarity_after_k_binds_plot_path"]:
-                        images["similarity_after_k_binds"] = fourier["similarity_after_k_binds_plot_path"]
-                    if "fft_avg_spectrum_plot_path" in fourier and fourier["fft_avg_spectrum_plot_path"]:
-                        images["fft_avg_spectrum"] = fourier["fft_avg_spectrum_plot_path"]
-                    if "bundling_superposition_plot_path" in fourier and fourier["bundling_superposition_plot_path"]:
-                        images["bundling_superposition"] = fourier["bundling_superposition_plot_path"]
+                    # similarity-after-k-binds curve
+                    if (
+                        "similarity_after_k_binds_plot_path" in fourier
+                        and fourier["similarity_after_k_binds_plot_path"]
+                    ):
+                        images["similarity_after_k_binds"] = fourier[
+                            "similarity_after_k_binds_plot_path"
+                        ]
+                    if (
+                        "fft_avg_spectrum_plot_path" in fourier
+                        and fourier["fft_avg_spectrum_plot_path"]
+                    ):
+                        images["fft_avg_spectrum"] = fourier[
+                            "fft_avg_spectrum_plot_path"
+                        ]
+                    if (
+                        "bundling_superposition_plot_path" in fourier
+                        and fourier["bundling_superposition_plot_path"]
+                    ):
+                        images["bundling_superposition"] = fourier[
+                            "bundling_superposition_plot_path"
+                        ]
                     if vsa_path1:
                         images["vsa_bind_unbind_test"] = vsa_path1
                     if vsa_path2:
                         images["vsa_bundle_capacity"] = vsa_path2
+                    if vsa_path3:
+                        images["vsa_compositional_reasoning"] = vsa_path3
                     summary = {
                         "final_best_loss": best,
                         **fourier,
@@ -370,6 +412,7 @@ def main(args):
                         "vsa_bind_unbind_similarity": float(vsa_bind_sim),
                         "vsa_bundle_retrieval_acc": float(vsa_bundle_acc),
                         "vsa_bundle_avg_similarity": float(vsa_bundle_sim),
+                        "vsa_compositional_acc": float(vsa_compositional_acc),
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)
@@ -401,11 +444,23 @@ if __name__ == "__main__":
         help="Weight for frequency domain loss",
     )
     p.add_argument("--max_beta", type=float, default=1.0)
-    p.add_argument("--min_beta", type=float, default=0.0, help="Minimum KL beta during cycles")
+    p.add_argument(
+        "--min_beta", type=float, default=0.0, help="Minimum KL beta during cycles"
+    )
     p.add_argument("--no_wandb", action="store_true")
     p.add_argument("--wandb_project", type=str, default="aug-19-fashionmnist")
     p.add_argument("--patience", type=int, default=10)
-    p.add_argument("--cycle_epochs", type=int, default=0, help="Cycle length for cyclical KL beta after warmup (0=disabled)")
-    p.add_argument("--fourier_weight", type=float, default=0.0, help="Weight for latent FFT magnitude regularization")
+    p.add_argument(
+        "--cycle_epochs",
+        type=int,
+        default=0,
+        help="Cycle length for cyclical KL beta after warmup (0=disabled)",
+    )
+    p.add_argument(
+        "--fourier_weight",
+        type=float,
+        default=0.0,
+        help="Weight for latent FFT magnitude regularization",
+    )
     args = p.parse_args()
     main(args)

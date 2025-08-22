@@ -3,7 +3,6 @@ import torch
 
 
 class HypersphericalUniform(torch.distributions.Distribution):
-
     support = torch.distributions.constraints.real
     has_rsample = False
     _mean_carrier_measure = 0
@@ -26,7 +25,6 @@ class HypersphericalUniform(torch.distributions.Distribution):
         )
         self._dim = dim
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
     def sample(self, shape=torch.Size()):
         output = (
