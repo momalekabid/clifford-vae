@@ -17,7 +17,9 @@ def _unit_magnitude_fraction(F: torch.Tensor, tol: float = 0.05) -> float:
 
 def _bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return torch.fft.ifft(
-        torch.fft.fft(a, dim=-1) * torch.fft.fft(b, dim=-1), dim=-1
+        torch.fft.fft(a, dim=-1, norm="ortho") * torch.fft.fft(b, dim=-1, norm="ortho"),
+        dim=-1,
+        norm="ortho",
     ).real
 
 
@@ -712,7 +714,6 @@ def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 5
                 labels=["Correct", "Incorrect"],
                 autopct="%1.1f%%",
                 colors=["green", "red"],
-                alpha=0.7,
             )
             plt.title("Compositional Query Results")
 
