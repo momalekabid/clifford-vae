@@ -244,8 +244,24 @@ def main(args):
                 best = float("inf")
                 patience_counter = 0
 
+                # Cyclical KL beta (monotonic warmup followed by triangular cycles)
+                def kl_beta_for_epoch(e: int) -> float:
+                    # initial warmup
+                    if e < args.warmup_epochs:
+                        return min(1.0, (e + 1) / max(1, args.warmup_epochs)) * args.max_beta
+                    if args.cycle_epochs <= 0:
+                        return args.max_beta
+                    # triangular schedule in [min_beta, max_beta]
+                    cycle_pos = (e - args.warmup_epochs) % args.cycle_epochs
+                    half = max(1, args.cycle_epochs // 2)
+                    if cycle_pos <= half:
+                        t = cycle_pos / half
+                    else:
+                        t = (args.cycle_epochs - cycle_pos) / max(1, args.cycle_epochs - half)
+                    return args.min_beta + (args.max_beta - args.min_beta) * t
+
                 for epoch in range(args.epochs):
-                    beta = min(1.0, (epoch + 1) / args.warmup_epochs) * args.max_beta
+                    beta = kl_beta_for_epoch(epoch)
                     train_losses = train_epoch(
                         model, train_loader, optimizer, DEVICE, beta
                     )
@@ -389,9 +405,11 @@ if __name__ == "__main__":
         help="Weight for frequency domain loss",
     )
     p.add_argument("--max_beta", type=float, default=1.0)
+    p.add_argument("--min_beta", type=float, default=0.0, help="Minimum KL beta during cycles")
     p.add_argument("--no_wandb", action="store_true")
     p.add_argument("--wandb_project", type=str, default="aug-19-fashionmnist")
     p.add_argument("--patience", type=int, default=10)
+    p.add_argument("--cycle_epochs", type=int, default=0, help="Cycle length for cyclical KL beta after warmup (0=disabled)")
     p.add_argument("--fourier_weight", type=float, default=0.0, help="Weight for latent FFT magnitude regularization")
     args = p.parse_args()
     main(args)

@@ -380,7 +380,7 @@ def build_vsa_memory(model, loader, device, k_per_class: int = 3, seed: int = 0)
 
 
 @torch.no_grad()
-def evaluate_vsa_memory(model, loader, device, memory: torch.Tensor, label_vectors: dict, k_per_class: int = 3, lov: dict | None = None):
+def evaluate_vsa_memory(model, loader, device, memory: torch.Tensor, label_vectors: dict, k_per_class: int = 3, gallery: dict | None = None, **kwargs):
     """
     For each key f"c_i", unbind memory with that key and check top-1 among that class's k items equals i.
     Returns: instance_retrieval_acc, avg_cosine_to_true, num_items.
@@ -389,8 +389,8 @@ def evaluate_vsa_memory(model, loader, device, memory: torch.Tensor, label_vecto
         return 0.0, 0.0, 0
     model.eval()
 
-    if lov is None:
-        lov = {}
+    if gallery is None:
+        gallery = {}
         counts = {}
         for x, y in loader:
             x = x.to(device)
@@ -398,9 +398,9 @@ def evaluate_vsa_memory(model, loader, device, memory: torch.Tensor, label_vecto
             for i, label in enumerate(y.tolist()):
                 if label not in counts:
                     counts[label] = 0
-                    lov[label] = []
+                    gallery[label] = []
                 if counts[label] < k_per_class:
-                    lov[label].append(mu[i])
+                    gallery[label].append(mu[i])
                     counts[label] += 1
             if all(c >= k_per_class for c in counts.values()) and len(counts) >= 10:
                 break
@@ -418,9 +418,9 @@ def evaluate_vsa_memory(model, loader, device, memory: torch.Tensor, label_vecto
         except Exception:
             # skip non-instance keys if any
             continue
-        if class_label not in lov:
+        if class_label not in gallery:
             continue
-        candidates = torch.stack(lov[class_label], dim=0)
+        candidates = torch.stack(gallery[class_label], dim=0)
         recovered = vsa_unbind(memory, key_vec.unsqueeze(0))
         recovered_norm = torch.nn.functional.normalize(recovered, p=2, dim=-1)
         candidates_norm = torch.nn.functional.normalize(candidates, p=2, dim=-1)
