@@ -431,45 +431,6 @@ def vsa_invert(a: torch.Tensor) -> torch.Tensor:
     return torch.flip(a, dims=[-1])
 
 
-def vsa_make_unitary(x: torch.Tensor) -> torch.Tensor:
-    """
-    make |F(x)| = 1 for all frequencies.
-    """
-    Fx = torch.fft.fft(x, dim=-1, norm="ortho")
-    mags = torch.abs(Fx)
-    Fx_unit = Fx / torch.clamp(mags, min=1e-8)
-    return torch.fft.ifft(Fx_unit, dim=-1, norm="ortho").real
-
-
-def make_good_unitary_key(
-    dim: int, device: torch.device, eps: float = 1e-3
-) -> torch.Tensor:
-    """
-    based on the SSPSpace make_good_unitary function.
-    """
-    a = torch.rand((dim - 1) // 2, device=device)
-    sign = torch.randint(0, 2, size=a.shape, device=device) * 2 - 1  # -1 or +1
-    phi = sign * np.pi * (eps + a * (1 - 2 * eps))
-
-    # build complex Fourier vector
-    fv = torch.zeros(dim, dtype=torch.complex64, device=device)
-    fv[0] = 1
-    fv[1 : (dim + 1) // 2] = torch.cos(phi) + 1j * torch.sin(phi)
-
-    # Conjugate symmetry for real-valued output from ifft
-    # fv[-k] = conj(fv[k])
-    source_slice = fv[1 : (dim + 1) // 2]
-    flipped_conj = torch.flip(torch.conj(source_slice), dims=[-1])
-    fv[dim - source_slice.shape[0] : dim] = flipped_conj
-
-    if dim % 2 == 0:
-        fv[dim // 2] = 1
-
-    # convert to real space
-    v = torch.fft.ifft(fv, dim=-1, norm="ortho").real
-    return v
-
-
 @torch.no_grad()
 def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 50):
     """
@@ -504,7 +465,8 @@ def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 5
 
     single_bind_sims = []
     for i in range(min(n_test_pairs, z_all.shape[0] // 2)):
-        key = make_good_unitary_key(d, device)
+        key_idx = np.random.randint(z_all.shape[0])
+        key = z_all[key_idx]
         value = z_all[i]
 
         bound = _bind(key.unsqueeze(0), value.unsqueeze(0))
@@ -528,7 +490,8 @@ def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 5
             idx = test_run * n_bundle + i
             if idx >= z_all.shape[0]:
                 break
-            key = make_good_unitary_key(d, device)
+            key_idx = np.random.randint(z_all.shape[0])
+            key = z_all[key_idx]
             keys.append(key)
             values.append(z_all[idx])
 
