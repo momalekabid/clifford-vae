@@ -594,6 +594,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--vsa_normalize",
         action="store_true",
+        default=True,
         help="Normalize vectors during VSA ops for fair similarity (cosine)",
     )
 

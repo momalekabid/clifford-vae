@@ -300,9 +300,12 @@ def main(args):
                         torch.load(f"{output_dir}/best_model.pt", map_location=DEVICE)
                     )
 
-                    # fourier property testing of latent vectors
-                    fourier = test_fourier_properties(
-                        model, test_loader, DEVICE, output_dir, unbind_method="deconv"
+                    # fourier property testing of latent vectors (both unbinding methods)
+                    fourier_pseudo = test_fourier_properties(
+                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", mode="full"
+                    )
+                    fourier_deconv = test_fourier_properties(
+                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", mode="full"
                     )
 
                     use_unitary_keys = True #if not dist_name == "clifford" else False
@@ -366,11 +369,17 @@ def main(args):
                     vsa_bind_sim_pseudo = vsa_pseudo.get("vsa_bind_unbind_similarity", 0.0)
                     vsa_bind_sim_deconv = vsa_deconv.get("vsa_bind_unbind_similarity", 0.0)
 
-                    fourier_metrics = {
-                        k: v
-                        for k, v in fourier.items()
+                    fourier_metrics = {}
+                    fourier_metrics.update({
+                        f"pseudo/{k}": v
+                        for k, v in fourier_pseudo.items()
                         if isinstance(v, (int, float, bool))
-                    }
+                    })
+                    fourier_metrics.update({
+                        f"deconv/{k}": v
+                        for k, v in fourier_deconv.items()
+                        if isinstance(v, (int, float, bool))
+                    })
 
                     logger.log_metrics(
                         {
@@ -384,33 +393,23 @@ def main(args):
                     )
 
                     images = {
-                        "fft_spectrum": fourier.pop("fft_spectrum_plot_path", None),
                         "reconstructions": recon_path,
                         "tsne": tsne_path,
                         "pca": pca_path,
                     }
-                    # similarity-after-k-binds curve
-                    if (
-                        "similarity_after_k_binds_plot_path" in fourier
-                        and fourier["similarity_after_k_binds_plot_path"]
-                    ):
-                        images["similarity_after_k_binds"] = fourier[
-                            "similarity_after_k_binds_plot_path"
-                        ]
-                    if (
-                        "fft_avg_spectrum_plot_path" in fourier
-                        and fourier["fft_avg_spectrum_plot_path"]
-                    ):
-                        images["fft_avg_spectrum"] = fourier[
-                            "fft_avg_spectrum_plot_path"
-                        ]
-                    if (
-                        "bundling_superposition_plot_path" in fourier
-                        and fourier["bundling_superposition_plot_path"]
-                    ):
-                        images["bundling_superposition"] = fourier[
-                            "bundling_superposition_plot_path"
-                        ]
+                    # add Fourier images for both methods if present
+                    fp = fourier_pseudo.get("fft_spectrum_plot_path")
+                    fd = fourier_deconv.get("fft_spectrum_plot_path")
+                    if fp:
+                        images["fft_spectrum_pseudo"] = fp
+                    if fd:
+                        images["fft_spectrum_deconv"] = fd
+                    sp = fourier_pseudo.get("similarity_after_k_binds_plot_path")
+                    sd = fourier_deconv.get("similarity_after_k_binds_plot_path")
+                    if sp:
+                        images["similarity_after_k_binds_pseudo"] = sp
+                    if sd:
+                        images["similarity_after_k_binds_deconv"] = sd
 
                     vsa_path1 = vsa_pseudo.get("vsa_bind_unbind_plot")
                     vsa_path2 = vsa_deconv.get("vsa_bind_unbind_plot")
@@ -432,7 +431,7 @@ def main(args):
                         images["hrr_sentence_deconv"] = hrr_deconv["hrr_sentence_plot"]
                     summary = {
                         "final_best_loss": best,
-                        **fourier,
+                        **fourier_metrics,
                         **knn_metrics,
                         "mean_vector_cosine_acc": float(mean_vector_acc),
                         "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),

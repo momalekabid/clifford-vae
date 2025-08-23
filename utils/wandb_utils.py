@@ -42,7 +42,15 @@ def _fft_make_unitary(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
 
 
 
-def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int = 50, unbind_method: str = "pseudo"):
+def test_fourier_properties(
+    model,
+    loader,
+    device,
+    output_dir,
+    k_self_bind: int = 50,
+    unbind_method: str = "pseudo",
+    mode: str | None = None,
+):
     try:
         model.eval()
         with torch.no_grad():
@@ -89,7 +97,10 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
     mean_dev = dev.mean().item()
     max_dev = dev.max().item()
     frac_within = _unit_magnitude_fraction(Fz, tol=0.05)
-    # deprecated metrics removed per spec
+    # plotting mode handling (restore full plots if requested)
+    if mode is None:
+        mode = os.getenv("FOURIER_LOGGING", "full").lower()
+    mode = mode if mode in {"off", "minimal", "full"} else "full"
 
     a = z[:1]
     ab = a.clone()
@@ -186,9 +197,48 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
 
         os.makedirs(output_dir, exist_ok=True)
 
-        # optional: omit heavy Fourier visualizations per cleanup request
+        # full Fourier analysis panel
+        if mode == "full":
+            try:
+                fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+                # |F(z)| histogram
+                axes[0, 0].hist(mags.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
+                axes[0, 0].axvline(uniform, color="r", linestyle="--", linewidth=2)
+                axes[0, 0].set_title("|F(z)|")
+                axes[0, 0].grid(True, alpha=0.3)
+                # angle(F(z)) histogram
+                axes[0, 1].hist(phases.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
+                axes[0, 1].set_title("angle(F(z))")
+                axes[0, 1].grid(True, alpha=0.3)
+                # |F(bind)| histogram using self-bind once
+                mags_bind = torch.abs(torch.fft.fft(_bind(z[:1], z[:1]), dim=-1))
+                axes[1, 0].hist(mags_bind.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
+                axes[1, 0].axvline(uniform, color="r", linestyle="--", linewidth=2)
+                axes[1, 0].set_title("|F(bind)|")
+                axes[1, 0].grid(True, alpha=0.3)
+                # deviation heat/plot
+                try:
+                    axes[1, 1].imshow(dev.detach().cpu().numpy(), aspect="auto", cmap="viridis")
+                except Exception:
+                    dev_flat = dev.detach().cpu().numpy().ravel()
+                    axes[1, 1].plot(dev_flat[: min(100, len(dev_flat))], "o", markersize=2)
+                    axes[1, 1].set_xlabel("Sample")
+                    axes[1, 1].set_ylabel("Deviation")
+                axes[1, 1].set_title("Deviation |F|-1")
+
+                path = os.path.join(output_dir, "fourier_analysis.png")
+                plt.tight_layout()
+                plt.savefig(path, dpi=200, bbox_inches="tight")
+                plt.close()
+            except Exception as e:
+                print(f"Warning: Failed to plot fourier analysis : {e}")
+                try:
+                    plt.close(fig)  # type: ignore[name-defined]
+                except Exception:
+                    pass
+
         # similarity after k binds curve
-        path_bind_curve = os.path.join(output_dir, "similarity_after_k_binds.png")
+        path_bind_curve = os.path.join(output_dir, f"similarity_after_k_binds_{unbind_method}.png")
         plt.figure(figsize=(7, 4))
         xs = np.arange(1, k_self_bind + 1)
         plt.plot(xs, sims, marker="o")
@@ -360,7 +410,8 @@ def vsa_unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "pseudo") -> tor
 
 
 def vsa_invert(a: torch.Tensor) -> torch.Tensor:
-    return torch.flip(a, dims=[-1])
+    return torch.flip(a, dims=[-1]) # c = (a_1, a_2, ..., a_n) -> c = (a_n, ..., a_2, a_1)
+    # pseudo-inverse of a 
 
 
 @torch.no_grad()
@@ -373,10 +424,9 @@ def test_vsa_operations(
     unbind_method: str = "pseudo",
     unitary_keys: bool = False,
     normalize_vectors: bool = False,
+    use_dot_product: bool = True,
 ):
-    """
-    Reduced VSA test: only bind/unbind fidelity. Returns metric and plot path.
-    """
+    """dot product works better when vectors are normalized to unit length as Plate (1995) recommends."""
     model.eval()
 
     latents = []
@@ -416,7 +466,11 @@ def test_vsa_operations(
         recovered = _unbind(bound, a, method=unbind_method)
         if normalize_vectors:
             recovered = torch.nn.functional.normalize(recovered, p=2, dim=-1)
-        sim = torch.nn.functional.cosine_similarity(recovered, value.unsqueeze(0), dim=-1).item()
+        
+        if use_dot_product:
+            sim = torch.dot(recovered.squeeze(0), value).item()
+        else:
+            sim = torch.nn.functional.cosine_similarity(recovered, value.unsqueeze(0), dim=-1).item()
         single_bind_sims.append(sim)
 
     avg_single_sim = float(np.mean(single_bind_sims)) if single_bind_sims else 0.0
@@ -430,9 +484,10 @@ def test_vsa_operations(
             plt.subplot(1, 2, 1)
             plt.hist(single_bind_sims, bins=20, alpha=0.7, edgecolor="black")
             plt.axvline(np.mean(single_bind_sims), color="red", linestyle="--", label=f"Mean: {np.mean(single_bind_sims):.3f}")
-            plt.xlabel("Cosine Similarity")
+            sim_type = "Dot Product" if use_dot_product else "Cosine Similarity"
+            plt.xlabel(sim_type)
             plt.ylabel("Count")
-            plt.title("Bind-Unbind Fidelity")
+            plt.title(f"Bind-Unbind Fidelity ({sim_type})")
             plt.legend()
             plt.grid(alpha=0.3)
 
@@ -440,8 +495,8 @@ def test_vsa_operations(
             plt.plot(single_bind_sims, "o-", alpha=0.7, markersize=4)
             plt.axhline(np.mean(single_bind_sims), color="red", linestyle="--", alpha=0.8)
             plt.xlabel("Test Index")
-            plt.ylabel("Cosine Similarity")
-            plt.title("Per-Test Similarity")
+            plt.ylabel(sim_type)
+            plt.title(f"Per-Test Similarity ({sim_type})")
             plt.grid(alpha=0.3)
             plt.tight_layout()
             plt.savefig(path_vsa_test, dpi=200, bbox_inches="tight")
@@ -461,6 +516,7 @@ def test_hrr_mark_ate_fish(
     unbind_method: str = "pseudo",
     unitary_keys: bool = False,
     normalize_vectors: bool = False,
+    use_dot_product: bool = True,
 ):
     """
     HRR sentence test: build memory for "mark ate the fish" as
@@ -528,9 +584,13 @@ def test_hrr_mark_ate_fish(
 
     # cleanup among candidate objects
     candidates = torch.stack([the_fish, the_bread, food, person, john, paul], 0)
-    sims = torch.nn.functional.cosine_similarity(
-        recovered_object.unsqueeze(0), candidates, dim=-1
-    )
+    
+    if use_dot_product:
+        sims = torch.matmul(candidates, recovered_object)
+    else:
+        sims = torch.nn.functional.cosine_similarity(
+            recovered_object.unsqueeze(0), candidates, dim=-1
+        )
     best = int(torch.argmax(sims).item())
     is_correct = 1.0 if best == 0 else 0.0
 
@@ -542,8 +602,9 @@ def test_hrr_mark_ate_fish(
         plt.figure(figsize=(6, 3))
         plt.bar(np.arange(len(labels)), sims.detach().cpu().numpy(), alpha=0.8)
         plt.xticks(np.arange(len(labels)), labels, rotation=0)
-        plt.ylabel("cosine sim")
-        plt.title("Decode object from HRR: mark ate the fish")
+        sim_type = "dot product" if use_dot_product else "cosine sim"
+        plt.ylabel(sim_type)
+        plt.title(f"Decode object from HRR: mark ate the fish ({sim_type})")
         plt.tight_layout()
         plt.savefig(path, dpi=200, bbox_inches="tight")
         plt.close()
