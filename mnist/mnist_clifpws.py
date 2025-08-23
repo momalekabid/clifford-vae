@@ -554,7 +554,7 @@ if __name__ == "__main__":
         "--d_dims",
         type=int,
         nargs="+",
-        default=[2, 5, 10, 20, 40, 80, 128, 256],
+        default=[2, 5, 10, 20, 40, 100],
         help="Latent manifold dimensions to test",
     )
     parser.add_argument("--h_dim", type=int, default=128, help="Hidden layer size")
@@ -583,7 +583,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument(
-        "--wandb_project", type=str, default="bae-1", help="W&B project name"
+        "--wandb_project", type=str, default="mnist-clifpws-default-name", help="W&B project name"
     )
 
     args = parser.parse_args()

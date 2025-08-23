@@ -186,9 +186,9 @@ def main(args):
     print(f"Device: {DEVICE}")
     logger = WandbLogger(args)
 
-    latent_dims = [128, 1024, 4096]
+    latent_dims = [128, 256, 512, 1024, 2048, 4096, 5000]
     distributions = ["powerspherical", "clifford", "gaussian"]
-    datasets_to_test = ["fashionmnist"]
+    datasets_to_test = ["fashionmnist", "cifar10"]
     dataset_map = {"fashionmnist": datasets.FashionMNIST, "cifar10": datasets.CIFAR10}
 
     for dataset_name in datasets_to_test:
@@ -425,9 +425,9 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--epochs", type=int, default=200)
+    p.add_argument("--epochs", type=int, default=1000)
     p.add_argument("--warmup_epochs", type=int, default=100)
-    p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument(
         "--recon_loss", type=str, default="l1_freq", choices=["mse", "l1_freq"]
@@ -443,20 +443,20 @@ if __name__ == "__main__":
     p.add_argument(
         "--freq_weight",
         type=float,
-        default=0.1,
+        default=0.5,
         help="Weight for frequency domain loss",
     )
     p.add_argument("--max_beta", type=float, default=1.0)
     p.add_argument(
-        "--min_beta", type=float, default=0.0, help="Minimum KL beta during cycles"
+        "--min_beta", type=float, default=0.01, help="Minimum KL beta during cycles"
     )
     p.add_argument("--no_wandb", action="store_true")
-    p.add_argument("--wandb_project", type=str, default="aug-19-fashionmnist")
-    p.add_argument("--patience", type=int, default=10)
+    p.add_argument("--wandb_project", type=str, default="fashionmnist-cifar10-default-name")
+    p.add_argument("--patience", type=int, default=50)
     p.add_argument(
         "--cycle_epochs",
         type=int,
-        default=0,
+        default=100,
         help="Cycle length for cyclical KL beta after warmup (0=disabled)",
     )
     p.add_argument(
