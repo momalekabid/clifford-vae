@@ -327,7 +327,7 @@ def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
             sims = torch.nn.functional.cosine_similarity(
                 mu.unsqueeze(1), mean_vector.unsqueeze(0), dim=-1
             )
-        preds = sims.argmax(dim=1).cpu()
+            preds = sims.argmax(dim=1).cpu()
         else:
             dists = torch.cdist(mu, mean_vector, p=2)
             preds = dists.argmin(dim=1).cpu()
