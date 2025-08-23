@@ -25,6 +25,7 @@ from utils.wandb_utils import (
     compute_class_means,
     evaluate_mean_vector_cosine,
     test_vsa_operations,
+    test_hrr_mark_ate_fish,
 )
 
 
@@ -304,8 +305,27 @@ def main(args):
                         model, test_loader, DEVICE, output_dir, unbind_method="deconv"
                     )
 
-                    vsa_results = test_vsa_operations(
-                        model, test_loader, DEVICE, output_dir, n_test_pairs=50, unbind_method="pseudo"
+                    use_unitary_keys = True #if not dist_name == "clifford" else False
+                    normalize_vectors = getattr(args, "vsa_normalize", False)
+                    vsa_pseudo = test_vsa_operations(
+                        model,
+                        test_loader,
+                        DEVICE,
+                        output_dir,
+                        n_test_pairs=50,
+                        unbind_method="pseudo",
+                        unitary_keys=use_unitary_keys,
+                        normalize_vectors=normalize_vectors,
+                    )
+                    vsa_deconv = test_vsa_operations(
+                        model,
+                        test_loader,
+                        DEVICE,
+                        output_dir,
+                        n_test_pairs=50,
+                        unbind_method="deconv",
+                        unitary_keys=use_unitary_keys,
+                        normalize_vectors=normalize_vectors,
                     )
 
                     # reconstructions
@@ -343,12 +363,8 @@ def main(args):
                     print("mean vector acc: ", mean_vector_acc)
                     print("per class acc: ", per_class_acc)
 
-                    vsa_bind_sim = vsa_results.get("vsa_bind_unbind_similarity", 0.0)
-                    vsa_bundle_acc = vsa_results.get("vsa_bundle_retrieval_acc", 0.0)
-                    vsa_bundle_sim = vsa_results.get("vsa_bundle_avg_similarity", 0.0)
-                    vsa_compositional_acc = vsa_results.get(
-                        "vsa_compositional_acc", 0.0
-                    )
+                    vsa_bind_sim_pseudo = vsa_pseudo.get("vsa_bind_unbind_similarity", 0.0)
+                    vsa_bind_sim_deconv = vsa_deconv.get("vsa_bind_unbind_similarity", 0.0)
 
                     fourier_metrics = {
                         k: v
@@ -361,10 +377,8 @@ def main(args):
                             **knn_metrics,
                             **fourier_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
-                            "vsa_bind_unbind_similarity": float(vsa_bind_sim),
-                            "vsa_bundle_retrieval_acc": float(vsa_bundle_acc),
-                            "vsa_bundle_avg_similarity": float(vsa_bundle_sim),
-                            "vsa_compositional_acc": float(vsa_compositional_acc),
+                            "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
+                            "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                             "final_best_loss": best,
                         }
                     )
@@ -398,24 +412,31 @@ def main(args):
                             "bundling_superposition_plot_path"
                         ]
 
-                    vsa_path1 = vsa_results.get("vsa_bind_unbind_plot")
-                    vsa_path2 = vsa_results.get("vsa_bundle_plot")
-                    vsa_path3 = vsa_results.get("vsa_compositional_plot")
+                    vsa_path1 = vsa_pseudo.get("vsa_bind_unbind_plot")
+                    vsa_path2 = vsa_deconv.get("vsa_bind_unbind_plot")
                     if vsa_path1:
-                        images["vsa_bind_unbind_test"] = vsa_path1
+                        images["vsa_bind_unbind_pseudo"] = vsa_path1
                     if vsa_path2:
-                        images["vsa_bundle_capacity"] = vsa_path2
-                    if vsa_path3:
-                        images["vsa_compositional_reasoning"] = vsa_path3
+                        images["vsa_bind_unbind_deconv"] = vsa_path2
+                    # HRR sentence test
+                    from utils.wandb_utils import test_hrr_mark_ate_fish
+                    hrr_pseudo = test_hrr_mark_ate_fish(
+                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors
+                    )
+                    hrr_deconv = test_hrr_mark_ate_fish(
+                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors
+                    )
+                    if hrr_pseudo.get("hrr_sentence_plot"):
+                        images["hrr_sentence_pseudo"] = hrr_pseudo["hrr_sentence_plot"]
+                    if hrr_deconv.get("hrr_sentence_plot"):
+                        images["hrr_sentence_deconv"] = hrr_deconv["hrr_sentence_plot"]
                     summary = {
                         "final_best_loss": best,
                         **fourier,
                         **knn_metrics,
                         "mean_vector_cosine_acc": float(mean_vector_acc),
-                        "vsa_bind_unbind_similarity": float(vsa_bind_sim),
-                        "vsa_bundle_retrieval_acc": float(vsa_bundle_acc),
-                        "vsa_bundle_avg_similarity": float(vsa_bundle_sim),
-                        "vsa_compositional_acc": float(vsa_compositional_acc),
+                        "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
+                        "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)
@@ -464,6 +485,12 @@ if __name__ == "__main__":
         type=float,
         default=0.0,
         help="Weight for latent FFT magnitude regularization",
+    )
+    p.add_argument(
+        "--vsa_normalize",
+        action="store_true",
+        default=True,
+        help="Normalize vectors during VSA ops for fair similarity (cosine)",
     )
     args = p.parse_args()
     main(args)

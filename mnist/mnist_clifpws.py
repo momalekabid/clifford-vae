@@ -364,7 +364,13 @@ def run(args):
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
                     vsa_results = test_vsa_operations(
-                        model, test_eval_loader, device, vis_dir, n_test_pairs=50, unbind_method="pseudo"
+                        model,
+                        test_eval_loader,
+                        device,
+                        vis_dir,
+                        n_test_pairs=50,
+                        unbind_method="pseudo",
+                        normalize_vectors=getattr(args, "vsa_normalize", False),
                     )
 
                     if args.visualize or logger.use:
@@ -584,6 +590,11 @@ if __name__ == "__main__":
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument(
         "--wandb_project", type=str, default="mnist-clifpws-default-name", help="W&B project name"
+    )
+    parser.add_argument(
+        "--vsa_normalize",
+        action="store_true",
+        help="Normalize vectors during VSA ops for fair similarity (cosine)",
     )
 
     args = parser.parse_args()

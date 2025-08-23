@@ -16,7 +16,6 @@ def _unit_magnitude_fraction(F: torch.Tensor, tol: float = 0.05) -> float:
 
 
 def _bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    # HRR binding: circular convolution via FFT (default normalization)
     return torch.fft.ifft(
         torch.fft.fft(a, dim=-1) * torch.fft.fft(b, dim=-1), dim=-1
     ).real
@@ -24,9 +23,7 @@ def _bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 def _unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "pseudo") -> torch.Tensor:
     """
-    Unbinding options:
-    - method="pseudo": bind with time-reversal (HRR pseudo-inverse)
-    - method="deconv": robust deconvolution in Fourier domain
+    note: unbinding with pseudo-inverse is less exact but should work perfectly for "unitary" vectors (plate 1995) 
     """
     if method == "pseudo":
         return _bind(ab, vsa_invert(b))
@@ -37,8 +34,15 @@ def _unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "pseudo") -> torch.
         rec = torch.fft.ifft(Fab * torch.conj(Fb) / denom, dim=-1).real
         return rec
 
+def _fft_make_unitary(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    Fx = torch.fft.fft(x, dim=-1)
+    mags = torch.abs(Fx)
+    Fx_unit = Fx / torch.clamp(mags, min=eps)
+    return torch.fft.ifft(Fx_unit, dim=-1).real
 
-def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int = 15, unbind_method: str = "pseudo"):
+
+
+def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int = 50, unbind_method: str = "pseudo"):
     try:
         model.eval()
         with torch.no_grad():
@@ -360,164 +364,72 @@ def vsa_invert(a: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 50, unbind_method: str = "pseudo"):
+def test_vsa_operations(
+    model,
+    loader,
+    device,
+    output_dir,
+    n_test_pairs: int = 50,
+    unbind_method: str = "pseudo",
+    unitary_keys: bool = False,
+    normalize_vectors: bool = False,
+):
     """
-    Advanced HRR VSA test with compositional reasoning.
-    Tests: 1) bind/unbind fidelity, 2) bundling capacity, 3) compositional class reasoning
+    Reduced VSA test: only bind/unbind fidelity. Returns metric and plot path.
     """
     model.eval()
 
     latents = []
-    labels = []
-    for x, y in loader:
+    for x, _ in loader:
         x = x.to(device)
         mu = _extract_latent_mu(model, x)
         latents.append(mu.detach())
-        labels.append(y.to(device))
         if len(torch.cat(latents, 0)) >= n_test_pairs * 2:
             break
 
     if not latents:
-        return 0.0, 0.0, 0.0, None, None
+        return {"vsa_bind_unbind_similarity": 0.0, "vsa_bind_unbind_plot": None}
 
     z_all = torch.cat(latents, 0)[: n_test_pairs * 2]
-    y_all = torch.cat(labels, 0)[: n_test_pairs * 2]
     if z_all.shape[0] < 2:
-        return 0.0, 0.0, 0.0, None, None
+        return {"vsa_bind_unbind_similarity": 0.0, "vsa_bind_unbind_plot": None}
 
-    d = z_all.shape[-1]
     dist_type = getattr(model, "distribution", "normal")
-
-    if dist_type == "powerspherical":
+    if dist_type == "powerspherical" or normalize_vectors:
         z_all = torch.nn.functional.normalize(z_all, p=2, dim=-1)
 
     single_bind_sims = []
     for i in range(min(n_test_pairs, z_all.shape[0] // 2)):
         key_idx = np.random.randint(z_all.shape[0])
         key = z_all[key_idx]
+        if unitary_keys:
+            key = _fft_make_unitary(key)
         value = z_all[i]
-
-        bound = _bind(key.unsqueeze(0), value.unsqueeze(0))
-        recovered = _unbind(bound, key.unsqueeze(0), method=unbind_method)
-
-        sim = torch.nn.functional.cosine_similarity(
-            recovered, value.unsqueeze(0), dim=-1
-        ).item()
+        a = key.unsqueeze(0)
+        b = value.unsqueeze(0)
+        if normalize_vectors:
+            a = torch.nn.functional.normalize(a, p=2, dim=-1)
+            b = torch.nn.functional.normalize(b, p=2, dim=-1)
+        bound = _bind(a, b)
+        if normalize_vectors:
+            bound = torch.nn.functional.normalize(bound, p=2, dim=-1)
+        recovered = _unbind(bound, a, method=unbind_method)
+        if normalize_vectors:
+            recovered = torch.nn.functional.normalize(recovered, p=2, dim=-1)
+        sim = torch.nn.functional.cosine_similarity(recovered, value.unsqueeze(0), dim=-1).item()
         single_bind_sims.append(sim)
 
-    avg_single_sim = np.mean(single_bind_sims) if single_bind_sims else 0.0
-
-    # test #2, bundling multiple pairs and test retrieval
-    n_bundle = min(5, z_all.shape[0] // 2)
-    bundle_results = []
-
-    for test_run in range(min(10, n_test_pairs // 5)):
-        keys = []
-        values = []
-        for i in range(n_bundle):
-            idx = test_run * n_bundle + i
-            if idx >= z_all.shape[0]:
-                break
-            key_idx = np.random.randint(z_all.shape[0])
-            key = z_all[key_idx]
-            keys.append(key)
-            values.append(z_all[idx])
-
-        if len(keys) < 2:
-            continue
-
-        memory = None
-        for key, value in zip(keys, values):
-            bound = _bind(key.unsqueeze(0), value.unsqueeze(0))
-            memory = bound if memory is None else (memory + bound)
-
-        # test retrieval
-        correct_retrievals = 0
-        retrieval_sims = []
-
-        for i, (test_key, true_value) in enumerate(zip(keys, values)):
-            recovered = _unbind(memory, test_key.unsqueeze(0), method=unbind_method)
-
-            recovered_flat = recovered.squeeze(0)
-            values_stack = torch.stack(values, 0)
-
-            sims = torch.nn.functional.cosine_similarity(
-                recovered_flat.unsqueeze(0), values_stack, dim=-1
-            )
-            best_idx = torch.argmax(sims).item()
-
-            if best_idx == i:
-                correct_retrievals += 1
-
-            true_sim = sims[i].item()
-            retrieval_sims.append(true_sim)
-
-        bundle_acc = correct_retrievals / len(keys) if keys else 0.0
-        bundle_results.append(
-            (bundle_acc, np.mean(retrieval_sims) if retrieval_sims else 0.0)
-        )
-
-    avg_bundle_acc = np.mean([r[0] for r in bundle_results]) if bundle_results else 0.0
-    avg_bundle_sim = np.mean([r[1] for r in bundle_results]) if bundle_results else 0.0
-
-    compositional_scores = []
-    unique_labels = torch.unique(y_all)[:10]
-
-    if len(unique_labels) >= 2:
-        class_protos = {}
-        for label in unique_labels:
-            class_indices = (y_all == label).nonzero(as_tuple=True)[0][:5]
-            if len(class_indices) > 0:
-                class_vectors = z_all[class_indices]
-                class_protos[label.item()] = class_vectors.mean(dim=0)
-
-        for i in range(min(20, z_all.shape[0])):
-            item_vec = z_all[i]
-            true_label = y_all[i].item()
-
-            if true_label in class_protos:
-                class_vec = class_protos[true_label]
-                composite = _bind(item_vec.unsqueeze(0), class_vec.unsqueeze(0))
-
-                # see if we can recover the class from the composite
-                recovered_class = _unbind(composite, item_vec.unsqueeze(0), method=unbind_method).squeeze(0)
-
-                sims_to_classes = []
-                for label, proto in class_protos.items():
-                    sim = torch.nn.functional.cosine_similarity(
-                        recovered_class.unsqueeze(0), proto.unsqueeze(0), dim=-1
-                    ).item()
-                    sims_to_classes.append((label, sim))
-
-                # does the retrieved class have the right label
-                sims_to_classes.sort(key=lambda x: x[1], reverse=True)
-                if sims_to_classes[0][0] == true_label:
-                    compositional_scores.append(1.0)
-                else:
-                    compositional_scores.append(0.0)
-
-    compositional_acc = np.mean(compositional_scores) if compositional_scores else 0.0
+    avg_single_sim = float(np.mean(single_bind_sims)) if single_bind_sims else 0.0
 
     path_vsa_test = None
-    path_capacity_test = None
-    path_compositional_test = None
-
     try:
         os.makedirs(output_dir, exist_ok=True)
-
-        # single bind
         if single_bind_sims:
-            path_vsa_test = os.path.join(output_dir, "vsa_bind_unbind_test.png")
+            path_vsa_test = os.path.join(output_dir, f"vsa_bind_unbind_{unbind_method}.png")
             plt.figure(figsize=(10, 4))
-
             plt.subplot(1, 2, 1)
             plt.hist(single_bind_sims, bins=20, alpha=0.7, edgecolor="black")
-            plt.axvline(
-                np.mean(single_bind_sims),
-                color="red",
-                linestyle="--",
-                label=f"Mean: {np.mean(single_bind_sims):.3f}",
-            )
+            plt.axvline(np.mean(single_bind_sims), color="red", linestyle="--", label=f"Mean: {np.mean(single_bind_sims):.3f}")
             plt.xlabel("Cosine Similarity")
             plt.ylabel("Count")
             plt.title("Bind-Unbind Fidelity")
@@ -526,101 +438,116 @@ def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 5
 
             plt.subplot(1, 2, 2)
             plt.plot(single_bind_sims, "o-", alpha=0.7, markersize=4)
-            plt.axhline(
-                np.mean(single_bind_sims), color="red", linestyle="--", alpha=0.8
-            )
+            plt.axhline(np.mean(single_bind_sims), color="red", linestyle="--", alpha=0.8)
             plt.xlabel("Test Index")
             plt.ylabel("Cosine Similarity")
             plt.title("Per-Test Similarity")
             plt.grid(alpha=0.3)
-
             plt.tight_layout()
             plt.savefig(path_vsa_test, dpi=200, bbox_inches="tight")
             plt.close()
-
-        if bundle_results:
-            path_capacity_test = os.path.join(output_dir, "vsa_bundle_capacity.png")
-            accs = [r[0] for r in bundle_results]
-            sims = [r[1] for r in bundle_results]
-
-            plt.figure(figsize=(10, 4))
-
-            plt.subplot(1, 2, 1)
-            plt.scatter(accs, sims, alpha=0.7, s=50)
-            plt.xlabel("Bundle Retrieval Accuracy")
-            plt.ylabel("Average Similarity")
-            plt.title(f"Bundle Test (n={n_bundle} items)")
-            plt.grid(alpha=0.3)
-
-            plt.subplot(1, 2, 2)
-            x_pos = np.arange(len(bundle_results))
-            plt.bar(x_pos, accs, alpha=0.7, label="Accuracy")
-            plt.axhline(
-                np.mean(accs),
-                color="red",
-                linestyle="--",
-                alpha=0.8,
-                label=f"Mean: {np.mean(accs):.3f}",
-            )
-            plt.xlabel("Test Run")
-            plt.ylabel("Retrieval Accuracy")
-            plt.title("Bundle Retrieval Performance")
-            plt.legend()
-            plt.grid(alpha=0.3)
-
-            plt.tight_layout()
-            plt.savefig(path_capacity_test, dpi=200, bbox_inches="tight")
-            plt.close()
-
-        if compositional_scores:
-            path_compositional_test = os.path.join(
-                output_dir, "vsa_compositional_reasoning.png"
-            )
-            plt.figure(figsize=(10, 5))
-
-            plt.subplot(1, 2, 1)
-            plt.bar(
-                ["Compositional\nAccuracy"],
-                [compositional_acc],
-                alpha=0.7,
-                color="green",
-            )
-            plt.ylim(0, 1.1)
-            plt.ylabel("Accuracy")
-            plt.title(f"HRR Compositional Reasoning\n(Item ⊗ Class → Class Recovery)")
-            plt.axhline(
-                y=1 / len(class_protos) if len(unique_labels) >= 2 else 0.1,
-                color="red",
-                linestyle="--",
-                alpha=0.5,
-                label="Chance",
-            )
-            plt.legend()
-
-            plt.subplot(1, 2, 2)
-            correct = sum(compositional_scores)
-            incorrect = len(compositional_scores) - correct
-            plt.pie(
-                [correct, incorrect],
-                labels=["Correct", "Incorrect"],
-                autopct="%1.1f%%",
-                colors=["green", "red"],
-            )
-            plt.title("Compositional Query Results")
-
-            plt.tight_layout()
-            plt.savefig(path_compositional_test, dpi=200, bbox_inches="tight")
-            plt.close()
-
     except Exception as e:
-        print(f"Warning: VSA test plotting failed: {e}")
+        print(f"Warning: VSA bind/unbind plotting failed: {e}")
 
-    return {
-        "vsa_bind_unbind_similarity": avg_single_sim,
-        "vsa_bundle_retrieval_acc": avg_bundle_acc,
-        "vsa_bundle_avg_similarity": avg_bundle_sim,
-        "vsa_compositional_acc": compositional_acc,
-        "vsa_bind_unbind_plot": path_vsa_test,
-        "vsa_bundle_plot": path_capacity_test,
-        "vsa_compositional_plot": path_compositional_test,
-    }
+    return {"vsa_bind_unbind_similarity": avg_single_sim, "vsa_bind_unbind_plot": path_vsa_test}
+
+
+@torch.no_grad()
+def test_hrr_mark_ate_fish(
+    model,
+    loader,
+    device,
+    output_dir,
+    unbind_method: str = "pseudo",
+    unitary_keys: bool = False,
+    normalize_vectors: bool = False,
+):
+    """
+    HRR sentence test: build memory for "mark ate the fish" as
+    M = agent⊛mark + verb⊛eat + object⊛fish (+ frame_id). Taken from Plate, 1995.
+    Decode the object via unbinding with the object role; report cleanup accuracy
+    returns {hrr_sentence_object_acc, hrr_sentence_plot}
+    """
+    model.eval()
+
+    # collect a small pool of latent vectors
+    latents = []
+    with torch.no_grad():
+        for x, _ in loader:
+            x = x.to(device)
+            mu = _extract_latent_mu(model, x)
+            latents.append(mu.detach())
+            if len(torch.cat(latents, 0)) >= 512:
+                break
+    if not latents:
+        return {"hrr_sentence_object_acc": 0.0, "hrr_sentence_plot": None}
+
+    Z = torch.cat(latents, 0)
+    dist_type = getattr(model, "distribution", "normal")
+    if dist_type == "powerspherical" or normalize_vectors:
+        Z = torch.nn.functional.normalize(Z, p=2, dim=-1)
+
+    d = Z.shape[-1]
+
+    # choose fillers (candidates) and roles
+    rng = np.random.default_rng(0)
+    idx = rng.choice(Z.shape[0], size=12, replace=False)
+    mark, john, paul, person = Z[idx[0]], Z[idx[1]], Z[idx[2]], Z[idx[3]]
+    the_fish, the_bread, food = Z[idx[4]], Z[idx[5]], Z[idx[6]]
+    eat, see, state = Z[idx[7]], Z[idx[8]], Z[idx[9]]
+
+    # role keys
+    agent_role, object_role, verb_role = Z[idx[10]], Z[idx[11]], Z[idx[0]]
+    if unitary_keys:
+        agent_role = _fft_make_unitary(agent_role)
+        object_role = _fft_make_unitary(object_role)
+        verb_role = _fft_make_unitary(verb_role)
+
+    # construct sentence memory
+    a = agent_role.unsqueeze(0)
+    o = object_role.unsqueeze(0)
+    v = verb_role.unsqueeze(0)
+    m = mark.unsqueeze(0)
+    f = the_fish.unsqueeze(0)
+    e = eat.unsqueeze(0)
+    if normalize_vectors:
+        a = torch.nn.functional.normalize(a, p=2, dim=-1)
+        o = torch.nn.functional.normalize(o, p=2, dim=-1)
+        v = torch.nn.functional.normalize(v, p=2, dim=-1)
+        m = torch.nn.functional.normalize(m, p=2, dim=-1)
+        f = torch.nn.functional.normalize(f, p=2, dim=-1)
+        e = torch.nn.functional.normalize(e, p=2, dim=-1)
+    memory = _bind(a, m) + _bind(o, f) + _bind(v, e)
+    if normalize_vectors:
+        memory = torch.nn.functional.normalize(memory, p=2, dim=-1)
+
+    # decode the object
+    recovered_object = _unbind(memory, o, method=unbind_method).squeeze(0)
+    if normalize_vectors:
+        recovered_object = torch.nn.functional.normalize(recovered_object, p=2, dim=-1)
+
+    # cleanup among candidate objects
+    candidates = torch.stack([the_fish, the_bread, food, person, john, paul], 0)
+    sims = torch.nn.functional.cosine_similarity(
+        recovered_object.unsqueeze(0), candidates, dim=-1
+    )
+    best = int(torch.argmax(sims).item())
+    is_correct = 1.0 if best == 0 else 0.0
+
+    path = None
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        path = os.path.join(output_dir, f"hrr_mark_ate_fish_{unbind_method}.png")
+        labels = ["fish", "bread", "food", "person", "john", "paul"]
+        plt.figure(figsize=(6, 3))
+        plt.bar(np.arange(len(labels)), sims.detach().cpu().numpy(), alpha=0.8)
+        plt.xticks(np.arange(len(labels)), labels, rotation=0)
+        plt.ylabel("cosine sim")
+        plt.title("Decode object from HRR: mark ate the fish")
+        plt.tight_layout()
+        plt.savefig(path, dpi=200, bbox_inches="tight")
+        plt.close()
+    except Exception:
+        path = None
+
+    return {"hrr_sentence_object_acc": float(is_correct), "hrr_sentence_plot": path}
