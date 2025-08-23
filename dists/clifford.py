@@ -226,7 +226,7 @@ class CliffordTorusUniform(Distribution):
         theta_s[..., 1 : self.dim] = angles[..., 1:]
         theta_s[..., -self.dim + 1 :] = -torch.flip(angles[..., 1:], dims=(-1,))
         samples_complex = torch.exp(1j * theta_s)
-        return torch.fft.ifft(samples_complex, dim=-1, norm="ortho").real
+        return torch.fft.ifft(samples_complex, dim=-1).real
 
     def log_prob(self, value):
         return -torch.ones_like(value[..., 0]) * self.entropy()
@@ -264,7 +264,7 @@ class CliffordTorusDistribution(Distribution):
         samples_complex = torch.exp(1j * theta_s)
         # check how close to real vectors
         assert torch.allclose(samples_complex, samples_complex.conj().flip(-1))
-        return torch.fft.ifft(samples_complex, dim=-1, norm="ortho").real
+        return torch.fft.ifft(samples_complex, dim=-1).real
 
     def entropy(self):
         return compiled_von_mises_entropy(self.concentration)[..., 1:].sum(-1)
@@ -288,7 +288,7 @@ class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
         theta_s[..., 1 : self.orig_dim] = theta[..., 1:]
         theta_s[..., -self.orig_dim + 1 :] = -torch.flip(theta[..., 1:], (-1,))
         samples_c = torch.exp(1j * theta_s)
-        return torch.fft.ifft(samples_c, dim=-1, norm="ortho").real
+        return torch.fft.ifft(samples_c, dim=-1).real
 
     def entropy(self):
         return self._ps.entropy()[..., 1:].sum(-1)

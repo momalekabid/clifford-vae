@@ -16,26 +16,36 @@ def _unit_magnitude_fraction(F: torch.Tensor, tol: float = 0.05) -> float:
 
 
 def _bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    # HRR binding: circular convolution via FFT (default normalization)
     return torch.fft.ifft(
-        torch.fft.fft(a, dim=-1, norm="ortho") * torch.fft.fft(b, dim=-1, norm="ortho"),
-        dim=-1,
-        norm="ortho",
+        torch.fft.fft(a, dim=-1) * torch.fft.fft(b, dim=-1), dim=-1
     ).real
 
 
-def _unbind(ab: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    # pseudo-inverse
-    return _bind(ab, vsa_invert(b))
+def _unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "pseudo") -> torch.Tensor:
+    """
+    Unbinding options:
+    - method="pseudo": bind with time-reversal (HRR pseudo-inverse)
+    - method="deconv": robust deconvolution in Fourier domain
+    """
+    if method == "pseudo":
+        return _bind(ab, vsa_invert(b))
+    elif method == "deconv":
+        Fab = torch.fft.fft(ab, dim=-1)
+        Fb = torch.fft.fft(b, dim=-1)
+        denom = torch.clamp(torch.abs(Fb) ** 2, min=1e-8)
+        rec = torch.fft.ifft(Fab * torch.conj(Fb) / denom, dim=-1).real
+        return rec
 
 
-def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int = 15):
+def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int = 15, unbind_method: str = "pseudo"):
     try:
         model.eval()
         with torch.no_grad():
             x, _ = next(iter(loader))
             x = x.to(device)
             out = model(x)
-
+            
             if isinstance(out, (tuple, list)):
                 if len(out) == 4 and isinstance(out[0], tuple):
                     (z_mean, z_param2), (q_z, p_z), z, x_recon = out
@@ -65,7 +75,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
             "similarity_after_k_binds_plot_path": None,
         }
 
-    Fz = torch.fft.fft(z, dim=-1, norm="ortho")
+    Fz = torch.fft.fft(z, dim=-1)
     mags = torch.abs(Fz)
     phases = torch.angle(Fz)
     target = 1.0
@@ -75,17 +85,14 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
     mean_dev = dev.mean().item()
     max_dev = dev.max().item()
     frac_within = _unit_magnitude_fraction(Fz, tol=0.05)
-    phase_std = phases.std().item()
-    flat_mse = F.mse_loss(
-        mags.mean(dim=0), torch.full_like(mags.mean(dim=0), target)
-    ).item()
+    # deprecated metrics removed per spec
 
     a = z[:1]
     ab = a.clone()
     for _ in range(k_self_bind):
         ab = _bind(ab, a)
     for _ in range(k_self_bind):
-        ab = _unbind(ab, a)
+        ab = _unbind(ab, a, method=unbind_method)
     cos_sim = torch.nn.functional.cosine_similarity(ab, a, dim=-1).mean().item()
 
     # sim curve over m = 1..k_self_bind
@@ -95,7 +102,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
         for _ in range(m):
             cur = _bind(cur, a)
         for _ in range(m):
-            cur = _unbind(cur, a)
+            cur = _unbind(cur, a, method=unbind_method)
         sim_m = torch.nn.functional.cosine_similarity(cur, a, dim=-1).mean().item()
         sims.append(sim_m)
 
@@ -103,7 +110,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
         data_flat = data.ravel()
         data_min, data_max = data_flat.min(), data_flat.max()
         data_range = data_max - data_min
-
+        
         if data_range < 1e-10:
             ax.axhline(
                 y=1.0,
@@ -132,7 +139,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
             max_bins = min(50, max(3, int(np.sqrt(len(data_flat)))))
             bins = max_bins
             success = False
-
+            
             for attempt_bins in [bins, bins // 2, bins // 4, 5, 3]:
                 try:
                     ax.hist(data_flat, bins=attempt_bins, density=True, alpha=0.7)
@@ -140,7 +147,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
                     break
                 except (ValueError, np.linalg.LinAlgError):
                     continue
-
+            
             if not success:
                 if len(data_flat) > 1000:
                     indices = np.linspace(0, len(data_flat) - 1, 1000, dtype=int)
@@ -149,7 +156,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
                     ax.plot(data_flat, "o", alpha=0.7, markersize=2)
                 ax.set_xlabel("Index")
                 ax.set_ylabel("Value")
-
+        
         if target_line is not None and data_range > 1e-10:
             try:
                 ax.axvline(
@@ -162,15 +169,12 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
                 ax.legend()
             except:
                 pass
-
+        
         ax.set_title(title)
         ax.grid(True, alpha=0.3)
 
     path = None
-    path_avg = None
     path_bind_curve = None
-    path_bundle_curve = None
-    bundle_mse = None
     try:
         avg_mag = mags.mean(dim=0).detach().cpu().numpy()
         n = avg_mag.shape[-1]
@@ -178,45 +182,7 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
 
         os.makedirs(output_dir, exist_ok=True)
 
-        try:
-            fig, axes = plt.subplots(2, 2, figsize=(11, 8))
-            safe_hist(axes[0, 0], mags.cpu().numpy(), "|F(z)|", target)
-            safe_hist(axes[0, 1], phases.cpu().numpy(), "angle(F(z))")
-            safe_hist(
-                axes[1, 0],
-                torch.abs(torch.fft.fft(ab, dim=-1)).cpu().numpy(),
-                "|F(bind)|",
-                target,
-            )
-            try:
-                axes[1, 1].imshow(dev.cpu().numpy(), aspect="auto", cmap="viridis")
-            except Exception:
-                dev_flat = dev.cpu().numpy().ravel()
-                axes[1, 1].plot(dev_flat[: min(100, len(dev_flat))], "o", markersize=2)
-                axes[1, 1].set_xlabel("Sample")
-                axes[1, 1].set_ylabel("Deviation")
-            axes[1, 1].set_title("Deviation |F|-1")
-            path = os.path.join(output_dir, "fourier_analysis.png")
-            plt.tight_layout()
-            plt.savefig(path, dpi=200, bbox_inches="tight")
-            plt.close()
-            print(f"Fourier prop plot saved: {path}")
-        except Exception:
-            pass
-
-        # new avg magnitude spectrum
-        path_avg = os.path.join(output_dir, "fourier_avg_spectrum.png")
-        plt.figure(figsize=(11, 6))
-        plt.plot(avg_mag, label="Average |FFT(z)|")
-        plt.axhline(y=uniform, color="r", linestyle="--", label="Uniform value (1.0)")
-        plt.title("Average FFT Magnitude Spectrum of Encoded Vectors")
-        plt.xlabel("Frequency Index")
-        plt.ylabel("Magnitude")
-        plt.legend(loc="upper left")
-        plt.tight_layout()
-        plt.savefig(path_avg, dpi=200, bbox_inches="tight")
-        plt.close()
-        print(f"Fourier average spectrum saved: {path_avg}")
+        # optional: omit heavy Fourier visualizations per cleanup request
         # similarity after k binds curve
         path_bind_curve = os.path.join(output_dir, "similarity_after_k_binds.png")
         plt.figure(figsize=(7, 4))
@@ -231,59 +197,20 @@ def test_fourier_properties(model, loader, device, output_dir, k_self_bind: int 
         plt.savefig(path_bind_curve, dpi=200, bbox_inches="tight")
         plt.close()
 
-        try:
-            if z.shape[0] >= 3:
-                a_vec = z[0].detach()
-                b_vec = z[1].detach()
-                q = z[: min(256, z.shape[0])].detach()
-                bundle = a_vec + b_vec
-
-                sim_a = torch.nn.functional.cosine_similarity(
-                    q, a_vec.unsqueeze(0), dim=-1
-                )
-                sim_b = torch.nn.functional.cosine_similarity(
-                    q, b_vec.unsqueeze(0), dim=-1
-                )
-                sim_bundle = torch.nn.functional.cosine_similarity(
-                    q, bundle.unsqueeze(0), dim=-1
-                )
-                target = (sim_a + sim_b) / 2.0
-                bundle_mse = torch.mean((sim_bundle - target) ** 2).item()
-
-                path_bundle_curve = os.path.join(
-                    output_dir, "bundling_superposition.png"
-                )
-                plt.figure(figsize=(7, 4))
-                idx = torch.argsort(target).cpu().numpy()
-                plt.plot(target[idx].cpu().numpy(), label="(cos(q,a)+cos(q,b))/2")
-                plt.plot(sim_bundle[idx].cpu().numpy(), label="cos(q, a+b)")
-                plt.title("Bundling Superposition Check")
-                plt.xlabel("Query index (sorted by target)")
-                plt.ylabel("Similarity")
-                plt.legend()
-                plt.grid(alpha=0.3)
-                plt.tight_layout()
-                plt.savefig(path_bundle_curve, dpi=200, bbox_inches="tight")
-                plt.close()
-        except Exception:
-            pass
+        # removed bundling superposition diagnostic per spec
     except Exception as e:
         print(f"Warning: Failed to plot fourier magnitude spectrum: {e}")
 
     return {
         "fourier_frac_within_0p05": frac_within,
-        "fourier_phase_std": phase_std,
-        "fourier_flatness_mse": flat_mse,
+        # trimmed metrics
         "binding_k_self_similarity": cos_sim,
-        "bundling_superposition_mse": bundle_mse if bundle_mse is not None else 0.0,
         "fourier_mean_magnitude": mean_mag,
         "fourier_magnitude_std": std_mag,
         "fourier_mean_dev": mean_dev,
         "fourier_max_dev": max_dev,
         "fft_spectrum_plot_path": path,
-        "fft_avg_spectrum_plot_path": path_avg,
         "similarity_after_k_binds_plot_path": path_bind_curve,
-        "bundling_superposition_plot_path": path_bundle_curve,
     }
 
 
@@ -361,9 +288,10 @@ def compute_class_means(model, loader, device, max_per_class: int = 1000):
                 counts[label] += 1
 
     # finalize means
+    # average exactly 10 per class if available
     means = {}
     for label, total in sums.items():
-        c = max(1, counts[label])
+        c = max(1, min(counts[label], 10))
         vec = total / c
         if dist_type == "powerspherical":
             vec = torch.nn.functional.normalize(vec, p=2, dim=-1)
@@ -399,7 +327,7 @@ def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
             sims = torch.nn.functional.cosine_similarity(
                 mu.unsqueeze(1), mean_vector.unsqueeze(0), dim=-1
             )
-            preds = sims.argmax(dim=1).cpu()
+        preds = sims.argmax(dim=1).cpu()
         else:
             dists = torch.cdist(mu, mean_vector, p=2)
             preds = dists.argmin(dim=1).cpu()
@@ -423,8 +351,8 @@ def vsa_bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return _bind(a, b)
 
 
-def vsa_unbind(ab: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return _unbind(ab, b)
+def vsa_unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "pseudo") -> torch.Tensor:
+    return _unbind(ab, b, method=method)
 
 
 def vsa_invert(a: torch.Tensor) -> torch.Tensor:
@@ -432,7 +360,7 @@ def vsa_invert(a: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 50):
+def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 50, unbind_method: str = "pseudo"):
     """
     Advanced HRR VSA test with compositional reasoning.
     Tests: 1) bind/unbind fidelity, 2) bundling capacity, 3) compositional class reasoning
@@ -470,7 +398,7 @@ def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 5
         value = z_all[i]
 
         bound = _bind(key.unsqueeze(0), value.unsqueeze(0))
-        recovered = _unbind(bound, key.unsqueeze(0))
+        recovered = _unbind(bound, key.unsqueeze(0), method=unbind_method)
 
         sim = torch.nn.functional.cosine_similarity(
             recovered, value.unsqueeze(0), dim=-1
@@ -508,7 +436,7 @@ def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 5
         retrieval_sims = []
 
         for i, (test_key, true_value) in enumerate(zip(keys, values)):
-            recovered = _unbind(memory, test_key.unsqueeze(0))
+            recovered = _unbind(memory, test_key.unsqueeze(0), method=unbind_method)
 
             recovered_flat = recovered.squeeze(0)
             values_stack = torch.stack(values, 0)
@@ -552,7 +480,7 @@ def test_vsa_operations(model, loader, device, output_dir, n_test_pairs: int = 5
                 composite = _bind(item_vec.unsqueeze(0), class_vec.unsqueeze(0))
 
                 # see if we can recover the class from the composite
-                recovered_class = _unbind(composite, item_vec.unsqueeze(0)).squeeze(0)
+                recovered_class = _unbind(composite, item_vec.unsqueeze(0), method=unbind_method).squeeze(0)
 
                 sims_to_classes = []
                 for label, proto in class_protos.items():

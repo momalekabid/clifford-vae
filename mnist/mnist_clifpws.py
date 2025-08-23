@@ -358,12 +358,13 @@ def run(args):
                         test_subset_loader,
                         device,
                         f"visualizations/d_{mdim}/{dist}",
+                        unbind_method="pseudo",
                     )
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
                     vsa_results = test_vsa_operations(
-                        model, test_eval_loader, device, vis_dir, n_test_pairs=50
+                        model, test_eval_loader, device, vis_dir, n_test_pairs=50, unbind_method="pseudo"
                     )
 
                     if args.visualize or logger.use:

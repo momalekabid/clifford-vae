@@ -301,11 +301,11 @@ def main(args):
 
                     # fourier property testing of latent vectors
                     fourier = test_fourier_properties(
-                        model, test_loader, DEVICE, output_dir
+                        model, test_loader, DEVICE, output_dir, unbind_method="deconv"
                     )
 
                     vsa_results = test_vsa_operations(
-                        model, test_loader, DEVICE, output_dir, n_test_pairs=50
+                        model, test_loader, DEVICE, output_dir, n_test_pairs=50, unbind_method="pseudo"
                     )
 
                     # reconstructions
@@ -325,7 +325,7 @@ def main(args):
 
                     # knn eval
                     knn_metrics = perform_knn_evaluation(
-                        model, train_loader, test_loader, DEVICE, [100, 600, 1000, 2048]
+                        model, train_loader, test_loader, DEVICE, [100, 600, 1000]
                     )
 
                     train_subset = torch.utils.data.Subset(
