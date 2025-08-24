@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
+from collections import defaultdict
 
 try:
     import wandb
@@ -23,15 +24,15 @@ def _bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 def _unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "pseudo") -> torch.Tensor:
     """
-    note: unbinding with pseudo-inverse is less exact but should work perfectly for "unitary" vectors (plate 1995) 
+      - pseudo: x̂ = (ab) ⊛ a^{-1}, where a^{-1} = (a_n, ..., a_2, a_1)  
+      - deconv: x̂ = IFFT( FFT(ab) / FFT(a) ) 
     """
     if method == "pseudo":
         return _bind(ab, vsa_invert(b))
     elif method == "deconv":
         Fab = torch.fft.fft(ab, dim=-1)
         Fb = torch.fft.fft(b, dim=-1)
-        denom = torch.clamp(torch.abs(Fb) ** 2, min=1e-8)
-        rec = torch.fft.ifft(Fab * torch.conj(Fb) / denom, dim=-1).real
+        rec = torch.fft.ifft(Fab / (Fb + 1e-12), dim=-1).real
         return rec
 
 def _fft_make_unitary(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -49,7 +50,6 @@ def test_fourier_properties(
     output_dir,
     k_self_bind: int = 50,
     unbind_method: str = "pseudo",
-    mode: str | None = None,
 ):
     try:
         model.eval()
@@ -97,10 +97,6 @@ def test_fourier_properties(
     mean_dev = dev.mean().item()
     max_dev = dev.max().item()
     frac_within = _unit_magnitude_fraction(Fz, tol=0.05)
-    # plotting mode handling (restore full plots if requested)
-    if mode is None:
-        mode = os.getenv("FOURIER_LOGGING", "full").lower()
-    mode = mode if mode in {"off", "minimal", "full"} else "full"
 
     a = z[:1]
     ab = a.clone()
@@ -197,47 +193,39 @@ def test_fourier_properties(
 
         os.makedirs(output_dir, exist_ok=True)
 
-        # full Fourier analysis panel
-        if mode == "full":
+        try:
+            fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+            axes[0, 0].hist(mags.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
+            axes[0, 0].axvline(uniform, color="r", linestyle="--", linewidth=2)
+            axes[0, 0].set_title("|F(z)|")
+            axes[0, 0].grid(True, alpha=0.3)
+            axes[0, 1].hist(phases.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
+            axes[0, 1].set_title("angle(F(z))")
+            axes[0, 1].grid(True, alpha=0.3)
+            mags_bind = torch.abs(torch.fft.fft(_bind(z[:1], z[:1]), dim=-1))
+            axes[1, 0].hist(mags_bind.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
+            axes[1, 0].axvline(uniform, color="r", linestyle="--", linewidth=2)
+            axes[1, 0].set_title("|F(bind)|")
+            axes[1, 0].grid(True, alpha=0.3)
             try:
-                fig, axes = plt.subplots(2, 2, figsize=(11, 8))
-                # |F(z)| histogram
-                axes[0, 0].hist(mags.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
-                axes[0, 0].axvline(uniform, color="r", linestyle="--", linewidth=2)
-                axes[0, 0].set_title("|F(z)|")
-                axes[0, 0].grid(True, alpha=0.3)
-                # angle(F(z)) histogram
-                axes[0, 1].hist(phases.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
-                axes[0, 1].set_title("angle(F(z))")
-                axes[0, 1].grid(True, alpha=0.3)
-                # |F(bind)| histogram using self-bind once
-                mags_bind = torch.abs(torch.fft.fft(_bind(z[:1], z[:1]), dim=-1))
-                axes[1, 0].hist(mags_bind.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
-                axes[1, 0].axvline(uniform, color="r", linestyle="--", linewidth=2)
-                axes[1, 0].set_title("|F(bind)|")
-                axes[1, 0].grid(True, alpha=0.3)
-                # deviation heat/plot
-                try:
-                    axes[1, 1].imshow(dev.detach().cpu().numpy(), aspect="auto", cmap="viridis")
-                except Exception:
-                    dev_flat = dev.detach().cpu().numpy().ravel()
-                    axes[1, 1].plot(dev_flat[: min(100, len(dev_flat))], "o", markersize=2)
-                    axes[1, 1].set_xlabel("Sample")
-                    axes[1, 1].set_ylabel("Deviation")
-                axes[1, 1].set_title("Deviation |F|-1")
+                axes[1, 1].imshow(dev.detach().cpu().numpy(), aspect="auto", cmap="viridis")
+            except Exception:
+                dev_flat = dev.detach().cpu().numpy().ravel()
+                axes[1, 1].plot(dev_flat[: min(100, len(dev_flat))], "o", markersize=2)
+                axes[1, 1].set_xlabel("Sample")
+                axes[1, 1].set_ylabel("Deviation")
+            axes[1, 1].set_title("Deviation |F|-1")
+            path = os.path.join(output_dir, "fourier_analysis.png")
+            plt.tight_layout()
+            plt.savefig(path, dpi=200, bbox_inches="tight")
+            plt.close()
+        except Exception as e:
+            print(f"Warning: Failed to plot fourier analysis : {e}")
+            try:
+                plt.close(fig)
+            except Exception:
+                pass
 
-                path = os.path.join(output_dir, "fourier_analysis.png")
-                plt.tight_layout()
-                plt.savefig(path, dpi=200, bbox_inches="tight")
-                plt.close()
-            except Exception as e:
-                print(f"Warning: Failed to plot fourier analysis : {e}")
-                try:
-                    plt.close(fig)  # type: ignore[name-defined]
-                except Exception:
-                    pass
-
-        # similarity after k binds curve
         path_bind_curve = os.path.join(output_dir, f"similarity_after_k_binds_{unbind_method}.png")
         plt.figure(figsize=(7, 4))
         xs = np.arange(1, k_self_bind + 1)
@@ -251,7 +239,6 @@ def test_fourier_properties(
         plt.savefig(path_bind_curve, dpi=200, bbox_inches="tight")
         plt.close()
 
-        # removed bundling superposition diagnostic per spec
     except Exception as e:
         print(f"Warning: Failed to plot fourier magnitude spectrum: {e}")
 
@@ -320,6 +307,19 @@ def _extract_latent_mu(model, x: torch.Tensor):
         else:
             return out[-1]
     return out
+FASHION_MNIST_CLASSES = [
+    "T-shirt/top",  # 0
+    "Trouser",      # 1
+    "Pullover",     # 2
+    "Dress",        # 3
+    "Coat",         # 4
+    "Sandal",       # 5
+    "Shirt",        # 6
+    "Sneaker",      # 7
+    "Bag",          # 8
+    "Ankle boot",   # 9
+]
+
 
 
 @torch.no_grad()
@@ -355,7 +355,6 @@ def compute_class_means(model, loader, device, max_per_class: int = 1000):
 
 @torch.no_grad()
 def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
-    """Evaluate using cosine for spherical dists, euclidean for normal."""
     model.eval()
     labels_sorted = sorted(class_means.keys())
     mean_vector = torch.stack([class_means[k] for k in labels_sorted], dim=0).to(device)
@@ -401,6 +400,37 @@ def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
     return acc, per_class_acc
 
 
+@torch.no_grad()
+def evaluate_mean_vector_euclidean(model, loader, device, class_means: dict):
+    model.eval()
+    labels_sorted = sorted(class_means.keys())
+    mean_vector = torch.stack([class_means[k] for k in labels_sorted], dim=0).to(device)
+
+    correct = 0
+    total = 0
+    per_class_correct = {k: 0 for k in labels_sorted}
+    per_class_total = {k: 0 for k in labels_sorted}
+
+    for x, y in loader:
+        x = x.to(device)
+        mu = _extract_latent_mu(model, x)
+
+        dists = torch.cdist(mu, mean_vector, p=2)
+        preds = dists.argmin(dim=1).cpu()
+
+        y_cpu = y.cpu()
+        correct += (preds == y_cpu).sum().item()
+        total += y_cpu.numel()
+        for yi, pi in zip(y_cpu.tolist(), preds.tolist()):
+            per_class_total[yi] += 1
+            if yi == labels_sorted[pi]:
+                per_class_correct[yi] += 1
+
+    acc = correct / max(1, total)
+    per_class_acc = {k: (per_class_correct[k] / max(1, per_class_total[k])) for k in labels_sorted}
+    return acc, per_class_acc
+
+
 def vsa_bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return _bind(a, b)
 
@@ -424,9 +454,7 @@ def test_vsa_operations(
     unbind_method: str = "pseudo",
     unitary_keys: bool = False,
     normalize_vectors: bool = False,
-    use_dot_product: bool = True,
 ):
-    """dot product works better when vectors are normalized to unit length as Plate (1995) recommends."""
     model.eval()
 
     latents = []
@@ -457,20 +485,11 @@ def test_vsa_operations(
         value = z_all[i]
         a = key.unsqueeze(0)
         b = value.unsqueeze(0)
-        if normalize_vectors:
-            a = torch.nn.functional.normalize(a, p=2, dim=-1)
-            b = torch.nn.functional.normalize(b, p=2, dim=-1)
         bound = _bind(a, b)
-        if normalize_vectors:
-            bound = torch.nn.functional.normalize(bound, p=2, dim=-1)
         recovered = _unbind(bound, a, method=unbind_method)
-        if normalize_vectors:
-            recovered = torch.nn.functional.normalize(recovered, p=2, dim=-1)
-        
-        if use_dot_product:
-            sim = torch.dot(recovered.squeeze(0), value).item()
-        else:
-            sim = torch.nn.functional.cosine_similarity(recovered, value.unsqueeze(0), dim=-1).item()
+        sim = torch.nn.functional.cosine_similarity(
+            recovered, value.unsqueeze(0), dim=-1
+        ).item()
         single_bind_sims.append(sim)
 
     avg_single_sim = float(np.mean(single_bind_sims)) if single_bind_sims else 0.0
@@ -484,10 +503,9 @@ def test_vsa_operations(
             plt.subplot(1, 2, 1)
             plt.hist(single_bind_sims, bins=20, alpha=0.7, edgecolor="black")
             plt.axvline(np.mean(single_bind_sims), color="red", linestyle="--", label=f"Mean: {np.mean(single_bind_sims):.3f}")
-            sim_type = "Dot Product" if use_dot_product else "Cosine Similarity"
-            plt.xlabel(sim_type)
+            plt.xlabel("Cosine Similarity")
             plt.ylabel("Count")
-            plt.title(f"Bind-Unbind Fidelity ({sim_type})")
+            plt.title("Bind-Unbind Fidelity")
             plt.legend()
             plt.grid(alpha=0.3)
 
@@ -495,8 +513,8 @@ def test_vsa_operations(
             plt.plot(single_bind_sims, "o-", alpha=0.7, markersize=4)
             plt.axhline(np.mean(single_bind_sims), color="red", linestyle="--", alpha=0.8)
             plt.xlabel("Test Index")
-            plt.ylabel(sim_type)
-            plt.title(f"Per-Test Similarity ({sim_type})")
+            plt.ylabel("Cosine Similarity")
+            plt.title("Per-Test Similarity")
             plt.grid(alpha=0.3)
             plt.tight_layout()
             plt.savefig(path_vsa_test, dpi=200, bbox_inches="tight")
@@ -507,8 +525,9 @@ def test_vsa_operations(
     return {"vsa_bind_unbind_similarity": avg_single_sim, "vsa_bind_unbind_plot": path_vsa_test}
 
 
+
 @torch.no_grad()
-def test_hrr_mark_ate_fish(
+def test_hrr_fashionmnist_sentence(
     model,
     loader,
     device,
@@ -516,99 +535,87 @@ def test_hrr_mark_ate_fish(
     unbind_method: str = "pseudo",
     unitary_keys: bool = False,
     normalize_vectors: bool = False,
-    use_dot_product: bool = True,
 ):
-    """
-    HRR sentence test: build memory for "mark ate the fish" as
-    M = agent⊛mark + verb⊛eat + object⊛fish (+ frame_id). Taken from Plate, 1995.
-    Decode the object via unbinding with the object role; report cleanup accuracy
-    returns {hrr_sentence_object_acc, hrr_sentence_plot}
-    """
     model.eval()
 
-    # collect a small pool of latent vectors
-    latents = []
-    with torch.no_grad():
-        for x, _ in loader:
-            x = x.to(device)
-            mu = _extract_latent_mu(model, x)
-            latents.append(mu.detach())
-            if len(torch.cat(latents, 0)) >= 512:
-                break
-    if not latents:
-        return {"hrr_sentence_object_acc": 0.0, "hrr_sentence_plot": None}
+    # collect latent means grouped by label
+    by_label = defaultdict(list)
+    for x, y in loader:
+        x = x.to(device)
+        mu = _extract_latent_mu(model, x)
+        for vec, lbl in zip(mu.detach(), y.tolist()):
+            by_label[lbl].append(vec)
+        if sum(len(v) for v in by_label.values()) >= 1000:
+            break
 
-    Z = torch.cat(latents, 0)
+    if not by_label or any(len(v) == 0 for v in by_label.values() if v is not None):
+        return {"hrr_fashion_object_acc": 0.0, "hrr_fashion_plot": None}
+
+    # class prototypes (mean vectors per class)
+    class_vecs = []
+    for k in range(10):
+        if len(by_label[k]) == 0:
+            continue
+        m = torch.stack(by_label[k], 0).mean(0)
+        class_vecs.append(m)
+    if len(class_vecs) < 2:
+        return {"hrr_fashion_object_acc": 0.0, "hrr_fashion_plot": None}
+    class_vecs = torch.stack(class_vecs, 0)
+
     dist_type = getattr(model, "distribution", "normal")
     if dist_type == "powerspherical" or normalize_vectors:
-        Z = torch.nn.functional.normalize(Z, p=2, dim=-1)
+        class_vecs = torch.nn.functional.normalize(class_vecs, p=2, dim=-1)
 
-    d = Z.shape[-1]
-
-    # choose fillers (candidates) and roles
     rng = np.random.default_rng(0)
-    idx = rng.choice(Z.shape[0], size=12, replace=False)
-    mark, john, paul, person = Z[idx[0]], Z[idx[1]], Z[idx[2]], Z[idx[3]]
-    the_fish, the_bread, food = Z[idx[4]], Z[idx[5]], Z[idx[6]]
-    eat, see, state = Z[idx[7]], Z[idx[8]], Z[idx[9]]
-
-    # role keys
-    agent_role, object_role, verb_role = Z[idx[10]], Z[idx[11]], Z[idx[0]]
+    role_item = class_vecs[rng.integers(0, class_vecs.shape[0])]
+    role_container = class_vecs[rng.integers(0, class_vecs.shape[0])]
     if unitary_keys:
-        agent_role = _fft_make_unitary(agent_role)
-        object_role = _fft_make_unitary(object_role)
-        verb_role = _fft_make_unitary(verb_role)
+        role_item = _fft_make_unitary(role_item)
+        role_container = _fft_make_unitary(role_container)
 
-    # construct sentence memory
-    a = agent_role.unsqueeze(0)
-    o = object_role.unsqueeze(0)
-    v = verb_role.unsqueeze(0)
-    m = mark.unsqueeze(0)
-    f = the_fish.unsqueeze(0)
-    e = eat.unsqueeze(0)
+    label_to_idx = {name: i for i, name in enumerate(FASHION_MNIST_CLASSES)}
+    candidates_idx = [i for i in range(class_vecs.shape[0])]
+    item_idx = 7 if 7 < class_vecs.shape[0] else candidates_idx[0]
+    container_idx = 8 if 8 < class_vecs.shape[0] else candidates_idx[-1]
+    item_vec = class_vecs[item_idx].unsqueeze(0)
+    container_vec = class_vecs[container_idx].unsqueeze(0)
+
+    a = role_item.unsqueeze(0)
+    c = role_container.unsqueeze(0)
     if normalize_vectors:
         a = torch.nn.functional.normalize(a, p=2, dim=-1)
-        o = torch.nn.functional.normalize(o, p=2, dim=-1)
-        v = torch.nn.functional.normalize(v, p=2, dim=-1)
-        m = torch.nn.functional.normalize(m, p=2, dim=-1)
-        f = torch.nn.functional.normalize(f, p=2, dim=-1)
-        e = torch.nn.functional.normalize(e, p=2, dim=-1)
-    memory = _bind(a, m) + _bind(o, f) + _bind(v, e)
-    if normalize_vectors:
-        memory = torch.nn.functional.normalize(memory, p=2, dim=-1)
+        c = torch.nn.functional.normalize(c, p=2, dim=-1)
+        item_vec = torch.nn.functional.normalize(item_vec, p=2, dim=-1)
+        container_vec = torch.nn.functional.normalize(container_vec, p=2, dim=-1)
 
-    # decode the object
-    recovered_object = _unbind(memory, o, method=unbind_method).squeeze(0)
+    # memory and decode
+    memory = _bind(a, item_vec) + _bind(c, container_vec)
+    recovered_item = _unbind(memory, a, method=unbind_method).squeeze(0)
     if normalize_vectors:
-        recovered_object = torch.nn.functional.normalize(recovered_object, p=2, dim=-1)
+        recovered_item = torch.nn.functional.normalize(recovered_item, p=2, dim=-1)
 
-    # cleanup among candidate objects
-    candidates = torch.stack([the_fish, the_bread, food, person, john, paul], 0)
-    
-    if use_dot_product:
-        sims = torch.matmul(candidates, recovered_object)
-    else:
-        sims = torch.nn.functional.cosine_similarity(
-            recovered_object.unsqueeze(0), candidates, dim=-1
-        )
+    # cleanup among all classes
+    sims = torch.nn.functional.cosine_similarity(
+        recovered_item.unsqueeze(0), class_vecs, dim=-1
+    )
     best = int(torch.argmax(sims).item())
-    is_correct = 1.0 if best == 0 else 0.0
+    is_correct = 1.0 if best == item_idx else 0.0
 
+    # plot
     path = None
     try:
         os.makedirs(output_dir, exist_ok=True)
-        path = os.path.join(output_dir, f"hrr_mark_ate_fish_{unbind_method}.png")
-        labels = ["fish", "bread", "food", "person", "john", "paul"]
-        plt.figure(figsize=(6, 3))
+        path = os.path.join(output_dir, f"hrr_fashion_{unbind_method}.png")
+        labels = FASHION_MNIST_CLASSES[: class_vecs.shape[0]]
+        plt.figure(figsize=(8, 3))
         plt.bar(np.arange(len(labels)), sims.detach().cpu().numpy(), alpha=0.8)
-        plt.xticks(np.arange(len(labels)), labels, rotation=0)
-        sim_type = "dot product" if use_dot_product else "cosine sim"
-        plt.ylabel(sim_type)
-        plt.title(f"Decode object from HRR: mark ate the fish ({sim_type})")
+        plt.xticks(np.arange(len(labels)), labels, rotation=30, ha="right")
+        plt.ylabel("cosine sim")
+        plt.title("Decode item from HRR (FashionMNIST class vectors)")
         plt.tight_layout()
         plt.savefig(path, dpi=200, bbox_inches="tight")
         plt.close()
     except Exception:
         path = None
 
-    return {"hrr_sentence_object_acc": float(is_correct), "hrr_sentence_plot": path}
+    return {"hrr_fashion_object_acc": float(is_correct), "hrr_fashion_plot": path}

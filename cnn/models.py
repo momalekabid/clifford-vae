@@ -80,7 +80,6 @@ class VAE(nn.Module):
         use_perceptual_loss: bool = False,
         l1_weight: float = 1.0,
         freq_weight: float = 1.0,
-        fourier_mag_weight: float = 0.0,
     ):
         super().__init__()
         self.latent_dim = latent_dim
@@ -91,24 +90,12 @@ class VAE(nn.Module):
         self.l1_weight = l1_weight
         self.freq_weight = freq_weight
         self.use_perceptual_loss = use_perceptual_loss
-        self.fourier_mag_weight = fourier_mag_weight
 
         self.encoder = Encoder(
             latent_dim, in_channels=in_channels, distribution=distribution
         )
         dec_in_dim = 2 * latent_dim if distribution == "clifford" else latent_dim
         self.decoder = Decoder(dec_in_dim, out_channels=in_channels)
-
-        if self.use_perceptual_loss:
-            try:
-                import lpips
-
-                self.lpips_loss_fn = lpips.LPIPS(net="vgg").to(device)
-                for param in self.lpips_loss_fn.parameters():
-                    param.requires_grad = False
-            except ImportError:
-                print("Warning: lpips not available. Disabling perceptual loss.")
-                self.use_perceptual_loss = False
 
         self.to(device)
 
@@ -200,28 +187,6 @@ class VAE(nn.Module):
                 f"Unknown reconstruction loss type: {self.recon_loss_type}"
             )
 
-        if self.use_perceptual_loss:
-            x_for_loss = x.repeat(1, 3, 1, 1) if x.size(1) == 1 else x
-            x_recon_for_loss = (
-                x_recon.repeat(1, 3, 1, 1) if x_recon.size(1) == 1 else x_recon
-            )
-            recon_loss += self.lpips_loss_fn(x_recon_for_loss, x_for_loss).mean()
-
         total_loss = recon_loss + beta * kld
 
-        # optional Fourier magnitude regularization on latent samples when available
-        try:
-            if self.fourier_mag_weight > 0:
-                # get a latent sample deterministically from q_z (mean if possible; else rsample)
-                if hasattr(q_z, "mean") and isinstance(q_z.mean, torch.Tensor):
-                    z_for_fft = q_z.mean
-                else:
-                    z_for_fft = q_z.rsample()
-                Fz = torch.fft.fft(z_for_fft, dim=-1)
-                mags = torch.abs(Fz)
-                target_mag = torch.ones_like(mags)
-                fourier_mag_penalty = F.l1_loss(mags, target_mag)
-                total_loss = total_loss + self.fourier_mag_weight * fourier_mag_penalty
-        except Exception:
-            pass
         return {"total_loss": total_loss, "recon_loss": recon_loss, "kld_loss": kld}

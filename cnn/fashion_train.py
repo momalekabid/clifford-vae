@@ -24,8 +24,9 @@ from utils.wandb_utils import (
     test_fourier_properties,
     compute_class_means,
     evaluate_mean_vector_cosine,
+    evaluate_mean_vector_euclidean,
     test_vsa_operations,
-    test_hrr_mark_ate_fish,
+    test_hrr_fashionmnist_sentence,
 )
 
 
@@ -234,10 +235,8 @@ def main(args):
                     distribution=dist_name,
                     device=DEVICE,
                     recon_loss_type=args.recon_loss,
-                    use_perceptual_loss=args.use_perceptual,
                     l1_weight=args.l1_weight,
                     freq_weight=args.freq_weight,
-                    fourier_mag_weight=args.fourier_weight,
                 )
                 logger.watch_model(model)
                 optimizer = optim.AdamW(model.parameters(), lr=args.lr)
@@ -360,11 +359,17 @@ def main(args):
                     class_means = compute_class_means(
                         model, train_subset_loader, DEVICE, max_per_class=1000
                     )
-                    mean_vector_acc, per_class_acc = evaluate_mean_vector_cosine(
-                        model, test_loader, DEVICE, class_means
-                    )
-                    print("mean vector acc: ", mean_vector_acc)
-                    print("per class acc: ", per_class_acc)
+                    if dist_name == "gaussian":
+                        mean_vector_acc, _ = evaluate_mean_vector_euclidean(
+                            model, test_loader, DEVICE, class_means
+                        )
+                        mean_metric_key = "mean_vector_euclidean_acc"
+                    else:
+                        mean_vector_acc, _ = evaluate_mean_vector_cosine(
+                            model, test_loader, DEVICE, class_means
+                        )
+                        mean_metric_key = "mean_vector_cosine_acc"
+                    print(f"{mean_metric_key}: ", mean_vector_acc)
 
                     vsa_bind_sim_pseudo = vsa_pseudo.get("vsa_bind_unbind_similarity", 0.0)
                     vsa_bind_sim_deconv = vsa_deconv.get("vsa_bind_unbind_similarity", 0.0)
@@ -385,7 +390,7 @@ def main(args):
                         {
                             **knn_metrics,
                             **fourier_metrics,
-                            "mean_vector_cosine_acc": float(mean_vector_acc),
+                            mean_metric_key: float(mean_vector_acc),
                             "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
                             "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                             "final_best_loss": best,
@@ -417,23 +422,23 @@ def main(args):
                         images["vsa_bind_unbind_pseudo"] = vsa_path1
                     if vsa_path2:
                         images["vsa_bind_unbind_deconv"] = vsa_path2
-                    # HRR sentence test
-                    from utils.wandb_utils import test_hrr_mark_ate_fish
-                    hrr_pseudo = test_hrr_mark_ate_fish(
+
+                    hrr_fashion_pseudo = test_hrr_fashionmnist_sentence(
                         model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors
                     )
-                    hrr_deconv = test_hrr_mark_ate_fish(
+                    hrr_fashion_deconv = test_hrr_fashionmnist_sentence(
                         model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors
                     )
-                    if hrr_pseudo.get("hrr_sentence_plot"):
-                        images["hrr_sentence_pseudo"] = hrr_pseudo["hrr_sentence_plot"]
-                    if hrr_deconv.get("hrr_sentence_plot"):
-                        images["hrr_sentence_deconv"] = hrr_deconv["hrr_sentence_plot"]
+
+                    if hrr_fashion_pseudo.get("hrr_fashion_plot"):
+                        images["hrr_fashion_pseudo"] = hrr_fashion_pseudo["hrr_fashion_plot"]
+                    if hrr_fashion_deconv.get("hrr_fashion_plot"):
+                        images["hrr_fashion_deconv"] = hrr_fashion_deconv["hrr_fashion_plot"]
                     summary = {
                         "final_best_loss": best,
                         **fourier_metrics,
                         **knn_metrics,
-                        "mean_vector_cosine_acc": float(mean_vector_acc),
+                        mean_metric_key: float(mean_vector_acc),
                         "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
                         "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                     }
@@ -453,22 +458,17 @@ if __name__ == "__main__":
         "--recon_loss", type=str, default="l1_freq", choices=["mse", "l1_freq"]
     )
     p.add_argument(
-        "--use_perceptual",
-        action="store_true",
-        help="Use perceptual LPIPS loss (untested)",
-    )
-    p.add_argument(
         "--l1_weight", type=float, default=1.0, help="Weight for L1 pixel loss"
     )
     p.add_argument(
         "--freq_weight",
         type=float,
-        default=0.5,
+        default=0.25,
         help="Weight for frequency domain loss",
     )
     p.add_argument("--max_beta", type=float, default=1.0)
     p.add_argument(
-        "--min_beta", type=float, default=0.01, help="Minimum KL beta during cycles"
+        "--min_beta", type=float, default=0.1, help="Minimum KL beta during cycles"
     )
     p.add_argument("--no_wandb", action="store_true")
     p.add_argument("--wandb_project", type=str, default="fashionmnist-cifar10-default-name")
@@ -480,16 +480,10 @@ if __name__ == "__main__":
         help="Cycle length for cyclical KL beta after warmup (0=disabled)",
     )
     p.add_argument(
-        "--fourier_weight",
-        type=float,
-        default=0.0,
-        help="Weight for latent FFT magnitude regularization",
-    )
-    p.add_argument(
         "--vsa_normalize",
         action="store_true",
-        default=True,
-        help="Normalize vectors during VSA ops for fair similarity (cosine)",
+        default=False,
+        help="Normalize vectors for vsa tests)",
     )
     args = p.parse_args()
     main(args)
