@@ -348,7 +348,6 @@ def run(args):
                     for n_samples, acc in knn_accuracies.items():
                         agg_results[dist][n_samples].append(acc)
 
-                    # Fourier property testing (both unbinding methods)
                     test_subset = torch.utils.data.Subset(
                         test_dataset, list(range(min(1000, len(test_dataset))))
                     )
@@ -453,7 +452,6 @@ def run(args):
                             logger.log_images(images_to_log)
 
                     if logger.use:
-                        # wandb logging k-NN as metrics (for charts/visualization)
                         knn_metrics = {
                             f"knn_acc_{k}": v for k, v in knn_accuracies.items()
                         }

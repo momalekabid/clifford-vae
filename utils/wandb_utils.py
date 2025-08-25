@@ -341,8 +341,6 @@ def compute_class_means(model, loader, device, max_per_class: int = 1000):
                 sums[label] = sums[label] + mu[i]
                 counts[label] += 1
 
-    # finalize means
-    # average exactly 10 per class if available
     means = {}
     for label, total in sums.items():
         c = max(1, min(counts[label], 10))
@@ -505,7 +503,7 @@ def test_vsa_operations(
             plt.axvline(np.mean(single_bind_sims), color="red", linestyle="--", label=f"Mean: {np.mean(single_bind_sims):.3f}")
             plt.xlabel("Cosine Similarity")
             plt.ylabel("Count")
-            plt.title("Bind-Unbind Fidelity")
+            plt.title("Bind-Unbind Performance")
             plt.legend()
             plt.grid(alpha=0.3)
 
