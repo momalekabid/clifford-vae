@@ -299,12 +299,11 @@ def main(args):
                         torch.load(f"{output_dir}/best_model.pt", map_location=DEVICE)
                     )
 
-                    # fourier property testing of latent vectors (both unbinding methods)
                     fourier_pseudo = test_fourier_properties(
-                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", mode="full"
+                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo"
                     )
                     fourier_deconv = test_fourier_properties(
-                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", mode="full"
+                        model, test_loader, DEVICE, output_dir, unbind_method="deconv"
                     )
 
                     use_unitary_keys = True #if not dist_name == "clifford" else False
