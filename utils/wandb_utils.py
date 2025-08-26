@@ -438,8 +438,10 @@ def vsa_unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "pseudo") -> tor
 
 
 def vsa_invert(a: torch.Tensor) -> torch.Tensor:
-    return torch.flip(a, dims=[-1]) # c = (a_1, a_2, ..., a_n) -> c = (a_n, ..., a_2, a_1)
-    # pseudo-inverse of a 
+    # [a0, a1, a2, ..., a_{n-1}] -> [a0, a_{n-1}, ..., a2, a1]
+    head = a[..., :1]
+    tail = a[..., 1:]
+    return torch.cat([head, torch.flip(tail, dims=[-1])], dim=-1)
 
 
 @torch.no_grad()
@@ -452,6 +454,7 @@ def test_vsa_operations(
     unbind_method: str = "pseudo",
     unitary_keys: bool = False,
     normalize_vectors: bool = False,
+    project_vectors: bool = False,
 ):
     model.eval()
 
@@ -483,6 +486,9 @@ def test_vsa_operations(
         value = z_all[i]
         a = key.unsqueeze(0)
         b = value.unsqueeze(0)
+        if project_vectors:
+            a = _fft_make_unitary(a.squeeze(0)).unsqueeze(0)
+            b = _fft_make_unitary(b.squeeze(0)).unsqueeze(0)
         bound = _bind(a, b)
         recovered = _unbind(bound, a, method=unbind_method)
         sim = torch.nn.functional.cosine_similarity(
@@ -533,6 +539,7 @@ def test_hrr_fashionmnist_sentence(
     unbind_method: str = "pseudo",
     unitary_keys: bool = False,
     normalize_vectors: bool = False,
+    project_fillers: bool = False,
 ):
     model.eval()
 
@@ -577,6 +584,9 @@ def test_hrr_fashionmnist_sentence(
     container_idx = 8 if 8 < class_vecs.shape[0] else candidates_idx[-1]
     item_vec = class_vecs[item_idx].unsqueeze(0)
     container_vec = class_vecs[container_idx].unsqueeze(0)
+    if project_fillers:
+        item_vec = _fft_make_unitary(item_vec)
+        container_vec = _fft_make_unitary(container_vec)
 
     a = role_item.unsqueeze(0)
     c = role_container.unsqueeze(0)
@@ -606,10 +616,20 @@ def test_hrr_fashionmnist_sentence(
         path = os.path.join(output_dir, f"hrr_fashion_{unbind_method}.png")
         labels = FASHION_MNIST_CLASSES[: class_vecs.shape[0]]
         plt.figure(figsize=(8, 3))
-        plt.bar(np.arange(len(labels)), sims.detach().cpu().numpy(), alpha=0.8)
+        heights = sims.detach().cpu().numpy()
+        colors = ["C0"] * len(labels)
+        colors[item_idx] = "green"
+        bars = plt.bar(np.arange(len(labels)), heights, alpha=0.8, color=colors)
+        try:
+            bars[best].set_edgecolor("red")
+            bars[best].set_linewidth(2.0)
+        except Exception:
+            pass
         plt.xticks(np.arange(len(labels)), labels, rotation=30, ha="right")
         plt.ylabel("cosine sim")
-        plt.title("Decode item from HRR (FashionMNIST class vectors)")
+        title_expected = labels[item_idx]
+        title_pred = labels[best]
+        plt.title(f"Decode item from HRR (expected={title_expected}, predicted={title_pred})")
         plt.tight_layout()
         plt.savefig(path, dpi=200, bbox_inches="tight")
         plt.close()
