@@ -7,7 +7,6 @@ from numbers import Number
 class IveFunction(torch.autograd.Function):
     @staticmethod
     def forward(self, v, z):
-
         assert isinstance(v, Number), "v must be a scalar"
 
         self.save_for_backward(z)
@@ -52,6 +51,7 @@ ive = IveFunction.apply
 # respective source papers, to improve the stability of
 # the Bessel fractions.
 # I_(v/2)(k) / I_(v/2 - 1)(k)
+
 
 # source: https://arxiv.org/pdf/1606.02008.pdf
 def ive_fraction_approx(v, z):

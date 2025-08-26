@@ -11,9 +11,11 @@ from torch.distributions import (
 from torch.distributions.utils import broadcast_all
 from torch.distributions.kl import register_kl
 
+
 def _get_eps(x: torch.Tensor) -> torch.Tensor:
     """Get small epsilon tensor matching device and dtype."""
     return torch.tensor(1e-7, device=x.device, dtype=x.dtype)
+
 
 def _von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
     """Compute entropy of von Mises distribution.
@@ -24,12 +26,16 @@ def _von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
     log_i0 = torch.log(torch.special.i0e(kappa) + eps) + kappa
     log_i1 = torch.log(torch.special.i1e(kappa) + eps) + kappa
     ratio_i1_i0 = torch.exp(log_i1 - log_i0)
-    return torch.log(torch.tensor(2 * math.pi, device=kappa.device, dtype=kappa.dtype)) + log_i0 - kappa * ratio_i1_i0
+    return (
+        torch.log(torch.tensor(2 * math.pi, device=kappa.device, dtype=kappa.dtype))
+        + log_i0
+        - kappa * ratio_i1_i0
+    )
 
 
 try:
-    compiled_von_mises_entropy = torch.compile(_von_mises_entropy) 
-except Exception: 
+    compiled_von_mises_entropy = torch.compile(_von_mises_entropy)
+except Exception:
     compiled_von_mises_entropy = _von_mises_entropy
 
 
@@ -41,18 +47,18 @@ class _TTransform(Transform):
         t = x[..., 0].unsqueeze(-1)
         v = x[..., 1:]
         eps = _get_eps(x)
-        return torch.cat((t, v * torch.sqrt(torch.clamp(1 - t ** 2, min=eps))), -1)
+        return torch.cat((t, v * torch.sqrt(torch.clamp(1 - t**2, min=eps))), -1)
 
     def _inverse(self, y):
         t = y[..., 0].unsqueeze(-1)
         v = y[..., 1:]
         eps = _get_eps(y)
-        return torch.cat((t, v / torch.sqrt(torch.clamp(1 - t ** 2, min=eps))), -1)
+        return torch.cat((t, v / torch.sqrt(torch.clamp(1 - t**2, min=eps))), -1)
 
     def log_abs_det_jacobian(self, x, y):
         t = x[..., 0]
         eps = _get_eps(x)
-        return ((x.shape[-1] - 3) / 2) * torch.log(torch.clamp(1 - t ** 2, min=eps))
+        return ((x.shape[-1] - 3) / 2) * torch.log(torch.clamp(1 - t**2, min=eps))
 
 
 class _HouseholderRotationTransform(Transform):
@@ -84,18 +90,28 @@ class HypersphericalUniform(Distribution):
 
     def __init__(self, dim, device="cpu", dtype=torch.float32, validate_args=None):
         self.dim = dim
-        super().__init__(batch_shape=torch.Size(), event_shape=torch.Size([dim]), validate_args=validate_args)
+        super().__init__(
+            batch_shape=torch.Size(),
+            event_shape=torch.Size([dim]),
+            validate_args=validate_args,
+        )
         self.device, self.dtype = device, dtype
 
     def rsample(self, sample_shape=()):
-        v = torch.randn(sample_shape + self.event_shape, device=self.device, dtype=self.dtype)
+        v = torch.randn(
+            sample_shape + self.event_shape, device=self.device, dtype=self.dtype
+        )
         eps = _get_eps(v)
         return v / (v.norm(dim=-1, keepdim=True) + eps)
 
     def log_prob(self, value):
         if self.dim <= 0:
             return torch.tensor(float("-inf"), device=self.device, dtype=self.dtype)
-        return torch.full_like(value[..., 0], math.lgamma(self.dim / 2) - (math.log(2) + (self.dim / 2) * math.log(math.pi)))
+        return torch.full_like(
+            value[..., 0],
+            math.lgamma(self.dim / 2)
+            - (math.log(2) + (self.dim / 2) * math.log(math.pi)),
+        )
 
     def entropy(self):
         if self.dim <= 0:
@@ -109,7 +125,9 @@ class MarginalTDistribution(TransformedDistribution):
     def __init__(self, dim, scale, validate_args=None):
         safe_scale = scale + _get_eps(scale)
         super().__init__(
-            Beta(((dim - 1) / 2) + safe_scale, (dim - 1) / 2, validate_args=validate_args),
+            Beta(
+                ((dim - 1) / 2) + safe_scale, (dim - 1) / 2, validate_args=validate_args
+            ),
             AffineTransform(loc=-1, scale=2),
         )
 
@@ -123,7 +141,8 @@ class _JointTSDistribution(Distribution):
     def __init__(self, marginal_t, marginal_s):
         super().__init__(
             batch_shape=marginal_t.batch_shape,
-            event_shape=marginal_s.event_shape[:-1] + torch.Size([marginal_s.event_shape[-1] + 1]),
+            event_shape=marginal_s.event_shape[:-1]
+            + torch.Size([marginal_s.event_shape[-1] + 1]),
             validate_args=False,
         )
         self.marginal_t, self.marginal_s = marginal_t, marginal_s
@@ -138,7 +157,9 @@ class _JointTSDistribution(Distribution):
         )
 
 
-class PowerSpherical(TransformedDistribution): # from Nicola De Cao https://github.com/nicola-decao/power_spherical
+class PowerSpherical(
+    TransformedDistribution
+):  # from Nicola De Cao https://github.com/nicola-decao/power_spherical
     # optimizations from https://evgeniia.tokarch.uk/blog/memory-optimization-for-kl-loss-calculation-in-pytorch/
     has_rsample = True
 
@@ -148,7 +169,12 @@ class PowerSpherical(TransformedDistribution): # from Nicola De Cao https://gith
         super().__init__(
             _JointTSDistribution(
                 MarginalTDistribution(self.dim, scale, validate_args=validate_args),
-                HypersphericalUniform(self.dim - 1, device=loc.device, dtype=loc.dtype, validate_args=validate_args),
+                HypersphericalUniform(
+                    self.dim - 1,
+                    device=loc.device,
+                    dtype=loc.dtype,
+                    validate_args=validate_args,
+                ),
             ),
             [_TTransform(), _HouseholderRotationTransform(loc)],
         )
@@ -176,7 +202,8 @@ class PowerSpherical(TransformedDistribution): # from Nicola De Cao https://gith
         beta = (self.dim - 1) / 2
         return -(
             self.log_normalizer()
-            + safe_scale * (math.log(2) + torch.digamma(alpha) - torch.digamma(alpha + beta))
+            + safe_scale
+            * (math.log(2) + torch.digamma(alpha) - torch.digamma(alpha + beta))
         )
 
 
@@ -186,7 +213,9 @@ class CliffordTorusUniform(Distribution):
 
     def __init__(self, dim, device="cpu", dtype=torch.float32, validate_args=None):
         self.dim = dim
-        super().__init__(event_shape=torch.Size([2 * self.dim]), validate_args=validate_args)
+        super().__init__(
+            event_shape=torch.Size([2 * self.dim]), validate_args=validate_args
+        )
         self.device, self.dtype = device, dtype
 
     def rsample(self, sample_shape=torch.Size()):
@@ -194,10 +223,10 @@ class CliffordTorusUniform(Distribution):
         angles = torch.rand(shape, device=self.device, dtype=self.dtype) * 2 * math.pi
         n = 2 * self.dim
         theta_s = torch.zeros(sample_shape + (n,), device=self.device, dtype=self.dtype)
-        theta_s[..., 1:self.dim] = angles[..., 1:]
+        theta_s[..., 1 : self.dim] = angles[..., 1:]
         theta_s[..., -self.dim + 1 :] = -torch.flip(angles[..., 1:], dims=(-1,))
         samples_complex = torch.exp(1j * theta_s)
-        return torch.fft.ifft(samples_complex, dim=-1, norm="ortho").real
+        return torch.fft.ifft(samples_complex, dim=-1).real
 
     def log_prob(self, value):
         return -torch.ones_like(value[..., 0]) * self.entropy()
@@ -213,19 +242,29 @@ class CliffordTorusDistribution(Distribution):
     def __init__(self, loc, concentration, validate_args=None):
         self.loc, self.concentration = broadcast_all(loc, concentration)
         self.orig_dim = loc.shape[-1]
-        super().__init__(batch_shape=loc.shape[:-1], event_shape=torch.Size([2 * self.orig_dim]), validate_args=validate_args)
+        super().__init__(
+            batch_shape=loc.shape[:-1],
+            event_shape=torch.Size([2 * self.orig_dim]),
+            validate_args=validate_args,
+        )
         self._von_mises = torch.distributions.VonMises(self.loc, self.concentration)
 
     def rsample(self, sample_shape=torch.Size()) -> torch.Tensor:
         theta_collection = self._von_mises.sample(sample_shape)
         n = 2 * self.orig_dim
-        theta_s = torch.zeros((*theta_collection.shape[:-1], n), device=self.loc.device, dtype=self.loc.dtype)
-        theta_s[..., 1:self.orig_dim] = theta_collection[..., 1:]
-        theta_s[..., -self.orig_dim + 1 :] = -torch.flip(theta_collection[..., 1:], dims=(-1,))
+        theta_s = torch.zeros(
+            (*theta_collection.shape[:-1], n),
+            device=self.loc.device,
+            dtype=self.loc.dtype,
+        )
+        theta_s[..., 1 : self.orig_dim] = theta_collection[..., 1:]
+        theta_s[..., -self.orig_dim + 1 :] = -torch.flip(
+            theta_collection[..., 1:], dims=(-1,)
+        )
         samples_complex = torch.exp(1j * theta_s)
         # check how close to real vectors
         assert torch.allclose(samples_complex, samples_complex.conj().flip(-1))
-        return torch.fft.ifft(samples_complex, dim=-1, norm="ortho").real
+        return torch.fft.ifft(samples_complex, dim=-1).real
 
     def entropy(self):
         return compiled_von_mises_entropy(self.concentration)[..., 1:].sum(-1)
@@ -243,11 +282,13 @@ class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
         v = self._ps.rsample(sample_shape)
         theta = torch.atan2(v[..., 1], v[..., 0])
         n = 2 * self.orig_dim
-        theta_s = torch.zeros((*theta.shape[:-1], n), device=self.loc.device, dtype=self.loc.dtype)
-        theta_s[..., 1:self.orig_dim] = theta[..., 1:]
+        theta_s = torch.zeros(
+            (*theta.shape[:-1], n), device=self.loc.device, dtype=self.loc.dtype
+        )
+        theta_s[..., 1 : self.orig_dim] = theta[..., 1:]
         theta_s[..., -self.orig_dim + 1 :] = -torch.flip(theta[..., 1:], (-1,))
         samples_c = torch.exp(1j * theta_s)
-        return torch.fft.ifft(samples_c, dim=-1, norm="ortho").real
+        return torch.fft.ifft(samples_c, dim=-1).real
 
     def entropy(self):
         return self._ps.entropy()[..., 1:].sum(-1)
@@ -266,5 +307,3 @@ def _kl_vm_uniform(p, q):
 @register_kl(PowerSpherical, HypersphericalUniform)
 def _kl_powerspherical_uniform(p, q):
     return -p.entropy() + q.entropy()
-
-

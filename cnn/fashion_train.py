@@ -19,7 +19,14 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cnn.models import VAE
-from utils.wandb_utils import WandbLogger, test_fourier_properties
+from utils.wandb_utils import (
+    WandbLogger,
+    test_fourier_properties,
+    compute_class_means,
+    evaluate_mean_vector_cosine,
+    test_vsa_operations,
+    test_hrr_fashionmnist_sentence,
+)
 
 
 DEVICE = (
@@ -113,24 +120,12 @@ def generate_pca_plot(model, loader, device, path, n_samples=2000):
     pca = PCA(n_components=min(50, Z.shape[1]))
     Z_pca = pca.fit_transform(Z)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-
-    # 2 component pca
-    sc = ax1.scatter(Z_pca[:, 0], Z_pca[:, 1], c=Y, cmap="tab10", s=8, alpha=0.8)
-    ax1.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)")
-    ax1.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)")
-    ax1.set_title("PCA of Latent Means (μ)")
-    plt.colorbar(sc, ax=ax1, ticks=np.unique(Y))
-
-    # explained variance plot
-    n_components = min(20, len(pca.explained_variance_ratio_))
-    ax2.bar(range(1, n_components + 1), pca.explained_variance_ratio_[:n_components])
-    ax2.set_xlabel("Principal Component")
-    ax2.set_ylabel("Explained Variance Ratio")
-    ax2.set_title(
-        f"PCA Explained Variance\n(Total: {pca.explained_variance_ratio_.sum():.1%})"
-    )
-
+    plt.figure(figsize=(8, 6))
+    sc = plt.scatter(Z_pca[:, 0], Z_pca[:, 1], c=Y, cmap="tab10", s=8, alpha=0.8)
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
+    plt.title("PCA of Latent Means (μ)")
+    plt.colorbar(sc, ticks=np.unique(Y))
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -192,9 +187,9 @@ def main(args):
     print(f"Device: {DEVICE}")
     logger = WandbLogger(args)
 
-    latent_dims = [128, 1024, 4096]
+    latent_dims = [128, 256, 512, 1024, 2048, 4096, 5000]
     distributions = ["powerspherical", "clifford", "gaussian"]
-    datasets_to_test = ["fashionmnist"]
+    datasets_to_test = ["fashionmnist", "cifar10"]
     dataset_map = {"fashionmnist": datasets.FashionMNIST, "cifar10": datasets.CIFAR10}
 
     for dataset_name in datasets_to_test:
@@ -239,16 +234,36 @@ def main(args):
                     distribution=dist_name,
                     device=DEVICE,
                     recon_loss_type=args.recon_loss,
-                    use_perceptual_loss=args.use_perceptual,
                     l1_weight=args.l1_weight,
                     freq_weight=args.freq_weight,
                 )
                 logger.watch_model(model)
                 optimizer = optim.AdamW(model.parameters(), lr=args.lr)
                 best = float("inf")
+                patience_counter = 0
+
+                def kl_beta_for_epoch(e: int) -> float:
+                    # initial warmup
+                    if e < args.warmup_epochs:
+                        return (
+                            min(1.0, (e + 1) / max(1, args.warmup_epochs))
+                            * args.max_beta
+                        )
+                    if args.cycle_epochs <= 0:
+                        return args.max_beta
+                    # cyclical annealing option, tri-schedule in [min_beta, max_beta]
+                    cycle_pos = (e - args.warmup_epochs) % args.cycle_epochs
+                    half = max(1, args.cycle_epochs // 2)
+                    if cycle_pos <= half:
+                        t = cycle_pos / half
+                    else:
+                        t = (args.cycle_epochs - cycle_pos) / max(
+                            1, args.cycle_epochs - half
+                        )
+                    return args.min_beta + (args.max_beta - args.min_beta) * t
 
                 for epoch in range(args.epochs):
-                    beta = min(1.0, (epoch + 1) / args.warmup_epochs) * args.max_beta
+                    beta = kl_beta_for_epoch(epoch)
                     train_losses = train_epoch(
                         model, train_loader, optimizer, DEVICE, beta
                     )
@@ -257,6 +272,9 @@ def main(args):
                     if np.isfinite(val) and val < best:
                         best = val
                         torch.save(model.state_dict(), f"{output_dir}/best_model.pt")
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
                     logger.log_metrics(
                         {
                             "epoch": epoch,
@@ -267,6 +285,12 @@ def main(args):
                         }
                     )
 
+                    if args.patience > 0 and patience_counter >= args.patience:
+                        print(
+                            f"Early stopping at epoch {epoch+1} (no improvement for {args.patience} epochs)"
+                        )
+                        break
+
                 print(f"best loss: {best:.4f}")
 
                 if os.path.exists(f"{output_dir}/best_model.pt"):
@@ -274,9 +298,59 @@ def main(args):
                         torch.load(f"{output_dir}/best_model.pt", map_location=DEVICE)
                     )
 
-                    # fourier property testing of latent vectors
-                    fourier = test_fourier_properties(
-                        model, test_loader, DEVICE, output_dir
+                    fourier_pseudo = test_fourier_properties(
+                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo"
+                    )
+                    fourier_deconv = test_fourier_properties(
+                        model, test_loader, DEVICE, output_dir, unbind_method="deconv"
+                    )
+
+                    use_unitary_keys = True #if not dist_name == "clifford" else False
+                    normalize_vectors = getattr(args, "vsa_normalize", False)
+                    vsa_pseudo = test_vsa_operations(
+                        model,
+                        test_loader,
+                        DEVICE,
+                        output_dir,
+                        n_test_pairs=50,
+                        unbind_method="pseudo",
+                        unitary_keys=use_unitary_keys,
+                        normalize_vectors=normalize_vectors,
+                        project_vectors=False,
+                    )
+                    vsa_deconv = test_vsa_operations(
+                        model,
+                        test_loader,
+                        DEVICE,
+                        output_dir,
+                        n_test_pairs=50,
+                        unbind_method="deconv",
+                        unitary_keys=use_unitary_keys,
+                        normalize_vectors=normalize_vectors,
+                        project_vectors=False,
+                    )
+                    # projection variants
+                    vsa_pseudo_proj = test_vsa_operations(
+                        model,
+                        test_loader,
+                        DEVICE,
+                        output_dir,
+                        n_test_pairs=50,
+                        unbind_method="pseudo",
+                        unitary_keys=use_unitary_keys,
+                        normalize_vectors=normalize_vectors,
+                        project_vectors=True,
+                    )
+                    vsa_deconv_proj = test_vsa_operations(
+                        model,
+                        test_loader,
+                        DEVICE,
+                        output_dir,
+                        n_test_pairs=50,
+                        unbind_method="deconv",
+                        unitary_keys=use_unitary_keys,
+                        normalize_vectors=normalize_vectors,
+                        project_vectors=True,
                     )
 
                     # reconstructions
@@ -296,60 +370,129 @@ def main(args):
 
                     # knn eval
                     knn_metrics = perform_knn_evaluation(
-                        model, train_loader, test_loader, DEVICE, [100, 600, 1000, 2048]
+                        model, train_loader, test_loader, DEVICE, [100, 600, 1000]
                     )
 
-                    fourier_metrics = {
-                        k: v
-                        for k, v in fourier.items()
+                    train_subset = torch.utils.data.Subset(
+                        train_set, list(range(min(5000, len(train_set))))
+                    )
+                    train_subset_loader = DataLoader(
+                        train_subset, batch_size=args.batch_size, shuffle=False
+                    )
+                    class_means = compute_class_means(
+                        model, train_subset_loader, DEVICE, max_per_class=1000
+                    )
+                    mean_vector_acc, _ = evaluate_mean_vector_cosine(
+                        model, test_loader, DEVICE, class_means
+                    )
+                    mean_metric_key = "mean_vector_cosine_acc"
+                    print(f"{mean_metric_key}: ", mean_vector_acc)
+
+                    vsa_bind_sim_pseudo = vsa_pseudo.get("vsa_bind_unbind_similarity", 0.0)
+                    vsa_bind_sim_deconv = vsa_deconv.get("vsa_bind_unbind_similarity", 0.0)
+                    vsa_bind_sim_pseudo_proj = vsa_pseudo_proj.get("vsa_bind_unbind_similarity", 0.0)
+                    vsa_bind_sim_deconv_proj = vsa_deconv_proj.get("vsa_bind_unbind_similarity", 0.0)
+
+                    fourier_metrics = {}
+                    fourier_metrics.update({
+                        f"pseudo/{k}": v
+                        for k, v in fourier_pseudo.items()
                         if isinstance(v, (int, float, bool))
-                    }
+                    })
+                    fourier_metrics.update({
+                        f"deconv/{k}": v
+                        for k, v in fourier_deconv.items()
+                        if isinstance(v, (int, float, bool))
+                    })
 
                     logger.log_metrics(
                         {
                             **knn_metrics,
                             **fourier_metrics,
+                            mean_metric_key: float(mean_vector_acc),
+                            "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
+                            "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
+                            "vsa_bind_unbind_similarity_pseudo_proj": float(vsa_bind_sim_pseudo_proj),
+                            "vsa_bind_unbind_similarity_deconv_proj": float(vsa_bind_sim_deconv_proj),
                             "final_best_loss": best,
                         }
                     )
 
                     images = {
-                        "fft_spectrum": fourier.pop("fft_spectrum_plot_path"),
                         "reconstructions": recon_path,
                         "tsne": tsne_path,
                         "pca": pca_path,
                     }
+                    # add Fourier images for both methods if present
+                    fp = fourier_pseudo.get("fft_spectrum_plot_path")
+                    fd = fourier_deconv.get("fft_spectrum_plot_path")
+                    if fp:
+                        images["fft_spectrum_pseudo"] = fp
+                    if fd:
+                        images["fft_spectrum_deconv"] = fd
+                    sp = fourier_pseudo.get("similarity_after_k_binds_plot_path")
+                    sd = fourier_deconv.get("similarity_after_k_binds_plot_path")
+                    if sp:
+                        images["similarity_after_k_binds_pseudo"] = sp
+                    if sd:
+                        images["similarity_after_k_binds_deconv"] = sd
+
+                    vsa_path1 = vsa_pseudo.get("vsa_bind_unbind_plot")
+                    vsa_path2 = vsa_deconv.get("vsa_bind_unbind_plot")
+                    if vsa_path1:
+                        images["vsa_bind_unbind_pseudo"] = vsa_path1
+                    if vsa_path2:
+                        images["vsa_bind_unbind_deconv"] = vsa_path2
+                    p_proj = vsa_pseudo_proj.get("vsa_bind_unbind_plot")
+                    d_proj = vsa_deconv_proj.get("vsa_bind_unbind_plot")
+                    if p_proj:
+                        images["vsa_bind_unbind_pseudo_proj"] = p_proj
+                    if d_proj:
+                        images["vsa_bind_unbind_deconv_proj"] = d_proj
+
+                    hrr_fashion_pseudo = test_hrr_fashionmnist_sentence(
+                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors
+                    )
+                    hrr_fashion_deconv = test_hrr_fashionmnist_sentence(
+                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors
+                    )
+                    hrr_fashion_pseudo_proj = test_hrr_fashionmnist_sentence(
+                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors, project_fillers=True
+                    )
+                    hrr_fashion_deconv_proj = test_hrr_fashionmnist_sentence(
+                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors, project_fillers=True
+                    )
+
+                    if hrr_fashion_pseudo.get("hrr_fashion_plot"):
+                        images["hrr_fashion_pseudo"] = hrr_fashion_pseudo["hrr_fashion_plot"]
+                    if hrr_fashion_deconv.get("hrr_fashion_plot"):
+                        images["hrr_fashion_deconv"] = hrr_fashion_deconv["hrr_fashion_plot"]
+                    if hrr_fashion_pseudo_proj.get("hrr_fashion_plot"):
+                        images["hrr_fashion_pseudo_proj"] = hrr_fashion_pseudo_proj["hrr_fashion_plot"]
+                    if hrr_fashion_deconv_proj.get("hrr_fashion_plot"):
+                        images["hrr_fashion_deconv_proj"] = hrr_fashion_deconv_proj["hrr_fashion_plot"]
                     summary = {
                         "final_best_loss": best,
-                        **fourier,
+                        **fourier_metrics,
                         **knn_metrics,
+                        mean_metric_key: float(mean_vector_acc),
+                        "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
+                        "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)
-                    # summary = {
-                    #     "final_best_loss": best,
-                    #     **fourier,
-                    #     **knn_metrics,
-                    # }
-                    # logger.log_summary(summary)
-                    # logger.log_images(images)
 
                 logger.finish_run()
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--epochs", type=int, default=200)
+    p.add_argument("--epochs", type=int, default=1000)
     p.add_argument("--warmup_epochs", type=int, default=100)
-    p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument(
         "--recon_loss", type=str, default="l1_freq", choices=["mse", "l1_freq"]
-    )
-    p.add_argument(
-        "--use_perceptual",
-        action="store_true",
-        help="Use perceptual LPIPS loss (untested)",
     )
     p.add_argument(
         "--l1_weight", type=float, default=1.0, help="Weight for L1 pixel loss"
@@ -357,11 +500,27 @@ if __name__ == "__main__":
     p.add_argument(
         "--freq_weight",
         type=float,
-        default=0.1,
+        default=0.25,
         help="Weight for frequency domain loss",
     )
     p.add_argument("--max_beta", type=float, default=1.0)
+    p.add_argument(
+        "--min_beta", type=float, default=0.1, help="Minimum KL beta during cycles"
+    )
     p.add_argument("--no_wandb", action="store_true")
-    p.add_argument("--wandb_project", type=str, default="aug-19-fashionmnist")
+    p.add_argument("--wandb_project", type=str, default="fashionmnist-cifar10-default-name")
+    p.add_argument("--patience", type=int, default=50)
+    p.add_argument(
+        "--cycle_epochs",
+        type=int,
+        default=100,
+        help="Cycle length for cyclical KL beta after warmup (0=disabled)",
+    )
+    p.add_argument(
+        "--vsa_normalize",
+        action="store_true",
+        default=False,
+        help="Normalize vectors for vsa tests)",
+    )
     args = p.parse_args()
     main(args)

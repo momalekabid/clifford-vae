@@ -64,7 +64,7 @@ class VonMisesFisher(torch.distributions.Distribution):
         ).transpose(0, -1)
         v = v / v.norm(dim=-1, keepdim=True)
 
-        w_ = torch.sqrt(torch.clamp(1 - (w ** 2), 1e-10))
+        w_ = torch.sqrt(torch.clamp(1 - (w**2), 1e-10))
         x = torch.cat((w, w_ * v), -1)
         z = self.__householder_rotation(x)
 
@@ -73,7 +73,7 @@ class VonMisesFisher(torch.distributions.Distribution):
     def __sample_w3(self, shape):
         shape = shape + torch.Size(self.scale.shape)
         u = torch.distributions.Uniform(0, 1).sample(shape).to(self.device)
-        
+
         # modified; float64 for more stable computation
         scale_64 = self.scale.to(torch.float64)
         u_64 = u.to(torch.float64)
@@ -88,15 +88,15 @@ class VonMisesFisher(torch.distributions.Distribution):
         return self.__w.type(self.dtype)
 
     def __sample_w_rej(self, shape):
-        # float64 added here too 
+        # float64 added here too
         m_64 = torch.tensor(self.__m, dtype=torch.float64, device=self.device)
         scale_64 = self.scale.to(torch.float64)
 
-        c = torch.sqrt((4 * (scale_64 ** 2)) + (m_64 - 1) ** 2)
+        c = torch.sqrt((4 * (scale_64**2)) + (m_64 - 1) ** 2)
         b_true = (-2 * scale_64 + c) / (m_64 - 1)
 
         b_app = (m_64 - 1) / (4 * scale_64)
-        
+
         s = torch.min(
             torch.max(
                 torch.tensor([0.0], dtype=torch.float64, device=self.device),
@@ -110,7 +110,7 @@ class VonMisesFisher(torch.distributions.Distribution):
         d = (4 * a * b) / (1 + b) - (m_64 - 1) * torch.log(m_64 - 1)
 
         self.__b, (self.__e, self.__w) = b, self.__while_loop(b, a, d, shape, k=self.k)
-        
+
         return self.__w.type(self.dtype)
 
     @staticmethod
@@ -129,15 +129,17 @@ class VonMisesFisher(torch.distributions.Distribution):
             for e in (b, a, d)
         ]
         w, e, bool_mask = (
-            torch.zeros_like(b), 
+            torch.zeros_like(b),
             torch.zeros_like(b),
             (torch.ones_like(b) == 1).to(self.device),
         )
 
         sample_shape = torch.Size([b.shape[0], k])
         shape = shape + torch.Size(self.scale.shape)
-        
-        con_64 = torch.tensor((self.__m - 1) / 2, dtype=torch.float64, device=self.device)
+
+        con_64 = torch.tensor(
+            (self.__m - 1) / 2, dtype=torch.float64, device=self.device
+        )
 
         while bool_mask.sum() != 0:
             e_ = (
@@ -158,7 +160,7 @@ class VonMisesFisher(torch.distributions.Distribution):
             accept = ((self.__m - 1.0) * t.log() - t + d) > torch.log(u)
             accept_idx = self.first_nonzero(accept, dim=-1, invalid_val=-1).unsqueeze(1)
             accept_idx_clamped = accept_idx.clamp(0)
-            
+
             w_ = w_.gather(1, accept_idx_clamped.view(-1, 1))
             e_ = e_.gather(1, accept_idx_clamped.view(-1, 1))
 
@@ -181,11 +183,12 @@ class VonMisesFisher(torch.distributions.Distribution):
     def entropy(self):
         scale_64 = self.scale.to(torch.float64)
         m_64 = torch.tensor(self.__m / 2, dtype=torch.float64, device=self.device)
-        
-        output = -scale_64 * ive_fraction_approx2(m_64, scale_64)
-        
-        return (output.view(*(output.shape[:-1])) + self._log_normalization()).type(self.dtype)
 
+        output = -scale_64 * ive_fraction_approx2(m_64, scale_64)
+
+        return (output.view(*(output.shape[:-1])) + self._log_normalization()).type(
+            self.dtype
+        )
 
     def log_prob(self, x):
         return self._log_unnormalized_prob(x) - self._log_normalization()
