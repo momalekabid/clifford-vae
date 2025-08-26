@@ -398,36 +398,6 @@ def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
     return acc, per_class_acc
 
 
-@torch.no_grad()
-def evaluate_mean_vector_euclidean(model, loader, device, class_means: dict):
-    model.eval()
-    labels_sorted = sorted(class_means.keys())
-    mean_vector = torch.stack([class_means[k] for k in labels_sorted], dim=0).to(device)
-
-    correct = 0
-    total = 0
-    per_class_correct = {k: 0 for k in labels_sorted}
-    per_class_total = {k: 0 for k in labels_sorted}
-
-    for x, y in loader:
-        x = x.to(device)
-        mu = _extract_latent_mu(model, x)
-
-        dists = torch.cdist(mu, mean_vector, p=2)
-        preds = dists.argmin(dim=1).cpu()
-
-        y_cpu = y.cpu()
-        correct += (preds == y_cpu).sum().item()
-        total += y_cpu.numel()
-        for yi, pi in zip(y_cpu.tolist(), preds.tolist()):
-            per_class_total[yi] += 1
-            if yi == labels_sorted[pi]:
-                per_class_correct[yi] += 1
-
-    acc = correct / max(1, total)
-    per_class_acc = {k: (per_class_correct[k] / max(1, per_class_total[k])) for k in labels_sorted}
-    return acc, per_class_acc
-
 
 def vsa_bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return _bind(a, b)

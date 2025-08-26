@@ -24,7 +24,6 @@ from utils.wandb_utils import (
     test_fourier_properties,
     compute_class_means,
     evaluate_mean_vector_cosine,
-    evaluate_mean_vector_euclidean,
     test_vsa_operations,
     test_hrr_fashionmnist_sentence,
 )
@@ -383,16 +382,10 @@ def main(args):
                     class_means = compute_class_means(
                         model, train_subset_loader, DEVICE, max_per_class=1000
                     )
-                    if dist_name == "gaussian":
-                        mean_vector_acc, _ = evaluate_mean_vector_euclidean(
-                            model, test_loader, DEVICE, class_means
-                        )
-                        mean_metric_key = "mean_vector_euclidean_acc"
-                    else:
-                        mean_vector_acc, _ = evaluate_mean_vector_cosine(
-                            model, test_loader, DEVICE, class_means
-                        )
-                        mean_metric_key = "mean_vector_cosine_acc"
+                    mean_vector_acc, _ = evaluate_mean_vector_cosine(
+                        model, test_loader, DEVICE, class_means
+                    )
+                    mean_metric_key = "mean_vector_cosine_acc"
                     print(f"{mean_metric_key}: ", mean_vector_acc)
 
                     vsa_bind_sim_pseudo = vsa_pseudo.get("vsa_bind_unbind_similarity", 0.0)
