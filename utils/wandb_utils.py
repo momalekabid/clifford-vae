@@ -423,7 +423,7 @@ def test_vsa_operations(
     n_test_pairs: int = 50,
     unbind_method: str = "pseudo",
     unitary_keys: bool = False,
-    normalize_vectors: bool = False,
+    normalize_vectors: bool = True,
     project_vectors: bool = False,
 ):
     model.eval()
@@ -508,7 +508,7 @@ def test_hrr_fashionmnist_sentence(
     output_dir,
     unbind_method: str = "pseudo",
     unitary_keys: bool = False,
-    normalize_vectors: bool = False,
+    normalize_vectors: bool = True,
     project_fillers: bool = False,
 ):
     model.eval()
@@ -526,7 +526,6 @@ def test_hrr_fashionmnist_sentence(
     if not by_label or any(len(v) == 0 for v in by_label.values() if v is not None):
         return {"hrr_fashion_object_acc": 0.0, "hrr_fashion_plot": None}
 
-    # class prototypes (mean vectors per class)
     class_vecs = []
     for k in range(10):
         if len(by_label[k]) == 0:
@@ -566,13 +565,12 @@ def test_hrr_fashionmnist_sentence(
         item_vec = torch.nn.functional.normalize(item_vec, p=2, dim=-1)
         container_vec = torch.nn.functional.normalize(container_vec, p=2, dim=-1)
 
-    # memory and decode
+    # memory and decod
     memory = _bind(a, item_vec) + _bind(c, container_vec)
     recovered_item = _unbind(memory, a, method=unbind_method).squeeze(0)
     if normalize_vectors:
         recovered_item = torch.nn.functional.normalize(recovered_item, p=2, dim=-1)
 
-    # cleanup among all classes
     sims = torch.nn.functional.cosine_similarity(
         recovered_item.unsqueeze(0), class_vecs, dim=-1
     )
@@ -607,3 +605,177 @@ def test_hrr_fashionmnist_sentence(
         path = None
 
     return {"hrr_fashion_object_acc": float(is_correct), "hrr_fashion_plot": path}
+
+
+@torch.no_grad()
+def test_bundle_capacity(
+    model,
+    loader,
+    device,
+    output_dir,
+    n_items: int = 1000,
+    k_range: list = [2, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50],
+    n_trials: int = 10,
+    normalize_vectors: bool = True,
+):
+    model.eval()
+
+    latents = []
+    while len(torch.cat(latents, 0) if latents else []) < n_items:
+        for x, _ in loader:
+            x = x.to(device)
+            mu = _extract_latent_mu(model, x)
+            latents.append(mu.detach())
+            if len(torch.cat(latents, 0)) >= n_items:
+                break
+        if not loader:
+            break 
+    
+    if not latents or len(torch.cat(latents, 0)) < (max(k_range) if k_range else 0):
+        return {"bundle_capacity_plot": None, "bundle_capacity_accuracies": {}}
+    
+    item_memory = torch.cat(latents, 0)[:n_items]
+    
+    dist_type = getattr(model, "distribution", "normal")
+    if dist_type == "powerspherical" or normalize_vectors:
+        item_memory = torch.nn.functional.normalize(item_memory, p=2, dim=-1)
+
+    accuracies = {}
+    for k in k_range:
+        if k > n_items:
+            continue
+        
+        trial_accuracies = []
+        for _ in range(n_trials):
+            indices = torch.randperm(n_items, device=device)[:k]
+            chosen_vectors = item_memory[indices]
+            
+            bundle = torch.sum(chosen_vectors, dim=0)
+            if normalize_vectors and torch.norm(bundle) > 1e-6:
+                 bundle = torch.nn.functional.normalize(bundle, p=2, dim=-1)
+
+            sims = torch.nn.functional.cosine_similarity(bundle.unsqueeze(0), item_memory)
+            
+            top_k_indices = torch.topk(sims, k).indices
+            
+            retrieved_indices = set(top_k_indices.cpu().numpy())
+            original_indices = set(indices.cpu().numpy())
+            
+            correctly_retrieved = len(retrieved_indices.intersection(original_indices))
+            accuracy = correctly_retrieved / k
+            trial_accuracies.append(accuracy)
+            
+        accuracies[k] = np.mean(trial_accuracies)
+
+    path = None
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        path = os.path.join(output_dir, "bundle_capacity.png")
+        plt.figure(figsize=(7, 5))
+        ks = sorted(accuracies.keys())
+        accs = [accuracies[k_] for k_ in ks]
+        plt.plot(ks, accs, marker='o')
+        plt.xlabel("Number of Bundled Vectors (k)")
+        plt.ylabel("Retrieval Accuracy")
+        plt.title(f"Bundling Capacity (D={item_memory.shape[1]}, N={n_items})")
+        plt.ylim(0.0, 1.05)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(path, dpi=200, bbox_inches="tight")
+        plt.close()
+    except Exception as e:
+        print(f"Warning: Failed to plot bundle capacity: {e}")
+        path = None
+        
+    return {"bundle_capacity_plot": path, "bundle_capacity_accuracies": accuracies}
+
+
+@torch.no_grad()
+def test_unbinding_of_bundled_pairs(
+    model,
+    loader,
+    device,
+    output_dir,
+    unbind_method: str = "pseudo",
+    n_items: int = 1000,
+    k_range: list = [2, 5, 10, 15, 20],
+    n_trials: int = 10,
+    normalize_vectors: bool = True,
+    unitary_keys: bool = False,
+):
+    model.eval()
+
+    latents = []
+    while len(torch.cat(latents, 0) if latents else []) < n_items:
+        for x, _ in loader:
+            x = x.to(device)
+            mu = _extract_latent_mu(model, x)
+            latents.append(mu.detach())
+            if len(torch.cat(latents, 0)) >= n_items:
+                break
+        if not latents: break
+    
+    required_vecs = (max(k_range) * 2) if k_range else 0
+    if not latents or len(torch.cat(latents, 0)) < required_vecs:
+        return {"unbind_bundled_plot": None, "unbind_bundled_accuracies": {}}
+
+    item_memory = torch.cat(latents, 0)[:n_items]
+    dist_type = getattr(model, "distribution", "normal")
+    if dist_type == "powerspherical" or normalize_vectors:
+        item_memory = torch.nn.functional.normalize(item_memory, p=2, dim=-1)
+
+    accuracies = {}
+    for k in k_range:
+        if k * 2 > n_items:
+            continue
+            
+        trial_accuracies = []
+        for _ in range(n_trials):
+            indices = torch.randperm(n_items, device=device)[:k*2]
+            roles = item_memory[indices[:k]]
+            fillers = item_memory[indices[k:]]
+
+            if unitary_keys:
+                roles = torch.stack([_fft_make_unitary(r) for r in roles])
+
+            bound_pairs = _bind(roles, fillers)
+            bundle = torch.sum(bound_pairs, dim=0)
+
+            correctly_recovered = 0
+            
+            recovered_fillers = _unbind(bundle.unsqueeze(0), roles, method=unbind_method)
+            sims = torch.bmm(recovered_fillers.unsqueeze(1), fillers.unsqueeze(2)).squeeze()
+            if sims.dim() == 0: # handle k=1 case
+                sims = sims.unsqueeze(0)
+            best_matches = torch.argmax(torch.nn.functional.cosine_similarity(recovered_fillers.unsqueeze(1), item_memory.unsqueeze(0), dim=-1), dim=1)
+            
+            for i in range(k):
+                original_filler_idx = indices[k+i]
+                if best_matches[i] == original_filler_idx:
+                    correctly_recovered += 1
+
+            trial_accuracies.append(correctly_recovered / k) # accuracy over fillers for this trial
+            
+        accuracies[k] = np.mean(trial_accuracies)
+
+    path = None
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        path = os.path.join(output_dir, f"unbind_bundled_pairs_{unbind_method}.png")
+        plt.figure(figsize=(7, 5))
+        ks = sorted(accuracies.keys())
+        accs = [accuracies[k_] for k_ in ks]
+        plt.plot(ks, accs, marker='o')
+        plt.xlabel("Number of Bundled Pairs (k)")
+        plt.ylabel("Filler Retrieval Accuracy")
+        plt.title(f"Unbinding of Bundled Pairs (D={item_memory.shape[1]}, N={n_items})")
+        plt.ylim(0.0, 1.05)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(path, dpi=200, bbox_inches="tight")
+        plt.close()
+    except Exception as e:
+        print(f"Warning: Failed to plot unbinding of bundled pairs: {e}")
+        path = None
+        
+    return {"unbind_bundled_plot": path, "unbind_bundled_accuracies": accuracies}

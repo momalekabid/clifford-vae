@@ -11,6 +11,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
+from collections import defaultdict
 
 
 import sys
@@ -26,6 +27,8 @@ from utils.wandb_utils import (
     evaluate_mean_vector_cosine,
     test_vsa_operations,
     test_hrr_fashionmnist_sentence,
+    test_bundle_capacity,
+    test_unbinding_of_bundled_pairs,
 )
 
 
@@ -187,9 +190,9 @@ def main(args):
     print(f"Device: {DEVICE}")
     logger = WandbLogger(args)
 
-    latent_dims = [128, 256, 512, 1024, 2048, 4096, 5000]
+    latent_dims = [128, 256, 512, 1024] #, 2048, 4096, 5000]
     distributions = ["powerspherical", "clifford", "gaussian"]
-    datasets_to_test = ["fashionmnist", "cifar10"]
+    datasets_to_test = ["fashionmnist"] #, "cifar10"]
     dataset_map = {"fashionmnist": datasets.FashionMNIST, "cifar10": datasets.CIFAR10}
 
     for dataset_name in datasets_to_test:
@@ -218,6 +221,9 @@ def main(args):
         test_loader = DataLoader(
             test_set, batch_size=args.batch_size, shuffle=False, num_workers=2
         )
+
+        all_bundle_capacity_results = defaultdict(lambda: {"dims": [], "max_k_at_99_acc": []})
+        all_unbind_bundled_results = defaultdict(lambda: {"dims": [], "max_k_at_99_acc": []})
 
         for latent_dim in latent_dims:
             for dist_name in distributions:
@@ -298,6 +304,57 @@ def main(args):
                         torch.load(f"{output_dir}/best_model.pt", map_location=DEVICE)
                     )
 
+                    bundle_cap_res = test_bundle_capacity(
+                        model,
+                        test_loader,
+                        DEVICE,
+                        output_dir,
+                        n_items=1000,
+                        k_range=list(range(5, 51, 5)),
+                        n_trials=20,
+                        normalize_vectors=getattr(args, "vsa_normalize", True),
+                    )
+                    
+                    unbind_bundled_res_pseudo = test_unbinding_of_bundled_pairs(
+                        model,
+                        test_loader,
+                        DEVICE,
+                        output_dir,
+                        unbind_method="pseudo",
+                        n_items=1000,
+                        k_range=list(range(5, 31, 5)),
+                        n_trials=20,
+                        normalize_vectors=getattr(args, "vsa_normalize", True),
+                        unitary_keys=use_unitary_keys,
+                    )
+                    
+                    bundle_accs = bundle_cap_res.get("bundle_capacity_accuracies", {})
+                    if bundle_accs:
+                        ks = sorted(bundle_accs.keys())
+                        k_at_99 = 0
+                        for k_val in ks:
+                            if bundle_accs[k_val] >= 0.99:
+                                k_at_99 = k_val
+                            else:
+                                break
+                        if k_at_99 > 0:
+                            all_bundle_capacity_results[dist_name]["dims"].append(latent_dim)
+                            all_bundle_capacity_results[dist_name]["max_k_at_99_acc"].append(k_at_99)
+
+                    unbind_accs = unbind_bundled_res_pseudo.get("unbind_bundled_accuracies", {})
+                    if unbind_accs:
+                        ks = sorted(unbind_accs.keys())
+                        k_at_99 = 0
+                        for k_val in ks:
+                            if unbind_accs[k_val] >= 0.99:
+                                k_at_99 = k_val
+                            else:
+                                break
+                        if k_at_99 > 0:
+                            all_unbind_bundled_results[dist_name]["dims"].append(latent_dim)
+                            all_unbind_bundled_results[dist_name]["max_k_at_99_acc"].append(k_at_99)
+
+
                     fourier_pseudo = test_fourier_properties(
                         model, test_loader, DEVICE, output_dir, unbind_method="pseudo"
                     )
@@ -306,7 +363,7 @@ def main(args):
                     )
 
                     use_unitary_keys = True #if not dist_name == "clifford" else False
-                    normalize_vectors = getattr(args, "vsa_normalize", False)
+                    normalize_vectors = getattr(args, "vsa_normalize", True)
                     vsa_pseudo = test_vsa_operations(
                         model,
                         test_loader,
@@ -423,7 +480,11 @@ def main(args):
                         "tsne": tsne_path,
                         "pca": pca_path,
                     }
-                    # add Fourier images for both methods if present
+                    if bundle_cap_res.get("bundle_capacity_plot"):
+                        images["bundle_capacity"] = bundle_cap_res["bundle_capacity_plot"]
+                    if unbind_bundled_res_pseudo.get("unbind_bundled_plot"):
+                        images["unbind_bundled_pseudo"] = unbind_bundled_res_pseudo["unbind_bundled_plot"]
+                        
                     fp = fourier_pseudo.get("fft_spectrum_plot_path")
                     fd = fourier_deconv.get("fft_spectrum_plot_path")
                     if fp:
@@ -484,6 +545,24 @@ def main(args):
 
                 logger.finish_run()
 
+        for results, name in [
+            (all_bundle_capacity_results, "bundle_capacity"),
+            (all_unbind_bundled_results, "unbind_bundled_pairs"),
+        ]:
+            plt.figure(figsize=(8, 6))
+            for dist_name, data in results.items():
+                if data["dims"]:
+                    plt.plot(data["dims"], data["max_k_at_99_acc"], marker='o', label=dist_name)
+            plt.xlabel("Latent Dimension")
+            plt.ylabel("Max k for >= 99% Accuracy")
+            plt.title(f"{name.replace('_', ' ').title()} on {dataset_name}")
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            plot_path = f"results/{dataset_name}_{name}_comparison.png"
+            plt.savefig(plot_path, dpi=200, bbox_inches="tight")
+            plt.close()
+            print(f"Saved summary plot to {plot_path}")
+
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
@@ -519,7 +598,7 @@ if __name__ == "__main__":
     p.add_argument(
         "--vsa_normalize",
         action="store_true",
-        default=False,
+        default=True,
         help="Normalize vectors for vsa tests)",
     )
     args = p.parse_args()
