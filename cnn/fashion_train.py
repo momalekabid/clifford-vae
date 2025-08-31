@@ -304,6 +304,9 @@ def main(args):
                         torch.load(f"{output_dir}/best_model.pt", map_location=DEVICE)
                     )
 
+                    use_unitary_keys = (dist_name != "clifford")
+                    normalize_vectors = getattr(args, "vsa_normalize", True)
+
                     bundle_cap_res = test_bundle_capacity(
                         model,
                         test_loader,
@@ -312,7 +315,7 @@ def main(args):
                         n_items=1000,
                         k_range=list(range(5, 51, 5)),
                         n_trials=20,
-                        normalize_vectors=getattr(args, "vsa_normalize", True),
+                        normalize_vectors=normalize_vectors,
                     )
                     
                     unbind_bundled_res_pseudo = test_unbinding_of_bundled_pairs(
@@ -324,7 +327,7 @@ def main(args):
                         n_items=1000,
                         k_range=list(range(5, 31, 5)),
                         n_trials=20,
-                        normalize_vectors=getattr(args, "vsa_normalize", True),
+                        normalize_vectors=normalize_vectors,
                         unitary_keys=use_unitary_keys,
                     )
                     
@@ -362,8 +365,6 @@ def main(args):
                         model, test_loader, DEVICE, output_dir, unbind_method="deconv"
                     )
 
-                    use_unitary_keys = True #if not dist_name == "clifford" else False
-                    normalize_vectors = getattr(args, "vsa_normalize", True)
                     vsa_pseudo = test_vsa_operations(
                         model,
                         test_loader,
