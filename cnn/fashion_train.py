@@ -304,7 +304,7 @@ def main(args):
                         torch.load(f"{output_dir}/best_model.pt", map_location=DEVICE)
                     )
 
-                    use_unitary_keys = (dist_name != "clifford")
+                    use_unitary_keys = True
                     normalize_vectors = getattr(args, "vsa_normalize", True)
 
                     bundle_cap_res = test_bundle_capacity(
@@ -513,16 +513,16 @@ def main(args):
                         images["vsa_bind_unbind_deconv_proj"] = d_proj
 
                     hrr_fashion_pseudo = test_hrr_fashionmnist_sentence(
-                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors
+                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=True, normalize_vectors=normalize_vectors
                     )
                     hrr_fashion_deconv = test_hrr_fashionmnist_sentence(
-                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors
+                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=True, normalize_vectors=normalize_vectors
                     )
                     hrr_fashion_pseudo_proj = test_hrr_fashionmnist_sentence(
-                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors, project_fillers=True
+                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True
                     )
                     hrr_fashion_deconv_proj = test_hrr_fashionmnist_sentence(
-                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=(dist_name=="clifford"), normalize_vectors=normalize_vectors, project_fillers=True
+                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True
                     )
 
                     if hrr_fashion_pseudo.get("hrr_fashion_plot"):
