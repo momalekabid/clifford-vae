@@ -25,8 +25,7 @@ from utils.wandb_utils import (
     test_fourier_properties,
     compute_class_means,
     evaluate_mean_vector_cosine,
-    test_vsa_operations,
-    test_hrr_fashionmnist_sentence,
+    test_hrr_sentence,
     test_bundle_capacity,
     test_unbinding_of_bundled_pairs,
 )
@@ -365,52 +364,6 @@ def main(args):
                         model, test_loader, DEVICE, output_dir, unbind_method="deconv"
                     )
 
-                    vsa_pseudo = test_vsa_operations(
-                        model,
-                        test_loader,
-                        DEVICE,
-                        output_dir,
-                        n_test_pairs=50,
-                        unbind_method="pseudo",
-                        unitary_keys=use_unitary_keys,
-                        normalize_vectors=normalize_vectors,
-                        project_vectors=False,
-                    )
-                    vsa_deconv = test_vsa_operations(
-                        model,
-                        test_loader,
-                        DEVICE,
-                        output_dir,
-                        n_test_pairs=50,
-                        unbind_method="deconv",
-                        unitary_keys=use_unitary_keys,
-                        normalize_vectors=normalize_vectors,
-                        project_vectors=False,
-                    )
-                    # projection variants
-                    vsa_pseudo_proj = test_vsa_operations(
-                        model,
-                        test_loader,
-                        DEVICE,
-                        output_dir,
-                        n_test_pairs=50,
-                        unbind_method="pseudo",
-                        unitary_keys=use_unitary_keys,
-                        normalize_vectors=normalize_vectors,
-                        project_vectors=True,
-                    )
-                    vsa_deconv_proj = test_vsa_operations(
-                        model,
-                        test_loader,
-                        DEVICE,
-                        output_dir,
-                        n_test_pairs=50,
-                        unbind_method="deconv",
-                        unitary_keys=use_unitary_keys,
-                        normalize_vectors=normalize_vectors,
-                        project_vectors=True,
-                    )
-
                     # reconstructions
                     recon_path = save_reconstructions(
                         model, test_loader, DEVICE, f"{output_dir}/reconstructions.png"
@@ -446,10 +399,8 @@ def main(args):
                     mean_metric_key = "mean_vector_cosine_acc"
                     print(f"{mean_metric_key}: ", mean_vector_acc)
 
-                    vsa_bind_sim_pseudo = vsa_pseudo.get("vsa_bind_unbind_similarity", 0.0)
-                    vsa_bind_sim_deconv = vsa_deconv.get("vsa_bind_unbind_similarity", 0.0)
-                    vsa_bind_sim_pseudo_proj = vsa_pseudo_proj.get("vsa_bind_unbind_similarity", 0.0)
-                    vsa_bind_sim_deconv_proj = vsa_deconv_proj.get("vsa_bind_unbind_similarity", 0.0)
+                    vsa_bind_sim_pseudo = 0.0
+                    vsa_bind_sim_deconv = 0.0
 
                     fourier_metrics = {}
                     fourier_metrics.update({
@@ -470,8 +421,6 @@ def main(args):
                             mean_metric_key: float(mean_vector_acc),
                             "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
                             "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
-                            "vsa_bind_unbind_similarity_pseudo_proj": float(vsa_bind_sim_pseudo_proj),
-                            "vsa_bind_unbind_similarity_deconv_proj": float(vsa_bind_sim_deconv_proj),
                             "final_best_loss": best,
                         }
                     )
@@ -486,12 +435,6 @@ def main(args):
                     if unbind_bundled_res_pseudo.get("unbind_bundled_plot"):
                         images["unbind_bundled_pseudo"] = unbind_bundled_res_pseudo["unbind_bundled_plot"]
                         
-                    fp = fourier_pseudo.get("fft_spectrum_plot_path")
-                    fd = fourier_deconv.get("fft_spectrum_plot_path")
-                    if fp:
-                        images["fft_spectrum_pseudo"] = fp
-                    if fd:
-                        images["fft_spectrum_deconv"] = fd
                     sp = fourier_pseudo.get("similarity_after_k_binds_plot_path")
                     sd = fourier_deconv.get("similarity_after_k_binds_plot_path")
                     if sp:
@@ -499,29 +442,22 @@ def main(args):
                     if sd:
                         images["similarity_after_k_binds_deconv"] = sd
 
-                    vsa_path1 = vsa_pseudo.get("vsa_bind_unbind_plot")
-                    vsa_path2 = vsa_deconv.get("vsa_bind_unbind_plot")
-                    if vsa_path1:
-                        images["vsa_bind_unbind_pseudo"] = vsa_path1
-                    if vsa_path2:
-                        images["vsa_bind_unbind_deconv"] = vsa_path2
-                    p_proj = vsa_pseudo_proj.get("vsa_bind_unbind_plot")
-                    d_proj = vsa_deconv_proj.get("vsa_bind_unbind_plot")
-                    if p_proj:
-                        images["vsa_bind_unbind_pseudo_proj"] = p_proj
-                    if d_proj:
-                        images["vsa_bind_unbind_deconv_proj"] = d_proj
-
-                    hrr_fashion_pseudo = test_hrr_fashionmnist_sentence(
-                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=True, normalize_vectors=normalize_vectors
+                    hrr_fashion_pseudo = test_hrr_sentence(
+                        model, test_loader, DEVICE, output_dir,
+                        unbind_method="pseudo", unitary_keys=True,
+                        normalize_vectors=normalize_vectors,
+                        dataset_name=dataset_name,
                     )
-                    hrr_fashion_deconv = test_hrr_fashionmnist_sentence(
-                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=True, normalize_vectors=normalize_vectors
+                    hrr_fashion_deconv = test_hrr_sentence(
+                        model, test_loader, DEVICE, output_dir,
+                        unbind_method="deconv", unitary_keys=True,
+                        normalize_vectors=normalize_vectors,
+                        dataset_name=dataset_name,
                     )
-                    hrr_fashion_pseudo_proj = test_hrr_fashionmnist_sentence(
+                    hrr_fashion_pseudo_proj = test_hrr_sentence(
                         model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True
                     )
-                    hrr_fashion_deconv_proj = test_hrr_fashionmnist_sentence(
+                    hrr_fashion_deconv_proj = test_hrr_sentence(
                         model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True
                     )
 

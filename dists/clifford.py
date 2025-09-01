@@ -271,27 +271,43 @@ class CliffordTorusDistribution(Distribution):
 
 
 class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
-    arg_constraints = {}
+    arg_constraints = {"loc": constraints.real, "concentration": constraints.positive}
+    support = constraints.real
+    has_rsample = True
 
-    def __init__(self, loc, concentration, validate_args=None):
+    def __init__(self, loc, concentration, validate_args=None, normalize_ifft: bool = True):
         super().__init__(loc, concentration, validate_args=validate_args)
-        mean_dirs = torch.stack((torch.cos(self.loc), torch.sin(self.loc)), -1)
-        self._ps = PowerSpherical(mean_dirs, self.concentration)
+        self.normalize_ifft = normalize_ifft
+        self.dtype = loc.dtype
 
     def rsample(self, sample_shape=torch.Size()):
-        v = self._ps.rsample(sample_shape)
+        mean_dir = torch.stack((torch.cos(self.loc), torch.sin(self.loc)), -1)
+        ps = PowerSpherical(mean_dir, self.concentration)
+        v = ps.rsample(sample_shape)
         theta = torch.atan2(v[..., 1], v[..., 0])
         n = 2 * self.orig_dim
-        theta_s = torch.zeros(
-            (*theta.shape[:-1], n), device=self.loc.device, dtype=self.loc.dtype
-        )
-        theta_s[..., 1 : self.orig_dim] = theta[..., 1:]
-        theta_s[..., -self.orig_dim + 1 :] = -torch.flip(theta[..., 1:], (-1,))
+        theta_s = torch.zeros((*theta.shape[:-1], n), device=theta.device, dtype=self.dtype)
+        theta_s[..., 1:self.orig_dim] = theta[..., 1:]
+        theta_s[..., -self.orig_dim+1:] = -torch.flip(theta[..., 1:], (-1,))
         samples_c = torch.exp(1j * theta_s)
+        if self.normalize_ifft:
+            samples_c = samples_c / math.sqrt(n)
+            return torch.fft.ifft(samples_c, dim=-1, norm="ortho").real
         return torch.fft.ifft(samples_c, dim=-1).real
 
+    def log_prob(self, value):
+        freq = torch.fft.fft(value, dim=-1, norm="ortho")[..., :self.orig_dim]
+        angles = torch.angle(freq)
+        mean_dirs = torch.stack((torch.cos(self.loc), torch.sin(self.loc)), -1)
+        vecs = torch.stack((torch.cos(angles), torch.sin(angles)), -1)
+        ps = PowerSpherical(mean_dirs, self.concentration)
+        return ps.log_prob(vecs).sum(-1)
+
     def entropy(self):
-        return self._ps.entropy()[..., 1:].sum(-1)
+        mean_dirs = torch.stack((torch.cos(self.loc), torch.sin(self.loc)), -1)
+        ps = PowerSpherical(mean_dirs, self.concentration)
+        ent = ps.entropy()
+        return ent[..., 1:].sum(-1)
 
 
 @register_kl(CliffordPowerSphericalDistribution, CliffordTorusUniform)

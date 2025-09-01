@@ -1,4 +1,5 @@
 import os
+import math
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -57,46 +58,21 @@ def test_fourier_properties(
             x, _ = next(iter(loader))
             x = x.to(device)
             out = model(x)
-            
             if isinstance(out, (tuple, list)):
                 if len(out) == 4 and isinstance(out[0], tuple):
-                    (z_mean, z_param2), (q_z, p_z), z, x_recon = out
+                    (z_mean, _), _, z, _ = out
                 elif len(out) == 4:
-                    x_recon, q_z, p_z, mu = out
-                    if getattr(model, "distribution", None) == "clifford":
-                        z = q_z.rsample()
-                    else:
-                        z = mu
+                    _, q_z, _, mu = out
+                    z = q_z.rsample() if getattr(model, "distribution", None) == "clifford" else mu
                 else:
                     z = out[-1]
             else:
                 z = out
     except Exception:
-        return {
-            "fourier_frac_within_0p05": 0.0,
-            "fourier_max_dev": 999.0,
-            "fourier_mean_dev": 999.0,
-            "fourier_phase_std": 0.0,
-            "binding_unbinding_cosine": 0.0,
-            "binding_magnitude_mean_dev": 999.0,
-            "fft_spectrum_plot_path": None,
-            "fourier_mean_magnitude": 0.0,
-            "fourier_magnitude_std": 0.0,
-            "fourier_flatness_mse": 999.0,
-            "binding_k_self_similarity": 0.0,
-            "similarity_after_k_binds_plot_path": None,
-        }
+        return {"binding_k_self_similarity": 0.0, "similarity_after_k_binds_plot_path": None}
 
-    Fz = torch.fft.fft(z, dim=-1)
-    mags = torch.abs(Fz)
-    phases = torch.angle(Fz)
-    target = 1.0
-    dev = torch.abs(mags - target)
-    mean_mag = mags.mean().item()
-    std_mag = mags.std().item()
-    mean_dev = dev.mean().item()
-    max_dev = dev.max().item()
-    frac_within = _unit_magnitude_fraction(Fz, tol=0.05)
+    if getattr(model, "distribution", None) == "gaussian":
+        z = torch.nn.functional.normalize(z, p=2, dim=-1)
 
     a = z[:1]
     ab = a.clone()
@@ -106,7 +82,6 @@ def test_fourier_properties(
         ab = _unbind(ab, a, method=unbind_method)
     cos_sim = torch.nn.functional.cosine_similarity(ab, a, dim=-1).mean().item()
 
-    # sim curve over m = 1..k_self_bind
     sims = []
     for m in range(1, k_self_bind + 1):
         cur = a.clone()
@@ -117,142 +92,21 @@ def test_fourier_properties(
         sim_m = torch.nn.functional.cosine_similarity(cur, a, dim=-1).mean().item()
         sims.append(sim_m)
 
-    def safe_hist(ax, data, title, target_line=None):
-        data_flat = data.ravel()
-        data_min, data_max = data_flat.min(), data_flat.max()
-        data_range = data_max - data_min
-        
-        if data_range < 1e-10:
-            ax.axhline(
-                y=1.0,
-                color="blue",
-                alpha=0.7,
-                linewidth=3,
-                label=f"Constant ≈ {data_min:.6f}",
-            )
-            ax.set_ylim(0, 2)
-            ax.legend()
-        elif data_range < 1e-6:
-            unique_vals = np.unique(data_flat)
-            if len(unique_vals) <= 10:
-                counts = [np.sum(data_flat == val) for val in unique_vals]
-                ax.bar(
-                    unique_vals,
-                    counts,
-                    alpha=0.7,
-                    width=data_range / max(1, len(unique_vals) - 1),
-                )
-            else:
-                ax.scatter(range(len(data_flat[:100])), data_flat[:100], alpha=0.7, s=2)
-                ax.set_xlabel("Sample Index")
-                ax.set_ylabel("Value")
-        else:
-            max_bins = min(50, max(3, int(np.sqrt(len(data_flat)))))
-            bins = max_bins
-            success = False
-            
-            for attempt_bins in [bins, bins // 2, bins // 4, 5, 3]:
-                try:
-                    ax.hist(data_flat, bins=attempt_bins, density=True, alpha=0.7)
-                    success = True
-                    break
-                except (ValueError, np.linalg.LinAlgError):
-                    continue
-            
-            if not success:
-                if len(data_flat) > 1000:
-                    indices = np.linspace(0, len(data_flat) - 1, 1000, dtype=int)
-                    ax.plot(indices, data_flat[indices], "o", alpha=0.5, markersize=1)
-                else:
-                    ax.plot(data_flat, "o", alpha=0.7, markersize=2)
-                ax.set_xlabel("Index")
-                ax.set_ylabel("Value")
-        
-        if target_line is not None and data_range > 1e-10:
-            try:
-                ax.axvline(
-                    x=target_line,
-                    color="r",
-                    linestyle="--",
-                    linewidth=2,
-                    label=f"Target={target_line}",
-                )
-                ax.legend()
-            except:
-                pass
-        
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3)
+    path_bind_curve = os.path.join(output_dir, f"similarity_after_k_binds_{unbind_method}.png")
+    os.makedirs(output_dir, exist_ok=True)
+    plt.figure(figsize=(7, 4))
+    xs = np.arange(1, k_self_bind + 1)
+    plt.plot(xs, sims, marker="o")
+    plt.ylim(0.0, 1.05)
+    plt.xlabel("m (bind m times then unbind m times)")
+    plt.ylabel("Cosine similarity to original")
+    plt.title("Similarity After K Binds")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(path_bind_curve, dpi=200, bbox_inches="tight")
+    plt.close()
 
-    path = None
-    path_bind_curve = None
-    try:
-        avg_mag = mags.mean(dim=0).detach().cpu().numpy()
-        n = avg_mag.shape[-1]
-        uniform = 1.0
-
-        os.makedirs(output_dir, exist_ok=True)
-
-        try:
-            fig, axes = plt.subplots(2, 2, figsize=(11, 8))
-            axes[0, 0].hist(mags.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
-            axes[0, 0].axvline(uniform, color="r", linestyle="--", linewidth=2)
-            axes[0, 0].set_title("|F(z)|")
-            axes[0, 0].grid(True, alpha=0.3)
-            axes[0, 1].hist(phases.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
-            axes[0, 1].set_title("angle(F(z))")
-            axes[0, 1].grid(True, alpha=0.3)
-            mags_bind = torch.abs(torch.fft.fft(_bind(z[:1], z[:1]), dim=-1))
-            axes[1, 0].hist(mags_bind.detach().cpu().numpy().ravel(), bins=40, density=True, alpha=0.7)
-            axes[1, 0].axvline(uniform, color="r", linestyle="--", linewidth=2)
-            axes[1, 0].set_title("|F(bind)|")
-            axes[1, 0].grid(True, alpha=0.3)
-            try:
-                axes[1, 1].imshow(dev.detach().cpu().numpy(), aspect="auto", cmap="viridis")
-            except Exception:
-                dev_flat = dev.detach().cpu().numpy().ravel()
-                axes[1, 1].plot(dev_flat[: min(100, len(dev_flat))], "o", markersize=2)
-                axes[1, 1].set_xlabel("Sample")
-                axes[1, 1].set_ylabel("Deviation")
-            axes[1, 1].set_title("Deviation |F|-1")
-            path = os.path.join(output_dir, "fourier_analysis.png")
-            plt.tight_layout()
-            plt.savefig(path, dpi=200, bbox_inches="tight")
-            plt.close()
-        except Exception as e:
-            print(f"Warning: Failed to plot fourier analysis : {e}")
-            try:
-                plt.close(fig)
-            except Exception:
-                pass
-
-        path_bind_curve = os.path.join(output_dir, f"similarity_after_k_binds_{unbind_method}.png")
-        plt.figure(figsize=(7, 4))
-        xs = np.arange(1, k_self_bind + 1)
-        plt.plot(xs, sims, marker="o")
-        plt.ylim(0.0, 1.05)
-        plt.xlabel("m (bind m times then unbind m times)")
-        plt.ylabel("Cosine similarity to original")
-        plt.title("Similarity After K Binds")
-        plt.grid(alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(path_bind_curve, dpi=200, bbox_inches="tight")
-        plt.close()
-
-    except Exception as e:
-        print(f"Warning: Failed to plot fourier magnitude spectrum: {e}")
-
-    return {
-        "fourier_frac_within_0p05": frac_within,
-        # trimmed metrics
-        "binding_k_self_similarity": cos_sim,
-        "fourier_mean_magnitude": mean_mag,
-        "fourier_magnitude_std": std_mag,
-        "fourier_mean_dev": mean_dev,
-        "fourier_max_dev": max_dev,
-        "fft_spectrum_plot_path": path,
-        "similarity_after_k_binds_plot_path": path_bind_curve,
-    }
+    return {"binding_k_self_similarity": cos_sim, "similarity_after_k_binds_plot_path": path_bind_curve}
 
 
 class WandbLogger:
@@ -307,18 +161,39 @@ def _extract_latent_mu(model, x: torch.Tensor):
         else:
             return out[-1]
     return out
-FASHION_MNIST_CLASSES = [
-    "T-shirt/top",  # 0
-    "Trouser",      # 1
-    "Pullover",     # 2
-    "Dress",        # 3
-    "Coat",         # 4
-    "Sandal",       # 5
-    "Shirt",        # 6
-    "Sneaker",      # 7
-    "Bag",          # 8
-    "Ankle boot",   # 9
-]
+
+_CLASS_NAMES = {
+    "fashionmnist": [
+        "T-shirt/top",
+        "Trouser",
+        "Pullover",
+        "Dress",
+        "Coat",
+        "Sandal",
+        "Shirt",
+        "Sneaker",
+        "Bag",
+        "Ankle boot",
+    ],
+    "mnist": [str(i) for i in range(10)],
+    "cifar10": [
+        "airplane",
+        "automobile",
+        "bird",
+        "cat",
+        "deer",
+        "dog",
+        "frog",
+        "horse",
+        "ship",
+        "truck",
+    ],
+}
+
+def _resolve_class_names(dataset_name: str, count: int) -> list:
+    key = (dataset_name or "").lower()
+    names = _CLASS_NAMES.get(key, [str(i) for i in range(count)])
+    return names[:count]
 
 
 
@@ -501,7 +376,7 @@ def test_vsa_operations(
 
 
 @torch.no_grad()
-def test_hrr_fashionmnist_sentence(
+def test_hrr_sentence(
     model,
     loader,
     device,
@@ -510,6 +385,7 @@ def test_hrr_fashionmnist_sentence(
     unitary_keys: bool = False,
     normalize_vectors: bool = True,
     project_fillers: bool = False,
+    dataset_name: str = None,
 ):
     model.eval()
 
@@ -547,10 +423,13 @@ def test_hrr_fashionmnist_sentence(
         role_item = _fft_make_unitary(role_item)
         role_container = _fft_make_unitary(role_container)
 
-    label_to_idx = {name: i for i, name in enumerate(FASHION_MNIST_CLASSES)}
+    class_names = _resolve_class_names(dataset_name or "", class_vecs.shape[0])
     candidates_idx = [i for i in range(class_vecs.shape[0])]
-    item_idx = 7 if 7 < class_vecs.shape[0] else candidates_idx[0]
-    container_idx = 8 if 8 < class_vecs.shape[0] else candidates_idx[-1]
+    # choose two distinct classes deterministically for visual stability
+    item_idx = (7 if 7 < class_vecs.shape[0] else candidates_idx[0])
+    container_idx = (8 if 8 < class_vecs.shape[0] else candidates_idx[-1])
+    if item_idx == container_idx and len(candidates_idx) > 1:
+        container_idx = (item_idx + 1) % len(candidates_idx)
     item_vec = class_vecs[item_idx].unsqueeze(0)
     container_vec = class_vecs[container_idx].unsqueeze(0)
     if project_fillers:
@@ -581,8 +460,9 @@ def test_hrr_fashionmnist_sentence(
     path = None
     try:
         os.makedirs(output_dir, exist_ok=True)
-        path = os.path.join(output_dir, f"hrr_fashion_{unbind_method}.png")
-        labels = FASHION_MNIST_CLASSES[: class_vecs.shape[0]]
+        tag = (dataset_name or "dataset").lower()
+        path = os.path.join(output_dir, f"hrr_{tag}_{unbind_method}.png")
+        labels = class_names
         plt.figure(figsize=(8, 3))
         heights = sims.detach().cpu().numpy()
         colors = ["C0"] * len(labels)
@@ -605,6 +485,14 @@ def test_hrr_fashionmnist_sentence(
         path = None
 
     return {"hrr_fashion_object_acc": float(is_correct), "hrr_fashion_plot": path}
+
+
+# Backward-compat wrapper
+@torch.no_grad()
+def test_hrr_fashionmnist_sentence(*args, **kwargs):
+    kwargs = dict(kwargs)
+    kwargs.setdefault("dataset_name", "fashionmnist")
+    return test_hrr_sentence(*args, **kwargs)
 
 
 @torch.no_grad()
@@ -736,7 +624,8 @@ def test_unbinding_of_bundled_pairs(
             fillers = item_memory[indices[k:]]
 
             if unitary_keys:
-                roles = torch.stack([_fft_make_unitary(r) for r in roles])
+                D = roles.shape[-1]
+                roles = torch.randn(k, D, device=device, dtype=item_memory.dtype) / math.sqrt(D)
 
             bound_pairs = _bind(roles, fillers)
             bundle = torch.sum(bound_pairs, dim=0)

@@ -21,8 +21,7 @@ from utils.wandb_utils import (
     test_fourier_properties,
     compute_class_means,
     evaluate_mean_vector_cosine,
-    test_vsa_operations,
-    test_hrr_fashionmnist_sentence,
+    test_hrr_sentence,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss
 
@@ -369,24 +368,7 @@ def run(args):
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
-                    vsa_pseudo = test_vsa_operations(
-                        model,
-                        test_eval_loader,
-                        device,
-                        vis_dir,
-                        n_test_pairs=50,
-                        unbind_method="pseudo",
-                        normalize_vectors=getattr(args, "vsa_normalize", False),
-                    )
-                    vsa_deconv = test_vsa_operations(
-                        model,
-                        test_eval_loader,
-                        device,
-                        vis_dir,
-                        n_test_pairs=50,
-                        unbind_method="deconv",
-                        normalize_vectors=getattr(args, "vsa_normalize", False),
-                    )
+                    # removed per-pair VSA tests
 
                     if args.visualize or logger.use:
                         recon_path = plot_reconstructions(
@@ -415,8 +397,6 @@ def run(args):
                         )
 
                         if logger.use:
-                            vsa_path1 = vsa_pseudo.get("vsa_bind_unbind_plot")
-                            vsa_path2 = vsa_deconv.get("vsa_bind_unbind_plot")
                             images_to_log = {
                                 "Reconstructions": recon_path,
                                 "Latent t-SNE": tsne_path,
@@ -431,18 +411,21 @@ def run(args):
                                         "similarity_after_k_binds_plot_path"
                                     ]
 
-                            if vsa_path1:
-                                images_to_log["VSA_Bind_Unbind_pseudo"] = vsa_path1
-                            if vsa_path2:
-                                images_to_log["VSA_Bind_Unbind_deconv"] = vsa_path2
+                            # no VSA per-pair plots
 
-                            hrr_pseudo = test_hrr_fashionmnist_sentence(
-                                model, test_eval_loader, device, vis_dir, unbind_method="pseudo",
-                                unitary_keys=(dist=="clifford"), normalize_vectors=getattr(args, "vsa_normalize", False)
+                            hrr_pseudo = test_hrr_sentence(
+                                model, test_eval_loader, device, vis_dir,
+                                unbind_method="pseudo",
+                                unitary_keys=(dist=="clifford"),
+                                normalize_vectors=getattr(args, "vsa_normalize", False),
+                                dataset_name="mnist",
                             )
-                            hrr_deconv = test_hrr_fashionmnist_sentence(
-                                model, test_eval_loader, device, vis_dir, unbind_method="deconv",
-                                unitary_keys=(dist=="clifford"), normalize_vectors=getattr(args, "vsa_normalize", False)
+                            hrr_deconv = test_hrr_sentence(
+                                model, test_eval_loader, device, vis_dir,
+                                unbind_method="deconv",
+                                unitary_keys=(dist=="clifford"),
+                                normalize_vectors=getattr(args, "vsa_normalize", False),
+                                dataset_name="mnist",
                             )
                             if hrr_pseudo.get("hrr_fashion_plot"):
                                 images_to_log["HRR_Fashion_pseudo"] = hrr_pseudo["hrr_fashion_plot"]
@@ -474,16 +457,11 @@ def run(args):
                             model, test_eval_loader, device, class_means
                         )
 
-                        vsa_bind_sim_pseudo = vsa_pseudo.get("vsa_bind_unbind_similarity", 0.0)
-                        vsa_bind_sim_deconv = vsa_deconv.get("vsa_bind_unbind_similarity", 0.0)
-
                         logger.log_metrics(
                             {
                                 **knn_metrics,
                                 **fourier_metrics,
                                 "mean_vector_cosine_acc": float(mean_vector_acc),
-                                "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
-                                "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                                 "final_val_loss": best_val_loss,
                             }
                         )
@@ -493,8 +471,6 @@ def run(args):
                             "final_val_loss": best_val_loss,
                             **fourier_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
-                            "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
-                            "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                         }
                         logger.log_summary(summary_metrics)
                         logger.finish_run()
