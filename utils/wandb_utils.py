@@ -627,8 +627,8 @@ def test_bundle_capacity(
     item_memory = torch.cat(latents, 0)[:n_items]
     
     dist_type = getattr(model, "distribution", "normal")
-    if dist_type == "powerspherical" or normalize_vectors:
-        item_memory = torch.nn.functional.normalize(item_memory, p=2, dim=-1)
+    # if dist_type == "powerspherical" or normalize_vectors:
+    #     item_memory = torch.nn.functional.normalize(item_memory, p=2, dim=-1)
 
     accuracies = {}
     for k in k_range:
@@ -641,8 +641,8 @@ def test_bundle_capacity(
             chosen_vectors = item_memory[indices]
             
             bundle = torch.sum(chosen_vectors, dim=0)
-            if normalize_vectors and torch.norm(bundle) > 1e-6:
-                 bundle = torch.nn.functional.normalize(bundle, p=2, dim=-1)
+            # if normalize_vectors and torch.norm(bundle) > 1e-6:
+            #      bundle = torch.nn.functional.normalize(bundle, p=2, dim=-1)
 
             sims = torch.nn.functional.cosine_similarity(bundle.unsqueeze(0), item_memory)
             

@@ -28,7 +28,7 @@ from utils.wandb_utils import (
     test_hrr_sentence,
     test_bundle_capacity,
     test_unbinding_of_bundled_pairs,
-    plot_clifford_manifold_visualization,  # Replace complex Clifford functions
+    plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
 )
@@ -479,21 +479,21 @@ def main(args):
                         normalize_vectors=normalize_vectors,
                         dataset_name=dataset_name,
                     )
-                    hrr_fashion_pseudo_proj = test_hrr_sentence(
-                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True, dataset_name=dataset_name
-                    )
-                    hrr_fashion_deconv_proj = test_hrr_sentence(
-                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True, dataset_name=dataset_name
-                    )
+                    # hrr_fashion_pseudo_proj = test_hrr_sentence(
+                    #     model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True, dataset_name=dataset_name
+                    # )
+                    # hrr_fashion_deconv_proj = test_hrr_sentence(
+                    #     model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True, dataset_name=dataset_name
+                    # )
 
                     if hrr_fashion_pseudo.get("hrr_fashion_plot"):
                         images["hrr_fashion_pseudo"] = hrr_fashion_pseudo["hrr_fashion_plot"]
                     if hrr_fashion_deconv.get("hrr_fashion_plot"):
                         images["hrr_fashion_deconv"] = hrr_fashion_deconv["hrr_fashion_plot"]
-                    if hrr_fashion_pseudo_proj.get("hrr_fashion_plot"):
-                        images["hrr_fashion_pseudo_proj"] = hrr_fashion_pseudo_proj["hrr_fashion_plot"]
-                    if hrr_fashion_deconv_proj.get("hrr_fashion_plot"):
-                        images["hrr_fashion_deconv_proj"] = hrr_fashion_deconv_proj["hrr_fashion_plot"]
+                    # if hrr_fashion_pseudo_proj.get("hrr_fashion_plot"):
+                    #     images["hrr_fashion_pseudo_proj"] = hrr_fashion_pseudo_proj["hrr_fashion_plot"]
+                    # if hrr_fashion_deconv_proj.get("hrr_fashion_plot"):
+                    #     images["hrr_fashion_deconv_proj"] = hrr_fashion_deconv_proj["hrr_fashion_plot"]
                     summary = {
                         "final_best_loss": best,
                         **fourier_metrics,
