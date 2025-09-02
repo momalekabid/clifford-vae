@@ -627,8 +627,8 @@ def test_bundle_capacity(
     item_memory = torch.cat(latents, 0)[:n_items]
     
     dist_type = getattr(model, "distribution", "normal")
-    # if dist_type == "powerspherical" or normalize_vectors:
-    #     item_memory = torch.nn.functional.normalize(item_memory, p=2, dim=-1)
+    if normalize_vectors:
+        item_memory = torch.nn.functional.normalize(item_memory, p=2, dim=-1)
 
     accuracies = {}
     for k in k_range:
@@ -641,9 +641,6 @@ def test_bundle_capacity(
             chosen_vectors = item_memory[indices]
             
             bundle = torch.sum(chosen_vectors, dim=0)
-            # if normalize_vectors and torch.norm(bundle) > 1e-6:
-            #      bundle = torch.nn.functional.normalize(bundle, p=2, dim=-1)
-
             sims = torch.nn.functional.cosine_similarity(bundle.unsqueeze(0), item_memory)
             
             top_k_indices = torch.topk(sims, k).indices
@@ -776,7 +773,9 @@ def test_unbinding_of_bundled_pairs(
 
 def plot_clifford_manifold_visualization(model, device, output_dir, n_samples=1000, dims=(0, 1)):
     """Simple Clifford manifold visualization using interpolation-style sampling."""
-    if getattr(model, "distribution", None) != "clifford" or model.latent_dim < 2:
+    # Check for both latent_dim and z_dim attributes
+    latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
+    if getattr(model, "distribution", None) != "clifford" or latent_dim is None or latent_dim < 4:
         return None
     
     os.makedirs(output_dir, exist_ok=True)
@@ -784,17 +783,16 @@ def plot_clifford_manifold_visualization(model, device, output_dir, n_samples=10
     
     model.eval()
     with torch.no_grad():
-        # Sample random angles in the latent space
-        angles = torch.rand(n_samples, model.latent_dim, device=device) * 2 * math.pi - math.pi
+        # Clifford uses half as many angles as real vector dim
+        angle_dim = max(2, latent_dim // 2)
+        angles = torch.rand(n_samples, angle_dim, device=device) * 2 * math.pi - math.pi
         
         # Convert to Clifford vector representation
         Z = _angles_to_clifford_vector(angles, normalize_ifft=True)
         
-        # Decode to see reconstructions
         x_recon = model.decoder(Z)
         x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
     
-    # Create visualization grid
     n_grid = int(math.sqrt(n_samples))
     if n_grid * n_grid > n_samples:
         n_grid = int(math.sqrt(n_samples))
@@ -831,7 +829,9 @@ def plot_clifford_manifold_visualization(model, device, output_dir, n_samples=10
 
 def plot_powerspherical_manifold_visualization(model, device, output_dir, n_samples=1000, dims=(0, 1)):
     """Visualize PowerSpherical manifold latent space."""
-    if getattr(model, "distribution", None) != "powerspherical" or model.latent_dim < 2:
+    # Check for both latent_dim and z_dim attributes
+    latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
+    if getattr(model, "distribution", None) != "powerspherical" or latent_dim is None or latent_dim < 2:
         return None
     
     os.makedirs(output_dir, exist_ok=True)
@@ -841,7 +841,7 @@ def plot_powerspherical_manifold_visualization(model, device, output_dir, n_samp
     model.eval()
     with torch.no_grad():
         # random samples on the hypersphere
-        z = torch.randn(n_samples, model.latent_dim, device=device)
+        z = torch.randn(n_samples, latent_dim, device=device)
         z = torch.nn.functional.normalize(z, p=2, dim=-1)
         
         # decode to see reconstructions
@@ -886,7 +886,9 @@ def plot_powerspherical_manifold_visualization(model, device, output_dir, n_samp
 
 def plot_gaussian_manifold_visualization(model, device, output_dir, n_samples=1000, dims=(0, 1)):
     """Visualize Gaussian manifold latent space."""
-    if getattr(model, "distribution", None) != "gaussian" or model.latent_dim < 2:
+    # Check for both latent_dim and z_dim attributes
+    latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
+    if getattr(model, "distribution", None) != "gaussian" or latent_dim is None or latent_dim < 2:
         return None
     
     os.makedirs(output_dir, exist_ok=True)
@@ -896,7 +898,7 @@ def plot_gaussian_manifold_visualization(model, device, output_dir, n_samples=10
     model.eval()
     with torch.no_grad():
         # random samples from standard normal
-        z = torch.randn(n_samples, model.latent_dim, device=device)
+        z = torch.randn(n_samples, latent_dim, device=device)
         
         x_recon = model.decoder(z)
         x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
