@@ -774,124 +774,54 @@ def test_unbinding_of_bundled_pairs(
     return {"unbind_bundled_plot": path, "unbind_bundled_accuracies": accuracies}
 
 
-def plot_radial_freq_mask(mask: np.ndarray, filename: str) -> str:
-    """Plot and save the radial frequency weighting mask."""
-    plt.figure(figsize=(4, 4))
-    plt.imshow(mask, cmap="magma", origin="lower")
-    plt.axis("off")
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    plt.savefig(filename, bbox_inches="tight", dpi=200)
-    plt.close()
-    return filename
-
-
-def plot_clifford_torus_3d_visualization(model, device, output_dir, dims=(0, 1, 2), n_grid=16):
-    """Create 3D visualization of Clifford torus latent space."""
-    if getattr(model, "distribution", None) != "clifford" or model.latent_dim < 3:
-        return None
-    
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, "clifford_torus_3d_visualization.png")
-    
-    # 3D grid of angles
-    angles0 = torch.linspace(-math.pi, math.pi, n_grid, device=device)
-    angles1 = torch.linspace(-math.pi, math.pi, n_grid, device=device)
-    angles2 = torch.linspace(-math.pi, math.pi, n_grid, device=device)
-    
-    mesh0, mesh1, mesh2 = torch.meshgrid(angles0, angles1, angles2, indexing="ij")
-    A = torch.zeros(n_grid * n_grid * n_grid, model.latent_dim, device=device)
-    A[:, dims[0]] = mesh0.reshape(-1)
-    A[:, dims[1]] = mesh1.reshape(-1)
-    A[:, dims[2]] = mesh2.reshape(-1)
-    
-    # convert to Clifford vector representation
-    Z = _angles_to_clifford_vector(A, normalize_ifft=True)
-    
-    # sample points for visualization (not all points to avoid overcrowding)
-    sample_indices = torch.randperm(len(Z))[:min(1000, len(Z))]
-    Z_sample = Z[sample_indices]
-    A_sample = A[sample_indices]
-    
-    fig = plt.figure(figsize=(12, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    
-    # 3D scatter of latent points
-    ax.scatter(
-        A_sample[:, dims[0]].cpu().numpy(),
-        A_sample[:, dims[1]].cpu().numpy(),
-        A_sample[:, dims[2]].cpu().numpy(),
-        c=torch.norm(Z_sample, dim=1).cpu().numpy(),
-        cmap='viridis',
-        alpha=0.6,
-        s=20
-    )
-    
-    ax.set_xlabel(f'Angle[{dims[0]}]')
-    ax.set_ylabel(f'Angle[{dims[1]}]')
-    ax.set_zlabel(f'Angle[{dims[2]}]')
-    ax.set_title('Clifford Torus 3D Latent Space Visualization')
-    
-    plt.tight_layout()
-    plt.savefig(path, dpi=200, bbox_inches="tight")
-    plt.close()
-    
-    return path
-
-
-def plot_clifford_torus_fourier_analysis(model, device, output_dir, dims=(0, 1), n_grid=16):
-    """Analyze Fourier properties of Clifford torus latent space."""
+def plot_clifford_manifold_visualization(model, device, output_dir, n_samples=1000, dims=(0, 1)):
+    """Simple Clifford manifold visualization using interpolation-style sampling."""
     if getattr(model, "distribution", None) != "clifford" or model.latent_dim < 2:
         return None
     
     os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, "clifford_torus_fourier_analysis.png")
+    path = os.path.join(output_dir, "clifford_manifold_visualization.png")
     
-    # 2D grid of angles
-    angles0 = torch.linspace(-math.pi, math.pi, n_grid, device=device)
-    angles1 = torch.linspace(-math.pi, math.pi, n_grid, device=device)
-    mesh0, mesh1 = torch.meshgrid(angles0, angles1, indexing="ij")
-    A = torch.zeros(n_grid * n_grid, model.latent_dim, device=device)
-    A[:, dims[0]] = mesh0.reshape(-1)
-    A[:, dims[1]] = mesh1.reshape(-1)
+    model.eval()
+    with torch.no_grad():
+        # Sample random angles in the latent space
+        angles = torch.rand(n_samples, model.latent_dim, device=device) * 2 * math.pi - math.pi
+        
+        # Convert to Clifford vector representation
+        Z = _angles_to_clifford_vector(angles, normalize_ifft=True)
+        
+        # Decode to see reconstructions
+        x_recon = model.decoder(Z)
+        x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
     
-    # convert to Clifford vector representation
-    Z = _angles_to_clifford_vector(A, normalize_ifft=True)
+    # Create visualization grid
+    n_grid = int(math.sqrt(n_samples))
+    if n_grid * n_grid > n_samples:
+        n_grid = int(math.sqrt(n_samples))
     
-    # analyze FFT properties
-    Z_reshaped = Z.reshape(n_grid, n_grid, -1)
-    Z_fft = torch.fft.fft2(Z_reshaped, dim=(0, 1))
-    Z_fft_mag = torch.abs(Z_fft)
+    grid_size = min(n_grid, 16)  # limit grid size for visibility
+    x_recon_grid = x_recon[:grid_size * grid_size]
     
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    # Create grid layout
+    C = x_recon_grid.shape[1]
+    h, w = x_recon_grid.shape[-2:]
+    canvas = torch.zeros(C, grid_size * h, grid_size * w)
     
-    # original angles
-    im1 = axes[0, 0].imshow(mesh0.cpu().numpy(), cmap='viridis', origin='lower')
-    axes[0, 0].set_title(f'Angle[{dims[0]}] Grid')
-    axes[0, 0].set_xlabel('Grid X')
-    axes[0, 0].set_ylabel('Grid Y')
-    plt.colorbar(im1, ax=axes[0, 0])
+    for i in range(grid_size):
+        for j in range(grid_size):
+            idx = i * grid_size + j
+            if idx < len(x_recon_grid):
+                canvas[:, i * h:(i + 1) * h, j * w:(j + 1) * w] = x_recon_grid[idx]
     
-    im2 = axes[0, 1].imshow(mesh1.cpu().numpy(), cmap='viridis', origin='lower')
-    axes[0, 1].set_title(f'Angle[{dims[1]}] Grid')
-    axes[0, 1].set_xlabel('Grid X')
-    axes[0, 1].set_ylabel('Grid Y')
-    plt.colorbar(im2, ax=axes[0, 1])
+    plt.figure(figsize=(8, 8))
+    if C == 1:
+        plt.imshow(canvas.squeeze(0).cpu().numpy(), cmap="gray")
+    else:
+        plt.imshow(canvas.permute(1, 2, 0).cpu().numpy())
     
-    # FFT magnitude
-    im3 = axes[1, 0].imshow(Z_fft_mag[..., 0].cpu().numpy(), cmap='magma', origin='lower')
-    axes[1, 0].set_title('FFT Magnitude (First Component)')
-    axes[1, 0].set_xlabel('Frequency X')
-    axes[1, 0].set_ylabel('Frequency Y')
-    plt.colorbar(im3, ax=axes[1, 0])
-    
-    # vector magnitude
-    Z_mag = torch.norm(Z_reshaped, dim=-1)
-    im4 = axes[1, 1].imshow(Z_mag.cpu().numpy(), cmap='plasma', origin='lower')
-    axes[1, 1].set_title('Vector Magnitude')
-    axes[1, 1].set_xlabel('Grid X')
-    axes[1, 1].set_ylabel('Grid Y')
-    plt.colorbar(im4, ax=axes[1, 1])
-    
+    plt.xticks([])
+    plt.yticks([])
+    plt.title("Clifford Manifold Reconstructions")
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -1003,82 +933,3 @@ def plot_gaussian_manifold_visualization(model, device, output_dir, n_samples=10
     plt.close()
     
     return path
-
-# synth test set for periodic images
-def test_lowfreq_torus_visualization(model, device, output_dir, N=4, im_size=64, batch_size=256):
-    """Generate and visualize low-frequency periodic images on the Clifford torus."""
-    try:
-        from utils.low_freq_generator import LowFreqGenerator
-        from torch.utils.data import TensorDataset, DataLoader
-        
-        # generates one batch of synthetic low-frequency images
-        gen = LowFreqGenerator(batch_size=batch_size, N=N, im_size=im_size).generate()
-        x_np = next(gen)[0]  # shape (B,H,W,C)
-        x = torch.from_numpy(x_np).permute(0, 3, 1, 2).to(device) # (B,C,H,W)
-        dummy_labels = torch.zeros(batch_size, dtype=torch.long)
-        loader = DataLoader(TensorDataset(x, dummy_labels), batch_size=batch_size)
-
-        # Latent scatter
-        scatter = plot_clifford_torus_latent_scatter(
-            model, loader, device, output_dir, dims=(0,1), dataset_name='lowfreq'
-        )
-        # uniform grid of angles)
-        grid = plot_clifford_torus_recon_grid(
-            model, device, output_dir, dims=(0,1), n_grid=16
-        )
-        return {'lowfreq_scatter': scatter, 'lowfreq_recon_grid': grid}
-    except ImportError:
-        print("Warning: LowFreqGenerator not available, skipping lowfreq test")
-        return {'lowfreq_scatter': None, 'lowfreq_recon_grid': None}
-    except Exception as e:
-        print(f"Warning: Lowfreq test failed: {e}")
-        return {'lowfreq_scatter': None, 'lowfreq_recon_grid': None}
-
-
-def test_random_fourier_torus_visualization(model, device, output_dir, N=10, im_size=64, batch_size=256, gamma=0.5):
-    """Generate random periodic images via random Fourier components and visualize on Clifford torus."""
-    try:
-        from utils.low_freq_generator import LowFreqGenerator
-        from torch.utils.data import TensorDataset, DataLoader
-        
-        # generates one batch of random-Fourier images (translations of random periodic picture) taken from DiffusionVAE github
-        gen = LowFreqGenerator(batch_size=batch_size, N=N, im_size=im_size, discounting=gamma).generate()
-        x_np = next(gen)[0]  # shape (B,H,W,C)
-        x = torch.from_numpy(x_np).permute(0, 3, 1, 2).to(device)
-        dummy = torch.zeros(batch_size, dtype=torch.long, device=device)
-        loader = DataLoader(TensorDataset(x, dummy), batch_size=batch_size)
-
-        scatter = plot_clifford_torus_latent_scatter(model, loader, device, output_dir, dims=(0,1), dataset_name='randfourier')
-        grid = plot_clifford_torus_recon_grid(model, device, output_dir, dims=(0,1), n_grid=16)
-        return {'randfourier_scatter': scatter, 'randfourier_recon_grid': grid}
-    except ImportError:
-        print("Warning: LowFreqGenerator not available, skipping random fourier test")
-        return {'randfourier_scatter': None, 'randfourier_recon_grid': None}
-    except Exception as e:
-        print(f"Warning: Random fourier test failed: {e}")
-        return {'randfourier_scatter': None, 'randfourier_recon_grid': None}
-
-
-def test_simple_cosine_translation(model, device, output_dir, im_size=64, batch_size=1024):
-    """Generate translations of pic(θ,φ)=cosθ+cosφ on a torus, then visualize latent scatter & recon grid."""
-    try:
-        from torch.utils.data import TensorDataset, DataLoader
-        
-        # sample random shifts Δθ,Δφ
-        shifts = torch.rand(batch_size, 2, device=device) * 2 * math.pi - math.pi
-        # build images
-        xs = shifts[:, 0].unsqueeze(-1).unsqueeze(-1)  # (B,1,1)
-        ys = shifts[:, 1].unsqueeze(-1).unsqueeze(-1)
-        grid = torch.linspace(-math.pi, math.pi, im_size, device=device)
-        th, ph = torch.meshgrid(grid, grid, indexing='ij')
-        pic = (th + xs).cos() + (ph + ys).cos()  # (B,H,W)
-        x = pic.unsqueeze(1)  # (B,1,H,W)
-        dummy = torch.zeros(batch_size, dtype=torch.long, device=device)
-        loader = DataLoader(TensorDataset(x, dummy), batch_size=batch_size)
-
-        scatter = plot_clifford_torus_latent_scatter(model, loader, device, output_dir, dims=(0,1), dataset_name='simplecos')
-        recon = plot_clifford_torus_recon_grid(model, device, output_dir, dims=(0,1), n_grid=16)
-        return {'simplecos_scatter': scatter, 'simplecos_recon': recon}
-    except Exception as e:
-        print(f"Warning: Simple cosine test failed: {e}")
-        return {'simplecos_scatter': None, 'simplecos_recon': None}

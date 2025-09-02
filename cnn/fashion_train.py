@@ -28,16 +28,9 @@ from utils.wandb_utils import (
     test_hrr_sentence,
     test_bundle_capacity,
     test_unbinding_of_bundled_pairs,
-    plot_clifford_torus_latent_scatter,
-    plot_clifford_torus_recon_grid,
-    plot_clifford_torus_3d_visualization,
-    plot_clifford_torus_fourier_analysis,
+    plot_clifford_manifold_visualization,  # Replace complex Clifford functions
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
-    plot_radial_freq_mask,
-    test_lowfreq_torus_visualization,
-    test_random_fourier_torus_visualization,
-    test_simple_cosine_translation,
 )
 
 
@@ -452,45 +445,13 @@ def main(args):
                     if sd:
                         images["similarity_after_k_binds_deconv"] = sd
 
-                    # Add manifold-specific visualizations
                     if dist_name == "clifford" and model.latent_dim >= 2:
-                        # Original Clifford torus visualizations
-                        scatter = plot_clifford_torus_latent_scatter(
-                            model, test_loader, DEVICE, output_dir, dims=(0, 1), dataset_name=dataset_name
+                        # manifold visualization
+                        cliff_viz = plot_clifford_manifold_visualization(
+                            model, DEVICE, output_dir, n_samples=1000, dims=(0, 1)
                         )
-                        recon_grid = plot_clifford_torus_recon_grid(
-                            model, DEVICE, output_dir, dims=(0, 1), n_grid=16
-                        )
-                        if scatter:
-                            images["clifford_torus_latent_scatter"] = scatter
-                        if recon_grid:
-                            images["clifford_torus_recon_grid"] = recon_grid
-
-                        # 3D visualization for higher dimensions
-                        if model.latent_dim >= 3:
-                            viz_3d = plot_clifford_torus_3d_visualization(
-                                model, DEVICE, output_dir, dims=(0, 1, 2), n_grid=16
-                            )
-                            if viz_3d:
-                                images["clifford_torus_3d_visualization"] = viz_3d
-
-                        # Fourier analysis
-                        fourier_viz = plot_clifford_torus_fourier_analysis(
-                            model, DEVICE, output_dir, dims=(0, 1), n_grid=16
-                        )
-                        if fourier_viz:
-                            images["clifford_torus_fourier_analysis"] = fourier_viz
-
-                        # Synthetic periodic image tests
-                        try:
-                            syn_imgs = test_lowfreq_torus_visualization(model, DEVICE, output_dir)
-                            rand_imgs = test_random_fourier_torus_visualization(model, DEVICE, output_dir)
-                            simple_imgs = test_simple_cosine_translation(model, DEVICE, output_dir)
-                            images.update(syn_imgs)
-                            images.update(rand_imgs)
-                            images.update(simple_imgs)
-                        except Exception as e:
-                            print(f"Warning: Synthetic tests failed: {e}")
+                        if cliff_viz:
+                            images["clifford_manifold_visualization"] = cliff_viz
 
                     elif dist_name == "powerspherical" and model.latent_dim >= 2:
                         pow_viz = plot_powerspherical_manifold_visualization(
@@ -505,14 +466,6 @@ def main(args):
                         )
                         if gauss_viz:
                             images["gaussian_manifold_visualization"] = gauss_viz
-
-                    try:
-                        h, w = next(iter(test_loader))[0].shape[-2:]
-                        freq_mask = model._create_radial_freq_mask(h, w)
-                        mask_path = plot_radial_freq_mask(freq_mask.cpu().numpy(), os.path.join(output_dir, 'freq_mask.png'))
-                        images['freq_mask'] = mask_path
-                    except Exception as e:
-                        print(f"Warning: Could not create frequency mask: {e}")
 
                     hrr_fashion_pseudo = test_hrr_sentence(
                         model, test_loader, DEVICE, output_dir,
@@ -577,7 +530,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--epochs", type=int, default=1000)
     p.add_argument("--warmup_epochs", type=int, default=100)
-    p.add_argument("--batch_size", type=int, default=256)
+    p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument(
         "--recon_loss", type=str, default="mse", choices=["mse", "l1_freq"]
@@ -593,10 +546,10 @@ if __name__ == "__main__":
     )
     p.add_argument("--max_beta", type=float, default=1.0)
     p.add_argument(
-        "--min_beta", type=float, default=0.1, help="Minimum KL beta during cycles"
+        "--min_beta", type=float, default=0.01, help="Minimum KL beta during cycles"
     )
     p.add_argument("--no_wandb", action="store_true")
-    p.add_argument("--wandb_project", type=str, default="fashionmnist-cifar10-default-name")
+    p.add_argument("--wandb_project", type=str, default="conv-experiments-sep-2025")
     p.add_argument("--patience", type=int, default=50)
     p.add_argument(
         "--cycle_epochs",
