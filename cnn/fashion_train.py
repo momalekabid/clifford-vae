@@ -28,6 +28,16 @@ from utils.wandb_utils import (
     test_hrr_sentence,
     test_bundle_capacity,
     test_unbinding_of_bundled_pairs,
+    plot_clifford_torus_latent_scatter,
+    plot_clifford_torus_recon_grid,
+    plot_clifford_torus_3d_visualization,
+    plot_clifford_torus_fourier_analysis,
+    plot_powerspherical_manifold_visualization,
+    plot_gaussian_manifold_visualization,
+    plot_radial_freq_mask,
+    test_lowfreq_torus_visualization,
+    test_random_fourier_torus_visualization,
+    test_simple_cosine_translation,
 )
 
 
@@ -442,6 +452,71 @@ def main(args):
                     if sd:
                         images["similarity_after_k_binds_deconv"] = sd
 
+                    # Add manifold-specific visualizations
+                    if dist_name == "clifford" and model.latent_dim >= 2:
+                        # Original Clifford torus visualizations
+                        scatter = plot_clifford_torus_latent_scatter(
+                            model, test_loader, DEVICE, output_dir, dims=(0, 1), dataset_name=dataset_name
+                        )
+                        recon_grid = plot_clifford_torus_recon_grid(
+                            model, DEVICE, output_dir, dims=(0, 1), n_grid=16
+                        )
+                        if scatter:
+                            images["clifford_torus_latent_scatter"] = scatter
+                        if recon_grid:
+                            images["clifford_torus_recon_grid"] = recon_grid
+
+                        # 3D visualization for higher dimensions
+                        if model.latent_dim >= 3:
+                            viz_3d = plot_clifford_torus_3d_visualization(
+                                model, DEVICE, output_dir, dims=(0, 1, 2), n_grid=16
+                            )
+                            if viz_3d:
+                                images["clifford_torus_3d_visualization"] = viz_3d
+
+                        # Fourier analysis
+                        fourier_viz = plot_clifford_torus_fourier_analysis(
+                            model, DEVICE, output_dir, dims=(0, 1), n_grid=16
+                        )
+                        if fourier_viz:
+                            images["clifford_torus_fourier_analysis"] = fourier_viz
+
+                        # Synthetic periodic image tests
+                        try:
+                            syn_imgs = test_lowfreq_torus_visualization(model, DEVICE, output_dir)
+                            rand_imgs = test_random_fourier_torus_visualization(model, DEVICE, output_dir)
+                            simple_imgs = test_simple_cosine_translation(model, DEVICE, output_dir)
+                            images.update(syn_imgs)
+                            images.update(rand_imgs)
+                            images.update(simple_imgs)
+                        except Exception as e:
+                            print(f"Warning: Synthetic tests failed: {e}")
+
+                    elif dist_name == "powerspherical" and model.latent_dim >= 2:
+                        # PowerSpherical manifold visualization
+                        pow_viz = plot_powerspherical_manifold_visualization(
+                            model, test_loader, DEVICE, output_dir, dims=(0, 1), n_samples=1000
+                        )
+                        if pow_viz:
+                            images["powerspherical_manifold_visualization"] = pow_viz
+
+                    elif dist_name == "gaussian" and model.latent_dim >= 2:
+                        # Gaussian manifold visualization
+                        gauss_viz = plot_gaussian_manifold_visualization(
+                            model, test_loader, DEVICE, output_dir, dims=(0, 1), n_samples=1000
+                        )
+                        if gauss_viz:
+                            images["gaussian_manifold_visualization"] = gauss_viz
+
+                    # Add radial frequency mask visualization for all models
+                    try:
+                        h, w = next(iter(test_loader))[0].shape[-2:]
+                        freq_mask = model._create_radial_freq_mask(h, w)
+                        mask_path = plot_radial_freq_mask(freq_mask.cpu().numpy(), os.path.join(output_dir, 'freq_mask.png'))
+                        images['freq_mask'] = mask_path
+                    except Exception as e:
+                        print(f"Warning: Could not create frequency mask: {e}")
+
                     hrr_fashion_pseudo = test_hrr_sentence(
                         model, test_loader, DEVICE, output_dir,
                         unbind_method="pseudo", unitary_keys=True,
@@ -455,10 +530,10 @@ def main(args):
                         dataset_name=dataset_name,
                     )
                     hrr_fashion_pseudo_proj = test_hrr_sentence(
-                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True
+                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True, dataset_name=dataset_name
                     )
                     hrr_fashion_deconv_proj = test_hrr_sentence(
-                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True
+                        model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True, dataset_name=dataset_name
                     )
 
                     if hrr_fashion_pseudo.get("hrr_fashion_plot"):
@@ -508,7 +583,7 @@ if __name__ == "__main__":
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument(
-        "--recon_loss", type=str, default="l1_freq", choices=["mse", "l1_freq"]
+        "--recon_loss", type=str, default="mse", choices=["mse", "l1_freq"]
     )
     p.add_argument(
         "--l1_weight", type=float, default=1.0, help="Weight for L1 pixel loss"

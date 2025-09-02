@@ -22,6 +22,12 @@ from utils.wandb_utils import (
     compute_class_means,
     evaluate_mean_vector_cosine,
     test_hrr_sentence,
+    plot_clifford_torus_latent_scatter,
+    plot_clifford_torus_recon_grid,
+    plot_clifford_torus_3d_visualization,
+    plot_clifford_torus_fourier_analysis,
+    plot_powerspherical_manifold_visualization,
+    plot_gaussian_manifold_visualization,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss
 
@@ -368,7 +374,6 @@ def run(args):
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
-                    # removed per-pair VSA tests
 
                     if args.visualize or logger.use:
                         recon_path = plot_reconstructions(
@@ -411,8 +416,6 @@ def run(args):
                                         "similarity_after_k_binds_plot_path"
                                     ]
 
-                            # no VSA per-pair plots
-
                             hrr_pseudo = test_hrr_sentence(
                                 model, test_eval_loader, device, vis_dir,
                                 unbind_method="pseudo",
@@ -432,6 +435,51 @@ def run(args):
                             if hrr_deconv.get("hrr_fashion_plot"):
                                 images_to_log["HRR_Fashion_deconv"] = hrr_deconv["hrr_fashion_plot"]
 
+                            # Add manifold-specific visualizations
+                            if dist == "clifford" and mdim >= 2:
+                                # Clifford torus visualizations
+                                cliff_scatter = plot_clifford_torus_latent_scatter(
+                                    model, test_eval_loader, device, vis_dir, dims=(0, 1), dataset_name="mnist"
+                                )
+                                cliff_grid = plot_clifford_torus_recon_grid(
+                                    model, device, vis_dir, dims=(0, 1), n_grid=16
+                                )
+                                if cliff_scatter:
+                                    images_to_log["Clifford_Torus_Scatter"] = cliff_scatter
+                                if cliff_grid:
+                                    images_to_log["Clifford_Torus_Grid"] = cliff_grid
+
+                                # 3D visualization for higher dimensions
+                                if mdim >= 3:
+                                    cliff_3d = plot_clifford_torus_3d_visualization(
+                                        model, device, vis_dir, dims=(0, 1, 2), n_grid=16
+                                    )
+                                    if cliff_3d:
+                                        images_to_log["Clifford_Torus_3D"] = cliff_3d
+
+                                # Fourier analysis
+                                cliff_fourier = plot_clifford_torus_fourier_analysis(
+                                    model, device, vis_dir, dims=(0, 1), n_grid=16
+                                )
+                                if cliff_fourier:
+                                    images_to_log["Clifford_Torus_Fourier"] = cliff_fourier
+
+                            elif dist == "powerspherical" and mdim >= 2:
+                                # PowerSpherical manifold visualization
+                                pow_viz = plot_powerspherical_manifold_visualization(
+                                    model, test_eval_loader, device, vis_dir, dims=(0, 1), n_samples=1000
+                                )
+                                if pow_viz:
+                                    images_to_log["PowerSpherical_Manifold"] = pow_viz
+
+                            elif dist == "normal" and mdim >= 2:
+                                # Gaussian manifold visualization
+                                gauss_viz = plot_gaussian_manifold_visualization(
+                                    model, test_eval_loader, device, vis_dir, dims=(0, 1), n_samples=1000
+                                )
+                                if gauss_viz:
+                                    images_to_log["Gaussian_Manifold"] = gauss_viz
+
                             logger.log_images(images_to_log)
 
                     if logger.use:
@@ -445,7 +493,7 @@ def run(args):
                         fourier_metrics.update({
                             f"deconv/{k}": v for k, v in fourier_deconv.items() if isinstance(v, (int, float, bool))
                         })
-                        # mean_vector evaluation
+                        
                         train_subset = torch.utils.data.Subset(
                             train_dataset, list(range(min(5000, len(train_dataset))))
                         )
