@@ -897,7 +897,7 @@ def plot_clifford_torus_fourier_analysis(model, device, output_dir, dims=(0, 1),
     return path
 
 
-def plot_powerspherical_manifold_visualization(model, device, output_dir, dims=(0, 1), n_samples=1000):
+def plot_powerspherical_manifold_visualization(model, device, output_dir, n_samples=1000, dims=(0, 1)):
     """Visualize PowerSpherical manifold latent space."""
     if getattr(model, "distribution", None) != "powerspherical" or model.latent_dim < 2:
         return None
@@ -952,7 +952,7 @@ def plot_powerspherical_manifold_visualization(model, device, output_dir, dims=(
     return path
 
 
-def plot_gaussian_manifold_visualization(model, device, output_dir, dims=(0, 1), n_samples=1000):
+def plot_gaussian_manifold_visualization(model, device, output_dir, n_samples=1000, dims=(0, 1)):
     """Visualize Gaussian manifold latent space."""
     if getattr(model, "distribution", None) != "gaussian" or model.latent_dim < 2:
         return None

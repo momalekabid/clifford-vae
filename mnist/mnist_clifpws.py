@@ -467,7 +467,7 @@ def run(args):
                             elif dist == "powerspherical" and mdim >= 2:
                                 # PowerSpherical manifold visualization
                                 pow_viz = plot_powerspherical_manifold_visualization(
-                                    model, test_eval_loader, device, vis_dir, dims=(0, 1), n_samples=1000
+                                    model, device, vis_dir, n_samples=1000, dims=(0, 1)
                                 )
                                 if pow_viz:
                                     images_to_log["PowerSpherical_Manifold"] = pow_viz
@@ -475,7 +475,7 @@ def run(args):
                             elif dist == "normal" and mdim >= 2:
                                 # Gaussian manifold visualization
                                 gauss_viz = plot_gaussian_manifold_visualization(
-                                    model, test_eval_loader, device, vis_dir, dims=(0, 1), n_samples=1000
+                                    model, device, vis_dir, n_samples=1000, dims=(0, 1)
                                 )
                                 if gauss_viz:
                                     images_to_log["Gaussian_Manifold"] = gauss_viz

@@ -495,7 +495,7 @@ def main(args):
                     elif dist_name == "powerspherical" and model.latent_dim >= 2:
                         # PowerSpherical manifold visualization
                         pow_viz = plot_powerspherical_manifold_visualization(
-                            model, test_loader, DEVICE, output_dir, dims=(0, 1), n_samples=1000
+                            model, DEVICE, output_dir, n_samples=1000, dims=(0, 1)
                         )
                         if pow_viz:
                             images["powerspherical_manifold_visualization"] = pow_viz
@@ -503,7 +503,7 @@ def main(args):
                     elif dist_name == "gaussian" and model.latent_dim >= 2:
                         # Gaussian manifold visualization
                         gauss_viz = plot_gaussian_manifold_visualization(
-                            model, test_loader, DEVICE, output_dir, dims=(0, 1), n_samples=1000
+                            model, DEVICE, output_dir, n_samples=1000, dims=(0, 1)
                         )
                         if gauss_viz:
                             images["gaussian_manifold_visualization"] = gauss_viz
