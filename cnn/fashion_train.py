@@ -409,8 +409,8 @@ def main(args):
                     mean_metric_key = "mean_vector_cosine_acc"
                     print(f"{mean_metric_key}: ", mean_vector_acc)
 
-                    vsa_bind_sim_pseudo = 0.0
-                    vsa_bind_sim_deconv = 0.0
+                    # vsa_bind_sim_pseudo = 0.0
+                    # vsa_bind_sim_deconv = 0.0
 
                     fourier_metrics = {}
                     fourier_metrics.update({
@@ -429,8 +429,8 @@ def main(args):
                             **knn_metrics,
                             **fourier_metrics,
                             mean_metric_key: float(mean_vector_acc),
-                            "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
-                            "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
+                            # "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
+                            # "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                             "final_best_loss": best,
                         }
                     )
@@ -493,7 +493,6 @@ def main(args):
                             print(f"Warning: Synthetic tests failed: {e}")
 
                     elif dist_name == "powerspherical" and model.latent_dim >= 2:
-                        # PowerSpherical manifold visualization
                         pow_viz = plot_powerspherical_manifold_visualization(
                             model, DEVICE, output_dir, n_samples=1000, dims=(0, 1)
                         )
@@ -501,14 +500,12 @@ def main(args):
                             images["powerspherical_manifold_visualization"] = pow_viz
 
                     elif dist_name == "gaussian" and model.latent_dim >= 2:
-                        # Gaussian manifold visualization
                         gauss_viz = plot_gaussian_manifold_visualization(
                             model, DEVICE, output_dir, n_samples=1000, dims=(0, 1)
                         )
                         if gauss_viz:
                             images["gaussian_manifold_visualization"] = gauss_viz
 
-                    # Add radial frequency mask visualization for all models
                     try:
                         h, w = next(iter(test_loader))[0].shape[-2:]
                         freq_mask = model._create_radial_freq_mask(h, w)
@@ -549,8 +546,8 @@ def main(args):
                         **fourier_metrics,
                         **knn_metrics,
                         mean_metric_key: float(mean_vector_acc),
-                        "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
-                        "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
+                        # "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
+                        # "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)

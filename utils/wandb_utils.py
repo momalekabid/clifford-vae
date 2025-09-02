@@ -220,8 +220,8 @@ def compute_class_means(model, loader, device, max_per_class: int = 1000):
     for label, total in sums.items():
         c = max(1, min(counts[label], 10))
         vec = total / c
-        if dist_type == "powerspherical":
-            vec = torch.nn.functional.normalize(vec, p=2, dim=-1)
+        # if dist_type == "powerspherical":
+        #     vec = torch.nn.functional.normalize(vec, p=2, dim=-1)
         means[label] = vec
     return means
 
@@ -728,6 +728,8 @@ def test_unbinding_of_bundled_pairs(
             if unitary_keys:
                 D = roles.shape[-1]
                 roles = torch.randn(k, D, device=device, dtype=item_memory.dtype) / math.sqrt(D)
+                roles = torch.nn.functional.normalize(roles, p=2, dim=-1)
+                roles = _fft_make_unitary(roles)
 
             bound_pairs = _bind(roles, fillers)
             bundle = torch.sum(bound_pairs, dim=0)
