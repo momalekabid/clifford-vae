@@ -83,6 +83,10 @@ def test_fourier_properties(
     cos_sim = torch.nn.functional.cosine_similarity(ab, a, dim=-1).mean().item()
 
     sims = []
+    recon_paths = None
+    recon_every = 10
+    recon_vectors = []
+    recon_steps = []
     for m in range(1, k_self_bind + 1):
         cur = a.clone()
         for _ in range(m):
@@ -91,6 +95,9 @@ def test_fourier_properties(
             cur = _unbind(cur, a, method=unbind_method)
         sim_m = torch.nn.functional.cosine_similarity(cur, a, dim=-1).mean().item()
         sims.append(sim_m)
+        if (m % recon_every == 0) or (m == k_self_bind):
+            recon_vectors.append(cur.squeeze(0))
+            recon_steps.append(m)
 
     path_bind_curve = os.path.join(output_dir, f"similarity_after_k_binds_{unbind_method}.png")
     os.makedirs(output_dir, exist_ok=True)
@@ -106,7 +113,37 @@ def test_fourier_properties(
     plt.savefig(path_bind_curve, dpi=200, bbox_inches="tight")
     plt.close()
 
-    return {"binding_k_self_similarity": cos_sim, "similarity_after_k_binds_plot_path": path_bind_curve}
+    try:
+        if recon_vectors:
+            xs = [a.squeeze(0)] + recon_vectors
+            with torch.no_grad():
+                imgs = model.decoder(torch.stack(xs, 0))
+                imgs = (imgs * 0.5 + 0.5).clamp(0, 1).cpu()
+            C, h, w = imgs.shape[1], imgs.shape[-2], imgs.shape[-1]
+            canvas = torch.zeros(C, h, (len(xs)) * w)
+            for j in range(len(xs)):
+                canvas[:, :, j * w : (j + 1) * w] = imgs[j]
+            recon_paths = os.path.join(output_dir, f"recon_after_k_binds_{unbind_method}.png")
+            plt.figure(figsize=(min(16, 2 + len(xs)*2), 2.5))
+            if C == 1:
+                plt.imshow(canvas.squeeze(0), cmap="gray")
+            else:
+                plt.imshow(canvas.permute(1, 2, 0))
+            ticks = [f"m={0}"] + [f"m={m}" for m in recon_steps]
+            plt.xticks([])
+            plt.yticks([])
+            plt.title("Decoder reconstructions after bind+unbind m times (left=m=0)")
+            plt.tight_layout()
+            plt.savefig(recon_paths, dpi=200, bbox_inches="tight")
+            plt.close()
+    except Exception as e:
+        recon_paths = None
+
+    return {
+        "binding_k_self_similarity": cos_sim,
+        "similarity_after_k_binds_plot_path": path_bind_curve,
+        "recon_after_k_binds_plot_path": recon_paths,
+    }
 
 
 class WandbLogger:

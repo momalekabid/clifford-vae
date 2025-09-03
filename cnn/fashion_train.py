@@ -444,6 +444,13 @@ def main(args):
                         images["similarity_after_k_binds_pseudo"] = sp
                     if sd:
                         images["similarity_after_k_binds_deconv"] = sd
+                    # reconstructions after m binds (every 10) for pseudo/deconv
+                    rp = fourier_pseudo.get("recon_after_k_binds_plot_path")
+                    rd = fourier_deconv.get("recon_after_k_binds_plot_path")
+                    if rp:
+                        images["recon_after_k_binds_pseudo"] = rp
+                    if rd:
+                        images["recon_after_k_binds_deconv"] = rd
 
                     if dist_name == "clifford" and model.latent_dim >= 2:
                         # manifold visualization
@@ -512,9 +519,26 @@ def main(args):
             (all_unbind_bundled_results, "unbind_bundled_pairs"),
         ]:
             plt.figure(figsize=(8, 6))
+            slopes = {}
+            intercepts = {}
             for dist_name, data in results.items():
-                if data["dims"]:
-                    plt.plot(data["dims"], data["max_k_at_99_acc"], marker='o', label=dist_name)
+                dims_list = data["dims"]
+                k_list = data["max_k_at_99_acc"]
+                if dims_list and k_list and len(dims_list) == len(k_list) and len(k_list) >= 2:
+                    plt.plot(dims_list, k_list, marker='o', label=dist_name)
+                    # fit y = dims = a * k + b
+                    # swap axes to match paper
+                    x = np.array(k_list, dtype=float)
+                    y = np.array(dims_list, dtype=float)
+                    a, b = np.polyfit(x, y, 1)
+                    slopes[dist_name] = float(a)
+                    intercepts[dist_name] = float(b)
+                    xs_fit = np.linspace(x.min(), x.max(), 100)
+                    ys_fit = a * xs_fit + b
+                    plt.plot(ys_fit, xs_fit, linestyle='--', alpha=0.6)  # plot in dims (y) vs k (x) space -> swap axes
+                elif dims_list and k_list:
+                    plt.plot(dims_list, k_list, marker='o', label=dist_name)
+
             plt.xlabel("Latent Dimension")
             plt.ylabel("Max k for >= 99% Accuracy")
             plt.title(f"{name.replace('_', ' ').title()} on {dataset_name}")
@@ -524,6 +548,22 @@ def main(args):
             plt.savefig(plot_path, dpi=200, bbox_inches="tight")
             plt.close()
             print(f"Saved summary plot to {plot_path}")
+
+            # Save slopes/intercepts
+            try:
+                import json
+                meta_path = f"results/{dataset_name}_{name}_fit.json"
+                with open(meta_path, 'w') as f:
+                    json.dump({"slope": slopes, "intercept": intercepts}, f, indent=2)
+                print(f"Saved linear fit stats to {meta_path}")
+            except Exception as e:
+                print(f"Warning: could not save slope stats for {name}: {e}")
+
+            # Log to wandb (if enabled)
+            if logger.use:
+                flat = {f"{name}/slope/{k}": v for k, v in slopes.items()}
+                flat.update({f"{name}/intercept/{k}": v for k, v in intercepts.items()})
+                logger.log_metrics(flat)
 
 
 if __name__ == "__main__":
