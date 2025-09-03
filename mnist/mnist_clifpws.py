@@ -22,6 +22,8 @@ from utils.wandb_utils import (
     compute_class_means,
     evaluate_mean_vector_cosine,
     test_hrr_sentence,
+    test_bundle_capacity,
+    test_unbinding_of_bundled_pairs,
     plot_clifford_manifold_visualization, 
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
@@ -432,6 +434,34 @@ def run(args):
                             if hrr_deconv.get("hrr_fashion_plot"):
                                 images_to_log["HRR_Fashion_deconv"] = hrr_deconv["hrr_fashion_plot"]
 
+                            normalize_vectors = getattr(args, "vsa_normalize", False)
+                            bundle_cap_res = test_bundle_capacity(
+                                model,
+                                test_eval_loader,
+                                device,
+                                vis_dir,
+                                n_items=1000,
+                                k_range=list(range(5, 31, 5)),
+                                n_trials=20,
+                                normalize_vectors=normalize_vectors,
+                            )
+                            unbind_bundled_res = test_unbinding_of_bundled_pairs(
+                                model,
+                                test_eval_loader,
+                                device,
+                                vis_dir,
+                                unbind_method="pseudo",
+                                n_items=1000,
+                                k_range=list(range(5, 31, 5)),
+                                n_trials=20,
+                                normalize_vectors=normalize_vectors,
+                                unitary_keys=(dist=="clifford"),
+                            )
+                            if bundle_cap_res.get("bundle_capacity_plot"):
+                                images_to_log["Bundle_Capacity"] = bundle_cap_res["bundle_capacity_plot"]
+                            if unbind_bundled_res.get("unbind_bundled_plot"):
+                                images_to_log["Unbind_Bundled_Pairs"] = unbind_bundled_res["unbind_bundled_plot"]
+
                             # manifold-specific visualizations
                             if dist == "clifford" and mdim >= 2:
                                 cliff_viz = plot_clifford_manifold_visualization(
@@ -453,6 +483,12 @@ def run(args):
                                 )
                                 if gauss_viz:
                                     images_to_log["Gaussian_Manifold"] = gauss_viz
+
+                            # fourier recon after m binds
+                            if fourier_pseudo.get("recon_after_k_binds_plot_path"):
+                                images_to_log["Recon_After_K_Binds_Pseudo"] = fourier_pseudo["recon_after_k_binds_plot_path"]
+                            if fourier_deconv.get("recon_after_k_binds_plot_path"):
+                                images_to_log["Recon_After_K_Binds_Deconv"] = fourier_deconv["recon_after_k_binds_plot_path"]
 
                             logger.log_images(images_to_log)
 
@@ -572,7 +608,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--vsa_normalize",
         action="store_true",
-        default=False,
+        default=True,
     )
 
     args = parser.parse_args()

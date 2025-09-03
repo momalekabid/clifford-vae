@@ -14,7 +14,12 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.wandb_utils import WandbLogger, test_fourier_properties
+from utils.wandb_utils import (
+    WandbLogger,
+    test_fourier_properties,
+    test_bundle_capacity,
+    test_unbinding_of_bundled_pairs,
+)
 from mnist.mlp_vae import MLPVAE, vae_loss
 
 
@@ -308,18 +313,19 @@ def run(args):
                     agg_results[n_samples].append(acc)
 
                 # fourier property testing of latent vectors
-                fourier_results = {}
+                fourier_pseudo = {}
+                fourier_deconv = {}
 
                 # test loader for fourier tests
                 test_subset = torch.utils.data.Subset(
                     test_dataset, list(range(min(1000, len(test_dataset))))
                 )
                 test_subset_loader = DataLoader(test_subset, batch_size=64)
-                fourier_results = test_fourier_properties(
-                    model,
-                    test_subset_loader,
-                    device,
-                    f"visualizations/d_{d_manifold}/vmf",
+                fourier_pseudo = test_fourier_properties(
+                    model, test_subset_loader, device, f"visualizations/d_{d_manifold}/vmf", unbind_method="pseudo"
+                )
+                fourier_deconv = test_fourier_properties(
+                    model, test_subset_loader, device, f"visualizations/d_{d_manifold}/vmf", unbind_method="deconv"
                 )
 
                 # visualizations
@@ -360,56 +366,31 @@ def run(args):
                             "Latent PCA": pca_path,
                             "Interpolations": interp_path,
                         }
-                        if fourier_results:
-                            if (
-                                "fft_spectrum_plot_path" in fourier_results
-                                and fourier_results["fft_spectrum_plot_path"]
-                            ):
-                                images_to_log["Fourier_Analysis"] = fourier_results[
-                                    "fft_spectrum_plot_path"
-                                ]
-                            if (
-                                "fft_avg_spectrum_plot_path" in fourier_results
-                                and fourier_results["fft_avg_spectrum_plot_path"]
-                            ):
-                                images_to_log["Fourier_Avg_Spectrum"] = fourier_results[
-                                    "fft_avg_spectrum_plot_path"
-                                ]
-                            if (
-                                "similarity_after_k_binds_plot_path" in fourier_results
-                                and fourier_results[
+                        for tag, fr in {"pseudo": fourier_pseudo, "deconv": fourier_deconv}.items():
+                            if fr.get("similarity_after_k_binds_plot_path"):
+                                images_to_log[f"Similarity_After_K_Binds_{tag}"] = fr[
                                     "similarity_after_k_binds_plot_path"
                                 ]
-                            ):
-                                images_to_log[
-                                    "Similarity_After_K_Binds"
-                                ] = fourier_results[
-                                    "similarity_after_k_binds_plot_path"
+                            if fr.get("recon_after_k_binds_plot_path"):
+                                images_to_log[f"Recon_After_K_Binds_{tag}"] = fr[
+                                    "recon_after_k_binds_plot_path"
                                 ]
                         logger.log_images(images_to_log)
 
                 if logger.use:
-                    # wandb logging k-NN as metrics (for charts/visualization)
+                    # wandb logging k-NN as metrics
                     knn_metrics = {f"knn_acc_{k}": v for k, v in knn_accuracies.items()}
-                    fourier_metrics = {
-                        k: v
-                        for k, v in fourier_results.items()
-                        if isinstance(v, (int, float, bool))
-                    }
+                    fourier_metrics = {}
+                    fourier_metrics.update({
+                        f"pseudo/{k}": v for k, v in fourier_pseudo.items() if isinstance(v, (int, float, bool))
+                    })
+                    fourier_metrics.update({
+                        f"deconv/{k}": v for k, v in fourier_deconv.items() if isinstance(v, (int, float, bool))
+                    })
 
-                    logger.log_metrics(
-                        {
-                            **knn_metrics,
-                            **fourier_metrics,
-                            "final_val_loss": best_val_loss,
-                        }
-                    )
+                    logger.log_metrics({**knn_metrics, **fourier_metrics, "final_val_loss": best_val_loss})
 
-                    summary_metrics = {
-                        **knn_metrics,
-                        "final_val_loss": best_val_loss,
-                        **fourier_results,
-                    }
+                    summary_metrics = {**knn_metrics, "final_val_loss": best_val_loss, **fourier_metrics}
                     logger.log_summary(summary_metrics)
                     logger.finish_run()
 

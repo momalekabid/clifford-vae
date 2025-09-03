@@ -812,7 +812,7 @@ def plot_clifford_manifold_visualization(model, device, output_dir, n_samples=10
     """Simple Clifford manifold visualization using interpolation-style sampling."""
     # Check for both latent_dim and z_dim attributes
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
-    if getattr(model, "distribution", None) != "clifford" or latent_dim is None or latent_dim < 4:
+    if getattr(model, "distribution", None) != "clifford" or latent_dim is None or latent_dim < 2:
         return None
     
     os.makedirs(output_dir, exist_ok=True)
@@ -820,11 +820,8 @@ def plot_clifford_manifold_visualization(model, device, output_dir, n_samples=10
     
     model.eval()
     with torch.no_grad():
-        # Clifford uses half as many angles as real vector dim
-        angle_dim = max(2, latent_dim // 2)
-        angles = torch.rand(n_samples, angle_dim, device=device) * 2 * math.pi - math.pi
+        angles = torch.rand(n_samples, latent_dim, device=device) * 2 * math.pi - math.pi
         
-        # Convert to Clifford vector representation
         Z = _angles_to_clifford_vector(angles, normalize_ifft=True)
         
         x_recon = model.decoder(Z)
