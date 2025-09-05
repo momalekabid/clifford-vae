@@ -12,8 +12,8 @@ except Exception:
     wandb = None
 
 
-def _unit_magnitude_fraction(F: torch.Tensor, tol: float = 0.05) -> float:
-    mags = torch.abs(F)
+def _unit_magnitude_fraction(f: torch.Tensor, tol: float = 0.05) -> float:
+    mags = torch.abs(f)
     return float((torch.abs(mags - 1.0) < tol).float().mean().item())
 
 
@@ -55,26 +55,57 @@ def test_fourier_properties(
     try:
         model.eval()
         with torch.no_grad():
-            x, _ = next(iter(loader))
-            x = x.to(device)
-            out = model(x)
-            if isinstance(out, (tuple, list)):
-                if len(out) == 4 and isinstance(out[0], tuple):
-                    (z_mean, _), _, z, _ = out
-                elif len(out) == 4:
-                    _, q_z, _, mu = out
-                    z = q_z.rsample() if getattr(model, "distribution", None) == "clifford" else mu
+            all_z = []
+            all_labels = []
+            for x, y in loader:
+                x = x.to(device)
+                out = model(x)
+                if isinstance(out, (tuple, list)):
+                    if len(out) == 4 and isinstance(out[0], tuple):
+                        (z_mean, _), _, z, _ = out
+                    elif len(out) == 4:
+                        _, q_z, _, mu = out
+                        z = q_z.rsample() if getattr(model, "distribution", None) == "clifford" else mu
+                    else:
+                        z = out[-1]
                 else:
-                    z = out[-1]
-            else:
-                z = out
+                    z = out
+                all_z.append(z.detach())
+                all_labels.append(y)
+                if len(torch.cat(all_z, 0)) >= 100:
+                    break
+            
+            if not all_z:
+                return {"binding_k_self_similarity": 0.0, "similarity_after_k_binds_plot_path": None}
+                
+            all_z = torch.cat(all_z, 0)
+            all_labels = torch.cat(all_labels, 0)
+            
+            unique_labels = torch.unique(all_labels)[:3]
+            selected_z = []
+            selected_labels = []
+            
+            for label in unique_labels:
+                label_mask = all_labels == label
+                if label_mask.sum() > 0:
+                    indices = torch.where(label_mask)[0]
+                    random_idx = indices[torch.randint(0, len(indices), (1,))]
+                    selected_z.append(all_z[random_idx])
+                    selected_labels.append(label.item())
+            
+            if not selected_z:
+                selected_z = [all_z[0]]
+                selected_labels = [all_labels[0].item()]
+                
     except Exception:
         return {"binding_k_self_similarity": 0.0, "similarity_after_k_binds_plot_path": None}
 
     if getattr(model, "distribution", None) == "gaussian":
-        z = torch.nn.functional.normalize(z, p=2, dim=-1)
+        selected_z = [torch.nn.functional.normalize(z.unsqueeze(0), p=2, dim=-1) for z in selected_z]
+    else:
+        selected_z = [z.unsqueeze(0) for z in selected_z]
 
-    a = z[:1]
+    a = selected_z[0]
     ab = a.clone()
     for _ in range(k_self_bind):
         ab = _bind(ab, a)
@@ -83,10 +114,10 @@ def test_fourier_properties(
     cos_sim = torch.nn.functional.cosine_similarity(ab, a, dim=-1).mean().item()
 
     sims = []
-    recon_paths = None
     recon_every = 10
-    recon_vectors = []
+    all_recon_vectors = []
     recon_steps = []
+    
     for m in range(1, k_self_bind + 1):
         cur = a.clone()
         for _ in range(m):
@@ -95,9 +126,20 @@ def test_fourier_properties(
             cur = _unbind(cur, a, method=unbind_method)
         sim_m = torch.nn.functional.cosine_similarity(cur, a, dim=-1).mean().item()
         sims.append(sim_m)
-        if (m % recon_every == 0) or (m == k_self_bind):
-            recon_vectors.append(cur.squeeze(0))
-            recon_steps.append(m)
+    
+    for i, start_vec in enumerate(selected_z):
+        recon_vectors_for_this_start = [start_vec.squeeze(0)]
+        for m in range(1, k_self_bind + 1):
+            cur = start_vec.clone()
+            for _ in range(m):
+                cur = _bind(cur, start_vec)
+            for _ in range(m):
+                cur = _unbind(cur, start_vec, method=unbind_method)
+            if (m % recon_every == 0) or (m == k_self_bind):
+                recon_vectors_for_this_start.append(cur.squeeze(0))
+                if i == 0:
+                    recon_steps.append(m)
+        all_recon_vectors.append(recon_vectors_for_this_start)
 
     path_bind_curve = os.path.join(output_dir, f"similarity_after_k_binds_{unbind_method}.png")
     os.makedirs(output_dir, exist_ok=True)
@@ -114,25 +156,54 @@ def test_fourier_properties(
     plt.close()
 
     try:
-        if recon_vectors:
-            xs = [a.squeeze(0)] + recon_vectors
-            with torch.no_grad():
-                imgs = model.decoder(torch.stack(xs, 0))
-                imgs = (imgs * 0.5 + 0.5).clamp(0, 1).cpu()
-            C, h, w = imgs.shape[1], imgs.shape[-2], imgs.shape[-1]
-            canvas = torch.zeros(C, h, (len(xs)) * w)
-            for j in range(len(xs)):
-                canvas[:, :, j * w : (j + 1) * w] = imgs[j]
+        if all_recon_vectors:
             recon_paths = os.path.join(output_dir, f"recon_after_k_binds_{unbind_method}.png")
-            plt.figure(figsize=(min(16, 2 + len(xs)*2), 2.5))
+            
+            all_vectors = []
+            row_labels = []
+            
+            for i, recon_vectors_for_start in enumerate(all_recon_vectors):
+                for vec in recon_vectors_for_start:
+                    all_vectors.append(vec)
+                class_label = selected_labels[i] if i < len(selected_labels) else i
+                row_labels.append(f"Class {class_label}")
+            
+            with torch.no_grad():
+                imgs = model.decoder(torch.stack(all_vectors, 0))
+                if hasattr(model, 'decoder') and hasattr(model.decoder, 'output_activation'):
+                    if model.decoder.output_activation == 'sigmoid':
+                        imgs = torch.sigmoid(imgs)
+                    else:
+                        imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
+                else:
+                    imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
+                imgs = imgs.cpu()
+            
+            C, h, w = imgs.shape[1], imgs.shape[-2], imgs.shape[-1]
+            n_rows = len(all_recon_vectors)
+            n_cols = len(all_recon_vectors[0]) if all_recon_vectors else 1
+            
+            canvas = torch.zeros(C, n_rows * h, n_cols * w)
+            
+            img_idx = 0
+            for row in range(n_rows):
+                for col in range(n_cols):
+                    if img_idx < len(imgs):
+                        canvas[:, row * h:(row + 1) * h, col * w:(col + 1) * w] = imgs[img_idx]
+                        img_idx += 1
+            
+            plt.figure(figsize=(max(12, n_cols * 1.5), max(6, n_rows * 2)))
             if C == 1:
                 plt.imshow(canvas.squeeze(0), cmap="gray")
             else:
                 plt.imshow(canvas.permute(1, 2, 0))
-            ticks = [f"m={0}"] + [f"m={m}" for m in recon_steps]
+            
+            col_labels = [f"m=0"] + [f"m={m}" for m in recon_steps]
             plt.xticks([])
             plt.yticks([])
-            plt.title("Decoder reconstructions after bind+unbind m times (left=m=0)")
+            
+            class_info = ", ".join([f"Class {label}" for label in selected_labels[:len(all_recon_vectors)]])
+            plt.title(f"Reconstructions after bind+unbind m times\nRows: {class_info}")
             plt.tight_layout()
             plt.savefig(recon_paths, dpi=200, bbox_inches="tight")
             plt.close()
@@ -162,22 +233,31 @@ class WandbLogger:
             wandb.watch(model, log="gradients", log_freq=100)
 
     def log_metrics(self, d):
-        if self.use:
-            self.run.log(d)
+        if self.use and self.run is not None:
+            try:
+                self.run.log(d)
+            except Exception:
+                pass
 
     def log_summary(self, d):
-        if self.use:
-            self.run.summary.update(d)
+        if self.use and self.run is not None:
+            try:
+                self.run.summary.update(d)
+            except Exception:
+                pass
 
     def log_images(self, images):
-        if self.use:
-            to_log = {}
-            for k, v in images.items():
-                if isinstance(v, str) and os.path.exists(v):
-                    to_log[k] = wandb.Image(v)
-                else:
-                    to_log[k] = v
-            self.run.log(to_log)
+        if self.use and self.run is not None:
+            try:
+                to_log = {}
+                for k, v in images.items():
+                    if isinstance(v, str) and os.path.exists(v):
+                        to_log[k] = wandb.Image(v)
+                    else:
+                        to_log[k] = v
+                self.run.log(to_log)
+            except Exception:
+                pass
 
     def finish_run(self):
         if self.use and self.run is not None:
@@ -257,8 +337,8 @@ def compute_class_means(model, loader, device, max_per_class: int = 1000):
     for label, total in sums.items():
         c = max(1, min(counts[label], 10))
         vec = total / c
-        # if dist_type == "powerspherical":
-        #     vec = torch.nn.functional.normalize(vec, p=2, dim=-1)
+        if dist_type == "powerspherical":
+            vec = torch.nn.functional.normalize(vec, p=2, dim=-1) # should already be normalized, just in case (unit-sphere)
         means[label] = vec
     return means
 
@@ -542,11 +622,12 @@ def test_hrr_sentence(
         return {"hrr_fashion_object_acc": 0.0, "hrr_fashion_plot": None}
 
     class_vecs = []
+    valid_labels = []
     for k in range(10):
-        if len(by_label[k]) == 0:
-            continue
-        m = torch.stack(by_label[k], 0).mean(0)
-        class_vecs.append(m)
+        if len(by_label[k]) > 0:
+            m = torch.stack(by_label[k], 0).mean(0)
+            class_vecs.append(m)
+            valid_labels.append(k)
     if len(class_vecs) < 2:
         return {"hrr_fashion_object_acc": 0.0, "hrr_fashion_plot": None}
     class_vecs = torch.stack(class_vecs, 0)
@@ -562,71 +643,97 @@ def test_hrr_sentence(
         role_item = _fft_make_unitary(role_item)
         role_container = _fft_make_unitary(role_container)
 
-    class_names = _resolve_class_names(dataset_name or "", class_vecs.shape[0])
-    candidates_idx = [i for i in range(class_vecs.shape[0])]
-    # choose two distinct classes deterministically for visual stability
-    item_idx = (7 if 7 < class_vecs.shape[0] else candidates_idx[0])
-    container_idx = (8 if 8 < class_vecs.shape[0] else candidates_idx[-1])
-    if item_idx == container_idx and len(candidates_idx) > 1:
-        container_idx = (item_idx + 1) % len(candidates_idx)
-    item_vec = class_vecs[item_idx].unsqueeze(0)
-    container_vec = class_vecs[container_idx].unsqueeze(0)
-    if project_fillers:
-        item_vec = _fft_make_unitary(item_vec)
-        container_vec = _fft_make_unitary(container_vec)
+    class_names = _resolve_class_names(dataset_name or "", 10)
+    
+    all_correct = 0
+    total_tests = 0
+    all_plots = []
+    
+    for test_item_idx in range(len(class_vecs)):
+        test_container_idx = (test_item_idx + 1) % len(class_vecs)
+        
+        item_vec = class_vecs[test_item_idx].unsqueeze(0)
+        container_vec = class_vecs[test_container_idx].unsqueeze(0)
+        if project_fillers:
+            item_vec = _fft_make_unitary(item_vec)
+            container_vec = _fft_make_unitary(container_vec)
 
-    a = role_item.unsqueeze(0)
-    c = role_container.unsqueeze(0)
-    if normalize_vectors:
-        a = torch.nn.functional.normalize(a, p=2, dim=-1)
-        c = torch.nn.functional.normalize(c, p=2, dim=-1)
-        item_vec = torch.nn.functional.normalize(item_vec, p=2, dim=-1)
-        container_vec = torch.nn.functional.normalize(container_vec, p=2, dim=-1)
+        a = role_item.unsqueeze(0)
+        c = role_container.unsqueeze(0)
+        if normalize_vectors:
+            a = torch.nn.functional.normalize(a, p=2, dim=-1)
+            c = torch.nn.functional.normalize(c, p=2, dim=-1)
+            item_vec = torch.nn.functional.normalize(item_vec, p=2, dim=-1)
+            container_vec = torch.nn.functional.normalize(container_vec, p=2, dim=-1)
 
-    # memory and decod
-    memory = _bind(a, item_vec) + _bind(c, container_vec)
-    recovered_item = _unbind(memory, a, method=unbind_method).squeeze(0)
-    if normalize_vectors:
-        recovered_item = torch.nn.functional.normalize(recovered_item, p=2, dim=-1)
+        memory = _bind(a, item_vec) + _bind(c, container_vec)
+        recovered_item = _unbind(memory, a, method=unbind_method).squeeze(0)
+        if normalize_vectors:
+            recovered_item = torch.nn.functional.normalize(recovered_item, p=2, dim=-1)
 
-    sims = torch.nn.functional.cosine_similarity(
-        recovered_item.unsqueeze(0), class_vecs, dim=-1
-    )
-    best = int(torch.argmax(sims).item())
-    is_correct = 1.0 if best == item_idx else 0.0
+        sims = torch.nn.functional.cosine_similarity(
+            recovered_item.unsqueeze(0), class_vecs, dim=-1
+        )
+        best = int(torch.argmax(sims).item())
+        is_correct = 1.0 if best == test_item_idx else 0.0
+        all_correct += is_correct
+        total_tests += 1
+        
+        if test_item_idx < 3:
+            all_plots.append({
+                'sims': sims.detach().cpu().numpy(),
+                'expected_idx': test_item_idx,
+                'predicted_idx': best,
+                'expected_label': class_names[valid_labels[test_item_idx]],
+                'predicted_label': class_names[valid_labels[best]],
+                'correct': is_correct
+            })
 
-    # plot
+    avg_accuracy = all_correct / max(1, total_tests)
+
     path = None
     try:
         os.makedirs(output_dir, exist_ok=True)
         tag = (dataset_name or "dataset").lower()
-        path = os.path.join(output_dir, f"hrr_{tag}_{unbind_method}.png")
-        labels = class_names
-        plt.figure(figsize=(8, 3))
-        heights = sims.detach().cpu().numpy()
-        colors = ["C0"] * len(labels)
-        colors[item_idx] = "green"
-        bars = plt.bar(np.arange(len(labels)), heights, alpha=0.8, color=colors)
-        try:
-            bars[best].set_edgecolor("red")
-            bars[best].set_linewidth(2.0)
-        except Exception:
-            pass
-        plt.xticks(np.arange(len(labels)), labels, rotation=30, ha="right")
-        plt.ylabel("cosine sim")
-        title_expected = labels[item_idx]
-        title_pred = labels[best]
-        plt.title(f"Decode item from HRR (expected={title_expected}, predicted={title_pred})")
-        plt.tight_layout()
-        plt.savefig(path, dpi=200, bbox_inches="tight")
-        plt.close()
+        path = os.path.join(output_dir, f"hrr_{tag}_all_classes_{unbind_method}.png")
+        
+        n_plots = len(all_plots)
+        if n_plots > 0:
+            fig, axes = plt.subplots(1, n_plots, figsize=(6 * n_plots, 4))
+            if n_plots == 1:
+                axes = [axes]
+                
+            for i, plot_info in enumerate(all_plots):
+                ax = axes[i]
+                heights = plot_info['sims']
+                colors = ["C0"] * len(heights)
+                colors[plot_info['expected_idx']] = "green"
+                
+                bars = ax.bar(np.arange(len(valid_labels)), heights, alpha=0.8, color=colors)
+                try:
+                    bars[plot_info['predicted_idx']].set_edgecolor("red")
+                    bars[plot_info['predicted_idx']].set_linewidth(2.0)
+                except Exception:
+                    pass
+                    
+                labels_subset = [class_names[valid_labels[j]] for j in range(len(valid_labels))]
+                ax.set_xticks(np.arange(len(labels_subset)))
+                ax.set_xticklabels(labels_subset, rotation=30, ha="right")
+                ax.set_ylabel("cosine sim")
+                
+                status = "✓" if plot_info['correct'] else "✗"
+                ax.set_title(f"{status} Expected: {plot_info['expected_label']}\nPredicted: {plot_info['predicted_label']}")
+                
+            plt.suptitle(f"HRR Decode Test - All Classes (Avg Acc: {avg_accuracy:.2f})")
+            plt.tight_layout()
+            plt.savefig(path, dpi=200, bbox_inches="tight")
+            plt.close()
     except Exception:
         path = None
 
-    return {"hrr_fashion_object_acc": float(is_correct), "hrr_fashion_plot": path}
+    return {"hrr_fashion_object_acc": float(avg_accuracy), "hrr_fashion_plot": path}
 
 
-# Backward-compat wrapper
 @torch.no_grad()
 def test_hrr_fashionmnist_sentence(*args, **kwargs):
     kwargs = dict(kwargs)
@@ -677,7 +784,7 @@ def test_bundle_capacity(
             indices = torch.randperm(n_items, device=device)[:k]
             chosen_vectors = item_memory[indices]
             
-            bundle = torch.sum(chosen_vectors, dim=0)
+            bundle = torch.sum(chosen_vectors, dim=0) / k
             sims = torch.nn.functional.cosine_similarity(bundle.unsqueeze(0), item_memory)
             
             top_k_indices = torch.topk(sims, k).indices
@@ -766,7 +873,7 @@ def test_unbinding_of_bundled_pairs(
                 roles = _fft_make_unitary(roles)
 
             bound_pairs = _bind(roles, fillers)
-            bundle = torch.sum(bound_pairs, dim=0)
+            bundle = torch.sum(bound_pairs, dim=0) / k
 
             correctly_recovered = 0
             
@@ -809,8 +916,7 @@ def test_unbinding_of_bundled_pairs(
 
 
 def plot_clifford_manifold_visualization(model, device, output_dir, n_samples=1000, dims=(0, 1)):
-    """Simple Clifford manifold visualization using interpolation-style sampling."""
-    # Check for both latent_dim and z_dim attributes
+    """Clifford manifold visualization. Samples angles from [-pi, pi] and converts to Clifford vectors."""
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
     if getattr(model, "distribution", None) != "clifford" or latent_dim is None or latent_dim < 2:
         return None
@@ -822,10 +928,28 @@ def plot_clifford_manifold_visualization(model, device, output_dir, n_samples=10
     with torch.no_grad():
         angles = torch.rand(n_samples, latent_dim, device=device) * 2 * math.pi - math.pi
         
-        Z = _angles_to_clifford_vector(angles, normalize_ifft=True)
+        # convert angles to Clifford vectors using the same method as interpolation
+        n = 2 * latent_dim
+        theta_s = torch.zeros(n_samples, n, device=device, dtype=angles.dtype)
+        if latent_dim > 1:
+            theta_s[:, 1:latent_dim] = angles[:, 1:]
+            theta_s[:, -latent_dim + 1:] = -torch.flip(angles[:, 1:], dims=(-1,))
+        
+        samples_complex = torch.exp(1j * theta_s)
+        Z = torch.fft.ifft(samples_complex, dim=-1, norm="ortho").real.to(torch.float32)
         
         x_recon = model.decoder(Z)
-        x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
+        
+        # sigmoid for our MNIST model
+        if hasattr(model, 'decoder') and hasattr(model.decoder, 'output_activation'):
+            if model.decoder.output_activation == 'sigmoid':
+                x_recon = torch.sigmoid(x_recon)
+            elif model.decoder.output_activation == 'tanh':
+                x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
+            else:
+                x_recon = x_recon.clamp(0, 1)
+        else:
+            x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
     
     n_grid = int(math.sqrt(n_samples))
     if n_grid * n_grid > n_samples:

@@ -519,6 +519,7 @@ def main(args):
             (all_unbind_bundled_results, "unbind_bundled_pairs"),
         ]:
             plt.figure(figsize=(8, 6))
+            any_line = False
             slopes = {}
             intercepts = {}
             for dist_name, data in results.items():
@@ -526,6 +527,7 @@ def main(args):
                 k_list = data["max_k_at_99_acc"]
                 if dims_list and k_list and len(dims_list) == len(k_list) and len(k_list) >= 2:
                     plt.plot(dims_list, k_list, marker='o', label=dist_name)
+                    any_line = True
                     # fit y = dims = a * k + b
                     # swap axes to match paper
                     x = np.array(k_list, dtype=float)
@@ -538,18 +540,19 @@ def main(args):
                     plt.plot(ys_fit, xs_fit, linestyle='--', alpha=0.6)  # plot in dims (y) vs k (x) space -> swap axes
                 elif dims_list and k_list:
                     plt.plot(dims_list, k_list, marker='o', label=dist_name)
+                    any_line = True
 
             plt.xlabel("Latent Dimension")
             plt.ylabel("Max k for >= 99% Accuracy")
             plt.title(f"{name.replace('_', ' ').title()} on {dataset_name}")
-            plt.legend()
+            if any_line:
+                plt.legend()
             plt.grid(True, alpha=0.3)
             plot_path = f"results/{dataset_name}_{name}_comparison.png"
             plt.savefig(plot_path, dpi=200, bbox_inches="tight")
             plt.close()
             print(f"Saved summary plot to {plot_path}")
 
-            # Save slopes/intercepts
             try:
                 import json
                 meta_path = f"results/{dataset_name}_{name}_fit.json"
@@ -559,8 +562,7 @@ def main(args):
             except Exception as e:
                 print(f"Warning: could not save slope stats for {name}: {e}")
 
-            # Log to wandb (if enabled)
-            if logger.use:
+            if logger.use and logger.run is not None:
                 flat = {f"{name}/slope/{k}": v for k, v in slopes.items()}
                 flat.update({f"{name}/intercept/{k}": v for k, v in intercepts.items()})
                 logger.log_metrics(flat)
