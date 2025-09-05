@@ -570,9 +570,9 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--epochs", type=int, default=1000)
+    p.add_argument("--epochs", type=int, default=500)
     p.add_argument("--warmup_epochs", type=int, default=100)
-    p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument(
         "--recon_loss", type=str, default="mse", choices=["mse", "l1_freq"]

@@ -632,16 +632,21 @@ def test_hrr_sentence(
         return {"hrr_fashion_object_acc": 0.0, "hrr_fashion_plot": None}
     class_vecs = torch.stack(class_vecs, 0)
 
-    dist_type = getattr(model, "distribution", "normal")
-    if dist_type == "powerspherical" or normalize_vectors:
+    if normalize_vectors:
         class_vecs = torch.nn.functional.normalize(class_vecs, p=2, dim=-1)
 
-    rng = np.random.default_rng(0)
-    role_item = class_vecs[rng.integers(0, class_vecs.shape[0])]
-    role_container = class_vecs[rng.integers(0, class_vecs.shape[0])]
     if unitary_keys:
+        D = class_vecs.shape[-1]
+        role_item = torch.randn(D, device=device, dtype=class_vecs.dtype)
+        role_container = torch.randn(D, device=device, dtype=class_vecs.dtype)
+        role_item = torch.nn.functional.normalize(role_item, p=2, dim=-1)
+        role_container = torch.nn.functional.normalize(role_container, p=2, dim=-1)
         role_item = _fft_make_unitary(role_item)
         role_container = _fft_make_unitary(role_container)
+    else:
+        rng = np.random.default_rng(0)
+        role_item = class_vecs[rng.integers(0, class_vecs.shape[0])]
+        role_container = class_vecs[rng.integers(0, class_vecs.shape[0])]
 
     class_names = _resolve_class_names(dataset_name or "", 10)
     
@@ -770,7 +775,6 @@ def test_bundle_capacity(
     
     item_memory = torch.cat(latents, 0)[:n_items]
     
-    dist_type = getattr(model, "distribution", "normal")
     if normalize_vectors:
         item_memory = torch.nn.functional.normalize(item_memory, p=2, dim=-1)
 
@@ -784,8 +788,13 @@ def test_bundle_capacity(
             indices = torch.randperm(n_items, device=device)[:k]
             chosen_vectors = item_memory[indices]
             
-            bundle = torch.sum(chosen_vectors, dim=0) / k
-            sims = torch.nn.functional.cosine_similarity(bundle.unsqueeze(0), item_memory)
+            bundle = torch.sum(chosen_vectors, dim=0) / math.sqrt(k)
+            
+            if normalize_vectors:
+                bundle_norm = torch.nn.functional.normalize(bundle, p=2, dim=-1)
+                sims = torch.matmul(item_memory, bundle_norm)
+            else:
+                sims = torch.nn.functional.cosine_similarity(bundle.unsqueeze(0), item_memory)
             
             top_k_indices = torch.topk(sims, k).indices
             
@@ -851,8 +860,8 @@ def test_unbinding_of_bundled_pairs(
         return {"unbind_bundled_plot": None, "unbind_bundled_accuracies": {}}
 
     item_memory = torch.cat(latents, 0)[:n_items]
-    dist_type = getattr(model, "distribution", "normal")
-    if dist_type == "powerspherical" or normalize_vectors:
+    
+    if normalize_vectors:
         item_memory = torch.nn.functional.normalize(item_memory, p=2, dim=-1)
 
     accuracies = {}
@@ -863,17 +872,19 @@ def test_unbinding_of_bundled_pairs(
         trial_accuracies = []
         for _ in range(n_trials):
             indices = torch.randperm(n_items, device=device)[:k*2]
-            roles = item_memory[indices[:k]]
-            fillers = item_memory[indices[k:]]
-
+            
             if unitary_keys:
-                D = roles.shape[-1]
-                roles = torch.randn(k, D, device=device, dtype=item_memory.dtype) / math.sqrt(D)
+                D = item_memory.shape[-1]
+                roles = torch.randn(k, D, device=device, dtype=item_memory.dtype)
                 roles = torch.nn.functional.normalize(roles, p=2, dim=-1)
                 roles = _fft_make_unitary(roles)
+            else:
+                roles = item_memory[indices[:k]]
+            
+            fillers = item_memory[indices[k:2*k]]
 
             bound_pairs = _bind(roles, fillers)
-            bundle = torch.sum(bound_pairs, dim=0) / k
+            bundle = torch.sum(bound_pairs, dim=0) / math.sqrt(k)
 
             correctly_recovered = 0
             
@@ -1044,7 +1055,6 @@ def plot_powerspherical_manifold_visualization(model, device, output_dir, n_samp
 
 def plot_gaussian_manifold_visualization(model, device, output_dir, n_samples=1000, dims=(0, 1)):
     """Visualize Gaussian manifold latent space."""
-    # Check for both latent_dim and z_dim attributes
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
     if getattr(model, "distribution", None) != "gaussian" or latent_dim is None or latent_dim < 2:
         return None
