@@ -22,15 +22,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cnn.models import VAE
 from utils.wandb_utils import (
     WandbLogger,
-    test_fourier_properties,
     compute_class_means,
     evaluate_mean_vector_cosine,
-    test_hrr_sentence,
-    test_bundle_capacity,
-    test_unbinding_of_bundled_pairs,
     plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
+)
+from utils.vsa import (
+    test_self_binding,
+    test_hrr_sentence,
+    test_bundle_capacity,
+    test_unbinding_of_bundled_pairs,
 )
 
 
@@ -306,8 +308,6 @@ def main(args):
                         torch.load(f"{output_dir}/best_model.pt", map_location=DEVICE)
                     )
 
-                    use_unitary_keys = True
-                    normalize_vectors = getattr(args, "vsa_normalize", True)
 
                     bundle_cap_res = test_bundle_capacity(
                         model,
@@ -317,7 +317,6 @@ def main(args):
                         n_items=1000,
                         k_range=list(range(5, 51, 5)),
                         n_trials=20,
-                        normalize_vectors=normalize_vectors,
                     )
                     
                     unbind_bundled_res_pseudo = test_unbinding_of_bundled_pairs(
@@ -329,8 +328,6 @@ def main(args):
                         n_items=1000,
                         k_range=list(range(5, 31, 5)),
                         n_trials=20,
-                        normalize_vectors=normalize_vectors,
-                        unitary_keys=use_unitary_keys,
                     )
                     
                     bundle_accs = bundle_cap_res.get("bundle_capacity_accuracies", {})
@@ -360,10 +357,10 @@ def main(args):
                             all_unbind_bundled_results[dist_name]["max_k_at_99_acc"].append(k_at_99)
 
 
-                    fourier_pseudo = test_fourier_properties(
+                    fourier_pseudo = test_self_binding(
                         model, test_loader, DEVICE, output_dir, unbind_method="pseudo"
                     )
-                    fourier_deconv = test_fourier_properties(
+                    fourier_deconv = test_self_binding(
                         model, test_loader, DEVICE, output_dir, unbind_method="deconv"
                     )
 
@@ -402,9 +399,6 @@ def main(args):
                     mean_metric_key = "mean_vector_cosine_acc"
                     print(f"{mean_metric_key}: ", mean_vector_acc)
 
-                    # vsa_bind_sim_pseudo = 0.0
-                    # vsa_bind_sim_deconv = 0.0
-
                     fourier_metrics = {}
                     fourier_metrics.update({
                         f"pseudo/{k}": v
@@ -422,8 +416,6 @@ def main(args):
                             **knn_metrics,
                             **fourier_metrics,
                             mean_metric_key: float(mean_vector_acc),
-                            # "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
-                            # "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                             "final_best_loss": best,
                         }
                     )
@@ -444,7 +436,7 @@ def main(args):
                         images["similarity_after_k_binds_pseudo"] = sp
                     if sd:
                         images["similarity_after_k_binds_deconv"] = sd
-                    # reconstructions after m binds (every 10) for pseudo/deconv
+                    # reconstructions after m binds (every 10), try both inverse methods
                     rp = fourier_pseudo.get("recon_after_k_binds_plot_path")
                     rd = fourier_deconv.get("recon_after_k_binds_plot_path")
                     if rp:
@@ -476,38 +468,25 @@ def main(args):
 
                     hrr_fashion_pseudo = test_hrr_sentence(
                         model, test_loader, DEVICE, output_dir,
-                        unbind_method="pseudo", unitary_keys=True,
-                        normalize_vectors=normalize_vectors,
+                        unbind_method="pseudo",
                         dataset_name=dataset_name,
                     )
                     hrr_fashion_deconv = test_hrr_sentence(
                         model, test_loader, DEVICE, output_dir,
-                        unbind_method="deconv", unitary_keys=True,
-                        normalize_vectors=normalize_vectors,
+                        unbind_method="deconv",
                         dataset_name=dataset_name,
                     )
-                    # hrr_fashion_pseudo_proj = test_hrr_sentence(
-                    #     model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True, dataset_name=dataset_name
-                    # )
-                    # hrr_fashion_deconv_proj = test_hrr_sentence(
-                    #     model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True, dataset_name=dataset_name
-                    # )
 
                     if hrr_fashion_pseudo.get("hrr_fashion_plot"):
                         images["hrr_fashion_pseudo"] = hrr_fashion_pseudo["hrr_fashion_plot"]
                     if hrr_fashion_deconv.get("hrr_fashion_plot"):
                         images["hrr_fashion_deconv"] = hrr_fashion_deconv["hrr_fashion_plot"]
-                    # if hrr_fashion_pseudo_proj.get("hrr_fashion_plot"):
-                    #     images["hrr_fashion_pseudo_proj"] = hrr_fashion_pseudo_proj["hrr_fashion_plot"]
-                    # if hrr_fashion_deconv_proj.get("hrr_fashion_plot"):
-                    #     images["hrr_fashion_deconv_proj"] = hrr_fashion_deconv_proj["hrr_fashion_plot"]
+
                     summary = {
                         "final_best_loss": best,
                         **fourier_metrics,
                         **knn_metrics,
                         mean_metric_key: float(mean_vector_acc),
-                        # "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
-                        # "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)
@@ -520,25 +499,10 @@ def main(args):
         ]:
             plt.figure(figsize=(8, 6))
             any_line = False
-            slopes = {}
-            intercepts = {}
             for dist_name, data in results.items():
                 dims_list = data["dims"]
                 k_list = data["max_k_at_99_acc"]
-                if dims_list and k_list and len(dims_list) == len(k_list) and len(k_list) >= 2:
-                    plt.plot(dims_list, k_list, marker='o', label=dist_name)
-                    any_line = True
-                    # fit y = dims = a * k + b
-                    # swap axes to match paper
-                    x = np.array(k_list, dtype=float)
-                    y = np.array(dims_list, dtype=float)
-                    a, b = np.polyfit(x, y, 1)
-                    slopes[dist_name] = float(a)
-                    intercepts[dist_name] = float(b)
-                    xs_fit = np.linspace(x.min(), x.max(), 100)
-                    ys_fit = a * xs_fit + b
-                    plt.plot(ys_fit, xs_fit, linestyle='--', alpha=0.6)  # plot in dims (y) vs k (x) space -> swap axes
-                elif dims_list and k_list:
+                if dims_list and k_list:
                     plt.plot(dims_list, k_list, marker='o', label=dist_name)
                     any_line = True
 
@@ -552,20 +516,6 @@ def main(args):
             plt.savefig(plot_path, dpi=200, bbox_inches="tight")
             plt.close()
             print(f"Saved summary plot to {plot_path}")
-
-            try:
-                import json
-                meta_path = f"results/{dataset_name}_{name}_fit.json"
-                with open(meta_path, 'w') as f:
-                    json.dump({"slope": slopes, "intercept": intercepts}, f, indent=2)
-                print(f"Saved linear fit stats to {meta_path}")
-            except Exception as e:
-                print(f"Warning: could not save slope stats for {name}: {e}")
-
-            if logger.use and logger.run is not None:
-                flat = {f"{name}/slope/{k}": v for k, v in slopes.items()}
-                flat.update({f"{name}/intercept/{k}": v for k, v in intercepts.items()})
-                logger.log_metrics(flat)
 
 
 if __name__ == "__main__":
@@ -598,12 +548,6 @@ if __name__ == "__main__":
         type=int,
         default=100,
         help="Cycle length for cyclical KL beta after warmup (0=disabled)",
-    )
-    p.add_argument(
-        "--vsa_normalize",
-        action="store_true",
-        default=True,
-        help="Normalize vectors for vsa tests)",
     )
     args = p.parse_args()
     main(args)

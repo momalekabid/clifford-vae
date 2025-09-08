@@ -18,15 +18,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.wandb_utils import (
     WandbLogger,
-    test_fourier_properties,
     compute_class_means,
     evaluate_mean_vector_cosine,
-    test_hrr_sentence,
-    test_bundle_capacity,
-    test_unbinding_of_bundled_pairs,
     plot_clifford_manifold_visualization, 
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
+)
+from utils.vsa import (
+    test_self_binding,
+    test_hrr_sentence,
+    test_bundle_capacity,
+    test_unbinding_of_bundled_pairs,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss
 
@@ -356,14 +358,14 @@ def run(args):
                         test_dataset, list(range(min(1000, len(test_dataset))))
                     )
                     test_subset_loader = DataLoader(test_subset, batch_size=64)
-                    fourier_pseudo = test_fourier_properties(
+                    fourier_pseudo = test_self_binding(
                         model,
                         test_subset_loader,
                         device,
                         f"visualizations/d_{mdim}/{dist}",
                         unbind_method="pseudo",
                     )
-                    fourier_deconv = test_fourier_properties(
+                    fourier_deconv = test_self_binding(
                         model,
                         test_subset_loader,
                         device,
@@ -418,15 +420,11 @@ def run(args):
                             hrr_pseudo = test_hrr_sentence(
                                 model, test_eval_loader, device, vis_dir,
                                 unbind_method="pseudo",
-                                unitary_keys=(dist=="clifford"),
-                                normalize_vectors=getattr(args, "vsa_normalize", False),
                                 dataset_name="mnist",
                             )
                             hrr_deconv = test_hrr_sentence(
                                 model, test_eval_loader, device, vis_dir,
                                 unbind_method="deconv",
-                                unitary_keys=(dist=="clifford"),
-                                normalize_vectors=getattr(args, "vsa_normalize", False),
                                 dataset_name="mnist",
                             )
                             if hrr_pseudo.get("hrr_fashion_plot"):
@@ -434,7 +432,6 @@ def run(args):
                             if hrr_deconv.get("hrr_fashion_plot"):
                                 images_to_log["HRR_Fashion_deconv"] = hrr_deconv["hrr_fashion_plot"]
 
-                            normalize_vectors = getattr(args, "vsa_normalize", False)
                             bundle_cap_res = test_bundle_capacity(
                                 model,
                                 test_eval_loader,
@@ -443,7 +440,6 @@ def run(args):
                                 n_items=1000,
                                 k_range=list(range(5, 31, 5)),
                                 n_trials=20,
-                                normalize_vectors=normalize_vectors,
                             )
                             unbind_bundled_res = test_unbinding_of_bundled_pairs(
                                 model,
@@ -454,8 +450,6 @@ def run(args):
                                 n_items=1000,
                                 k_range=list(range(5, 31, 5)),
                                 n_trials=20,
-                                normalize_vectors=normalize_vectors,
-                                unitary_keys=(dist=="clifford"),
                             )
                             if bundle_cap_res.get("bundle_capacity_plot"):
                                 images_to_log["Bundle_Capacity"] = bundle_cap_res["bundle_capacity_plot"]
