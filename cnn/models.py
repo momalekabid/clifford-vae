@@ -43,10 +43,10 @@ class Encoder(nn.Module):
         elif self.distribution == "powerspherical":
             mu = F.normalize(mu, p=2, dim=-1)
             kappa = F.softplus(self.fc_concentration(x)) + 1
-            return mu, torch.clamp(kappa, max=100.0)
+            return mu, kappa
         elif self.distribution == "clifford":
             kappa = F.softplus(self.fc_concentration(x)) + 1
-            return mu, torch.clamp(kappa, max=100.0)
+            return mu, kappa
 
 
 class Decoder(nn.Module):

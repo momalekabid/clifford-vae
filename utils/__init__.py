@@ -9,14 +9,13 @@ import torch
 
 from .wandb_utils import (
     WandbLogger,
-    test_fourier_properties,
+    test_self_binding,
     compute_class_means,
     evaluate_mean_vector_cosine,
     vsa_bind,
     vsa_unbind,
     vsa_invert,
     test_vsa_operations,
-    test_hrr_fashionmnist_sentence,
 )
 
 
@@ -27,7 +26,11 @@ DEFAULT_RESULTS_DIR: str = "results"
 def get_default_device(prefer_mps: bool = True) -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
-    if prefer_mps and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+    if (
+        prefer_mps
+        and getattr(torch.backends, "mps", None)
+        and torch.backends.mps.is_available()
+    ):
         return torch.device("mps")
     return torch.device("cpu")
 
@@ -55,14 +58,13 @@ def set_global_seeds(seed: int = 42, deterministic_cudnn: bool = True) -> None:
 __all__ = [
     # exports
     "WandbLogger",
-    "test_fourier_properties",
+    "test_self_binding",
     "compute_class_means",
     "evaluate_mean_vector_cosine",
     "vsa_bind",
     "vsa_unbind",
     "vsa_invert",
     "test_vsa_operations",
-    "test_hrr_fashionmnist_sentence",
     # defaults/helpers
     "DEFAULT_WANDB_PROJECT",
     "DEFAULT_RESULTS_DIR",

@@ -275,7 +275,9 @@ class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
     support = constraints.real
     has_rsample = True
 
-    def __init__(self, loc, concentration, validate_args=None, normalize_ifft: bool = True):
+    def __init__(
+        self, loc, concentration, validate_args=None, normalize_ifft: bool = True
+    ):
         super().__init__(loc, concentration, validate_args=validate_args)
         self.normalize_ifft = normalize_ifft
         self.dtype = loc.dtype
@@ -286,9 +288,11 @@ class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
         v = ps.rsample(sample_shape)
         theta = torch.atan2(v[..., 1], v[..., 0])
         n = 2 * self.orig_dim
-        theta_s = torch.zeros((*theta.shape[:-1], n), device=theta.device, dtype=self.dtype)
-        theta_s[..., 1:self.orig_dim] = theta[..., 1:]
-        theta_s[..., -self.orig_dim+1:] = -torch.flip(theta[..., 1:], (-1,))
+        theta_s = torch.zeros(
+            (*theta.shape[:-1], n), device=theta.device, dtype=self.dtype
+        )
+        theta_s[..., 1 : self.orig_dim] = theta[..., 1:]
+        theta_s[..., -self.orig_dim + 1 :] = -torch.flip(theta[..., 1:], (-1,))
         samples_c = torch.exp(1j * theta_s)
         if self.normalize_ifft:
             samples_c = samples_c / math.sqrt(n)
@@ -296,7 +300,7 @@ class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
         return torch.fft.ifft(samples_c, dim=-1).real
 
     def log_prob(self, value):
-        freq = torch.fft.fft(value, dim=-1, norm="ortho")[..., :self.orig_dim]
+        freq = torch.fft.fft(value, dim=-1, norm="ortho")[..., : self.orig_dim]
         angles = torch.angle(freq)
         mean_dirs = torch.stack((torch.cos(self.loc), torch.sin(self.loc)), -1)
         vecs = torch.stack((torch.cos(angles), torch.sin(angles)), -1)
