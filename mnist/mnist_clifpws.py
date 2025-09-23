@@ -30,6 +30,7 @@ from utils.wandb_utils import (
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
+    test_bundle_capacity_class_analysis,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss
 
@@ -447,12 +448,15 @@ def run(args):
 
                             normalize_vectors = True
                             latents = []
-                            for x, _ in test_eval_loader:
+                            labels_list = []
+                            for x, y in test_eval_loader:
                                 z_mean, _ = model.encode(x.to(device).view(-1, 784))
                                 latents.append(z_mean.detach())
+                                labels_list.append(y)
                                 if len(torch.cat(latents, 0)) >= 1000:
                                     break
                             item_memory = torch.cat(latents, 0)[:1000]
+                            item_labels = torch.cat(labels_list, 0)[:1000].to(device)
 
                             bundle_cap_raw = vsa_bundle_capacity(
                                 d=item_memory.shape[-1],
@@ -476,6 +480,20 @@ def run(args):
                                     )
                                 },
                             }
+
+                            # new class-aware bundle capacity analysis
+                            print("running class-aware bundle capacity analysis...")
+                            class_analysis_res = test_bundle_capacity_class_analysis(
+                                d=item_memory.shape[-1],
+                                n_items=1000,
+                                n_trials=20,
+                                normalize=normalize_vectors,
+                                device=device,
+                                plot=True,
+                                save_dir=vis_dir,
+                                item_memory=item_memory,
+                                labels=item_labels,
+                            )
 
                             unbind_bundled_raw = vsa_binding_unbinding(
                                 d=item_memory.shape[-1],
@@ -517,6 +535,19 @@ def run(args):
                                 images_to_log["Bundle_Capacity"] = bundle_cap_res[
                                     "bundle_capacity_plot"
                                 ]
+
+                            # add class analysis plots
+                            class_analysis_plot = os.path.join(vis_dir, "bundle_capacity_class_analysis.png")
+                            if os.path.exists(class_analysis_plot):
+                                images_to_log["Bundle_Capacity_Class_Analysis"] = class_analysis_plot
+
+                            diverse_plot = os.path.join(vis_dir, "bundle_capacity_diverse_classes.png")
+                            if os.path.exists(diverse_plot):
+                                images_to_log["Bundle_Capacity_Diverse_Classes"] = diverse_plot
+
+                            similar_plot = os.path.join(vis_dir, "bundle_capacity_similar_classes.png")
+                            if os.path.exists(similar_plot):
+                                images_to_log["Bundle_Capacity_Similar_Classes"] = similar_plot
                             if unbind_bundled_res.get("unbind_bundled_plot"):
                                 images_to_log[
                                     "Unbind_Bundled_Pairs"

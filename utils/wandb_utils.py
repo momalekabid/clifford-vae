@@ -22,14 +22,17 @@ def _unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "*") -> torch.Tenso
     """
     - *: x̂ = (ab) ⊛ a^{-1}, where a^{-1} = (a_n, ..., a_2, a_1)
     - †: x̂ = IFFT( FFT(ab) / FFT(a) )
+    - inv: same as *, x̂ = (ab) ⊛ a^{-1}
     """
-    if method == "*":
+    if method == "*" or method == "inv":
         return _bind(ab, vsa_invert(b))
     elif method == "†":
         Fab = torch.fft.fft(ab, dim=-1)
         Fb = torch.fft.fft(b, dim=-1)
         rec = torch.fft.ifft(Fab / (Fb + 1e-12), dim=-1).real
         return rec
+    else:
+        raise ValueError(f"unsupported unbind method: {method}")
 
 
 def _fft_make_unitary(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
