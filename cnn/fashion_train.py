@@ -53,7 +53,7 @@ def train_epoch(model, loader, optimizer, device, beta):
         x_recon, q_z, p_z, _ = model(x)
         losses = model.compute_loss(x, x_recon, q_z, p_z, beta)
         losses["total_loss"].backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
         optimizer.step()
         for k in ["total", "recon", "kld"]:
             sums[k] += losses[f"{k}_loss"].item() * x.size(0)

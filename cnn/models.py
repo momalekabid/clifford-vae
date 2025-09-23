@@ -35,6 +35,15 @@ class Encoder(nn.Module):
         else:
             self.fc_concentration = nn.Linear(self.flat_dim, 1)
 
+        # xavier initialization
+        def init_weights(m):
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        self.apply(init_weights)
+
     def forward(self, x):
         x = self.main(x).flatten(start_dim=1)
         mu = self.fc_mu(x)
@@ -43,9 +52,11 @@ class Encoder(nn.Module):
         elif self.distribution == "powerspherical":
             mu = F.normalize(mu, p=2, dim=-1)
             kappa = F.softplus(self.fc_concentration(x)) + 1
+            kappa = torch.clamp(kappa, max=100.0)
             return mu, kappa
         elif self.distribution == "clifford":
             kappa = F.softplus(self.fc_concentration(x)) + 1
+            kappa = torch.clamp(kappa, max=100.0)
             return mu, kappa
 
 
@@ -63,6 +74,15 @@ class Decoder(nn.Module):
             nn.ConvTranspose2d(64, out_channels, 4, 2, 1),
             nn.Tanh(),
         )
+
+        # xavier initialization
+        def init_weights(m):
+            if isinstance(m, (nn.ConvTranspose2d, nn.Linear)):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        self.apply(init_weights)
 
     def forward(self, z):
         x = self.fc(z).view(z.size(0), 512, 2, 2)
