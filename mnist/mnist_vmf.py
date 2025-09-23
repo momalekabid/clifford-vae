@@ -16,7 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.wandb_utils import (
     WandbLogger,
-    test_fourier_properties,
+    test_self_binding,
     test_bundle_capacity,
     test_unbinding_of_bundled_pairs,
 )
@@ -155,7 +155,7 @@ def plot_latent_space(model, loader, device, filepath, n_plot=2000):
         ax.set_yticks([])
 
     fig.suptitle("t-SNE of Latent Space (μ) for vMF-VAE", fontsize=16)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout to make room for suptitle
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     plt.savefig(filepath, dpi=300, bbox_inches="tight")
     plt.close()
 
@@ -321,11 +321,19 @@ def run(args):
                     test_dataset, list(range(min(1000, len(test_dataset))))
                 )
                 test_subset_loader = DataLoader(test_subset, batch_size=64)
-                fourier_pseudo = test_fourier_properties(
-                    model, test_subset_loader, device, f"visualizations/d_{d_manifold}/vmf", unbind_method="pseudo"
+                fourier_pseudo = test_self_binding(
+                    model,
+                    test_subset_loader,
+                    device,
+                    f"visualizations/d_{d_manifold}/vmf",
+                    unbind_method="*",
                 )
-                fourier_deconv = test_fourier_properties(
-                    model, test_subset_loader, device, f"visualizations/d_{d_manifold}/vmf", unbind_method="deconv"
+                fourier_deconv = test_self_binding(
+                    model,
+                    test_subset_loader,
+                    device,
+                    f"visualizations/d_{d_manifold}/vmf",
+                    unbind_method="†",
                 )
 
                 # visualizations
@@ -366,7 +374,10 @@ def run(args):
                             "Latent PCA": pca_path,
                             "Interpolations": interp_path,
                         }
-                        for tag, fr in {"pseudo": fourier_pseudo, "deconv": fourier_deconv}.items():
+                        for tag, fr in {
+                            "*": fourier_pseudo,
+                            "†": fourier_deconv,
+                        }.items():
                             if fr.get("similarity_after_k_binds_plot_path"):
                                 images_to_log[f"Similarity_After_K_Binds_{tag}"] = fr[
                                     "similarity_after_k_binds_plot_path"
@@ -381,16 +392,34 @@ def run(args):
                     # wandb logging k-NN as metrics
                     knn_metrics = {f"knn_acc_{k}": v for k, v in knn_accuracies.items()}
                     fourier_metrics = {}
-                    fourier_metrics.update({
-                        f"pseudo/{k}": v for k, v in fourier_pseudo.items() if isinstance(v, (int, float, bool))
-                    })
-                    fourier_metrics.update({
-                        f"deconv/{k}": v for k, v in fourier_deconv.items() if isinstance(v, (int, float, bool))
-                    })
+                    fourier_metrics.update(
+                        {
+                            f"pseudo/{k}": v
+                            for k, v in fourier_pseudo.items()
+                            if isinstance(v, (int, float, bool))
+                        }
+                    )
+                    fourier_metrics.update(
+                        {
+                            f"deconv/{k}": v
+                            for k, v in fourier_deconv.items()
+                            if isinstance(v, (int, float, bool))
+                        }
+                    )
 
-                    logger.log_metrics({**knn_metrics, **fourier_metrics, "final_val_loss": best_val_loss})
+                    logger.log_metrics(
+                        {
+                            **knn_metrics,
+                            **fourier_metrics,
+                            "final_val_loss": best_val_loss,
+                        }
+                    )
 
-                    summary_metrics = {**knn_metrics, "final_val_loss": best_val_loss, **fourier_metrics}
+                    summary_metrics = {
+                        **knn_metrics,
+                        "final_val_loss": best_val_loss,
+                        **fourier_metrics,
+                    }
                     logger.log_summary(summary_metrics)
                     logger.finish_run()
 

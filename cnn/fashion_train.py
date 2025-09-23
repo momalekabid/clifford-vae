@@ -22,15 +22,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cnn.models import VAE
 from utils.wandb_utils import (
     WandbLogger,
-    test_fourier_properties,
+    test_self_binding,
+    test_cross_class_bind_unbind,
     compute_class_means,
     evaluate_mean_vector_cosine,
-    test_hrr_sentence,
-    test_bundle_capacity,
-    test_unbinding_of_bundled_pairs,
     plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
+)
+from utils.vsa import (
+    test_bundle_capacity as vsa_bundle_capacity,
+    test_binding_unbinding_pairs as vsa_binding_unbinding,
 )
 
 
@@ -44,6 +46,7 @@ DEVICE = (
 def train_epoch(model, loader, optimizer, device, beta):
     model.train()
     sums = {"total": 0.0, "recon": 0.0, "kld": 0.0}
+    concentration_stats = []
     for x, _ in loader:
         x = x.to(device)
         optimizer.zero_grad()
@@ -54,13 +57,39 @@ def train_epoch(model, loader, optimizer, device, beta):
         optimizer.step()
         for k in ["total", "recon", "kld"]:
             sums[k] += losses[f"{k}_loss"].item() * x.size(0)
+
+        if hasattr(model, "distribution") and model.distribution in [
+            "powerspherical",
+            "clifford",
+        ]:
+            if hasattr(q_z, "concentration"):
+                concentration_stats.append(q_z.concentration.detach())
+
     n = len(loader.dataset)
-    return {f"train/{k}_loss": v / n for k, v in sums.items()}
+    result = {f"train/{k}_loss": v / n for k, v in sums.items()}
+
+    if concentration_stats and hasattr(model, "distribution"):
+        all_concentrations = torch.cat(concentration_stats, dim=0)
+        result[
+            f"train/{model.distribution}_concentration_mean"
+        ] = all_concentrations.mean().item()
+        result[
+            f"train/{model.distribution}_concentration_std"
+        ] = all_concentrations.std().item()
+        result[
+            f"train/{model.distribution}_concentration_max"
+        ] = all_concentrations.max().item()
+        result[
+            f"train/{model.distribution}_concentration_min"
+        ] = all_concentrations.min().item()
+
+    return result
 
 
 def test_epoch(model, loader, device):
     model.eval()
     sums = {"total": 0.0, "recon": 0.0, "kld": 0.0}
+    concentration_stats = []
     with torch.no_grad():
         for x, _ in loader:
             x = x.to(device)
@@ -68,8 +97,33 @@ def test_epoch(model, loader, device):
             losses = model.compute_loss(x, x_recon, q_z, p_z, beta=1.0)
             for k in ["total", "recon", "kld"]:
                 sums[k] += losses[f"{k}_loss"].item() * x.size(0)
+
+            if hasattr(model, "distribution") and model.distribution in [
+                "powerspherical",
+                "clifford",
+            ]:
+                if hasattr(q_z, "concentration"):
+                    concentration_stats.append(q_z.concentration.detach())
+
     n = len(loader.dataset)
-    return {f"test/{k}_loss": v / n for k, v in sums.items()}
+    result = {f"test/{k}_loss": v / n for k, v in sums.items()}
+
+    if concentration_stats and hasattr(model, "distribution"):
+        all_concentrations = torch.cat(concentration_stats, dim=0)
+        result[
+            f"test/{model.distribution}_concentration_mean"
+        ] = all_concentrations.mean().item()
+        result[
+            f"test/{model.distribution}_concentration_std"
+        ] = all_concentrations.std().item()
+        result[
+            f"test/{model.distribution}_concentration_max"
+        ] = all_concentrations.max().item()
+        result[
+            f"test/{model.distribution}_concentration_min"
+        ] = all_concentrations.min().item()
+
+    return result
 
 
 # evaluation and visualization helpers
@@ -192,9 +246,9 @@ def main(args):
     print(f"Device: {DEVICE}")
     logger = WandbLogger(args)
 
-    latent_dims = [128, 256, 512, 1024] #, 2048, 4096, 5000]
-    distributions = ["powerspherical", "clifford", "gaussian"]
-    datasets_to_test = ["fashionmnist"] #, "cifar10"]
+    latent_dims = [2, 4, 256, 1024, 2048, 4096]
+    distributions = ["clifford", "gaussian", "powerspherical"]
+    datasets_to_test = ["fashionmnist", "cifar10"]
     dataset_map = {"fashionmnist": datasets.FashionMNIST, "cifar10": datasets.CIFAR10}
 
     for dataset_name in datasets_to_test:
@@ -223,9 +277,6 @@ def main(args):
         test_loader = DataLoader(
             test_set, batch_size=args.batch_size, shuffle=False, num_workers=2
         )
-
-        all_bundle_capacity_results = defaultdict(lambda: {"dims": [], "max_k_at_99_acc": []})
-        all_unbind_bundled_results = defaultdict(lambda: {"dims": [], "max_k_at_99_acc": []})
 
         for latent_dim in latent_dims:
             for dist_name in distributions:
@@ -283,6 +334,16 @@ def main(args):
                         patience_counter = 0
                     else:
                         patience_counter += 1
+                    if hasattr(model, "distribution") and model.distribution in [
+                        "powerspherical",
+                        "clifford",
+                    ]:
+                        conc_key = f"test/{model.distribution}_concentration_mean"
+                        if conc_key in test_losses:
+                            print(
+                                f"Epoch {epoch}: {model.distribution} concentration mean={test_losses[conc_key]:.4f}, max={test_losses[f'test/{model.distribution}_concentration_max']:.4f}"
+                            )
+
                     logger.log_metrics(
                         {
                             "epoch": epoch,
@@ -306,65 +367,102 @@ def main(args):
                         torch.load(f"{output_dir}/best_model.pt", map_location=DEVICE)
                     )
 
-                    use_unitary_keys = True
-                    normalize_vectors = getattr(args, "vsa_normalize", True)
+                    normalize_vectors = True
 
-                    bundle_cap_res = test_bundle_capacity(
-                        model,
-                        test_loader,
-                        DEVICE,
-                        output_dir,
+                    latents = []
+                    for x, _ in test_loader:
+                        x = x.to(DEVICE)
+                        _, _, _, mu = model(x)
+                        latents.append(mu.detach())
+                        if len(torch.cat(latents, 0)) >= 1000:
+                            break
+                    item_memory = torch.cat(latents, 0)[:1000]
+
+                    bundle_cap_raw = vsa_bundle_capacity(
+                        d=item_memory.shape[-1],
                         n_items=1000,
                         k_range=list(range(5, 51, 5)),
                         n_trials=20,
-                        normalize_vectors=normalize_vectors,
+                        normalize=normalize_vectors,
+                        device=DEVICE,
+                        plot=True,
+                        save_dir=output_dir,
+                        item_memory=item_memory,
                     )
-                    
-                    unbind_bundled_res_pseudo = test_unbinding_of_bundled_pairs(
-                        model,
-                        test_loader,
-                        DEVICE,
-                        output_dir,
-                        unbind_method="pseudo",
+
+                    # # baseline test for bundle capacity (random Gaussi)
+                    baseline_dir = os.path.join(output_dir, "baseline")
+                    os.makedirs(baseline_dir, exist_ok=True)
+                    # bundle_cap_baseline = vsa_bundle_capacity(
+                    #     d=item_memory.shape[-1],
+                    #     n_items=1000,
+                    #     k_range=list(range(5, 51, 5)),
+                    #     n_trials=20,
+                    #     normalize=normalize_vectors,
+                    #     device=DEVICE,
+                    #     plot=True,
+                    #     save_dir=baseline_dir,
+                    #     item_memory=None,
+                    # )
+                    bundle_cap_res = {
+                        "bundle_capacity_plot": os.path.join(
+                            output_dir, "bundle_capacity.png"
+                        ),
+                        "bundle_capacity_accuracies": {
+                            k: acc
+                            for k, acc in zip(
+                                bundle_cap_raw["k"], bundle_cap_raw["accuracy"]
+                            )
+                        },
+                    }
+
+                    unbind_bundled_raw = vsa_binding_unbinding(
+                        d=item_memory.shape[-1],
                         n_items=1000,
                         k_range=list(range(5, 31, 5)),
                         n_trials=20,
-                        normalize_vectors=normalize_vectors,
-                        unitary_keys=use_unitary_keys,
+                        normalize=normalize_vectors,
+                        device=DEVICE,
+                        plot=True,
+                        save_dir=output_dir,
+                        item_memory=item_memory,
                     )
-                    
-                    bundle_accs = bundle_cap_res.get("bundle_capacity_accuracies", {})
-                    if bundle_accs:
-                        ks = sorted(bundle_accs.keys())
-                        k_at_99 = 0
-                        for k_val in ks:
-                            if bundle_accs[k_val] >= 0.99:
-                                k_at_99 = k_val
-                            else:
-                                break
-                        if k_at_99 > 0:
-                            all_bundle_capacity_results[dist_name]["dims"].append(latent_dim)
-                            all_bundle_capacity_results[dist_name]["max_k_at_99_acc"].append(k_at_99)
 
-                    unbind_accs = unbind_bundled_res_pseudo.get("unbind_bundled_accuracies", {})
-                    if unbind_accs:
-                        ks = sorted(unbind_accs.keys())
-                        k_at_99 = 0
-                        for k_val in ks:
-                            if unbind_accs[k_val] >= 0.99:
-                                k_at_99 = k_val
-                            else:
-                                break
-                        if k_at_99 > 0:
-                            all_unbind_bundled_results[dist_name]["dims"].append(latent_dim)
-                            all_unbind_bundled_results[dist_name]["max_k_at_99_acc"].append(k_at_99)
+                    # unbind_bundled_baseline = vsa_binding_unbinding(
+                    #     d=item_memory.shape[-1],
+                    #     n_items=1000,
+                    #     k_range=list(range(5, 31, 5)),
+                    #     n_trials=20,
+                    #     normalize=normalize_vectors,
+                    #     device=DEVICE,
+                    #     plot=True,
+                    #     save_dir=baseline_dir,
+                    #     item_memory=None,
+                    # )
+                    unbind_bundled_res_inv = {
+                        "unbind_bundled_plot": os.path.join(
+                            output_dir, "unbind_bundled_pairs_inv.png"
+                        ),
+                        "unbind_bundled_accuracies": {
+                            k: acc
+                            for k, acc in zip(
+                                unbind_bundled_raw["k"], unbind_bundled_raw["accuracy"]
+                            )
+                        },
+                    }
 
-
-                    fourier_pseudo = test_fourier_properties(
-                        model, test_loader, DEVICE, output_dir, unbind_method="pseudo"
+                    fourier_star = test_self_binding(
+                        model, test_loader, DEVICE, output_dir, unbind_method="*"
                     )
-                    fourier_deconv = test_fourier_properties(
-                        model, test_loader, DEVICE, output_dir, unbind_method="deconv"
+                    fourier_perp = test_self_binding(
+                        model, test_loader, DEVICE, output_dir, unbind_method="†"
+                    )
+
+                    cross_class_star = test_cross_class_bind_unbind(
+                        model, test_loader, DEVICE, output_dir, unbind_method="*"
+                    )
+                    cross_class_perp = test_cross_class_bind_unbind(
+                        model, test_loader, DEVICE, output_dir, unbind_method="†"
                     )
 
                     # reconstructions
@@ -402,29 +500,34 @@ def main(args):
                     mean_metric_key = "mean_vector_cosine_acc"
                     print(f"{mean_metric_key}: ", mean_vector_acc)
 
-                    # vsa_bind_sim_pseudo = 0.0
-                    # vsa_bind_sim_deconv = 0.0
-
                     fourier_metrics = {}
-                    fourier_metrics.update({
-                        f"pseudo/{k}": v
-                        for k, v in fourier_pseudo.items()
-                        if isinstance(v, (int, float, bool))
-                    })
-                    fourier_metrics.update({
-                        f"deconv/{k}": v
-                        for k, v in fourier_deconv.items()
-                        if isinstance(v, (int, float, bool))
-                    })
+                    fourier_metrics.update(
+                        {
+                            f"*/{k}": v
+                            for k, v in fourier_star.items()
+                            if isinstance(v, (int, float, bool))
+                        }
+                    )
+                    fourier_metrics.update(
+                        {
+                            f"†/{k}": v
+                            for k, v in fourier_perp.items()
+                            if isinstance(v, (int, float, bool))
+                        }
+                    )
 
                     logger.log_metrics(
                         {
                             **knn_metrics,
                             **fourier_metrics,
                             mean_metric_key: float(mean_vector_acc),
-                            # "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
-                            # "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                             "final_best_loss": best,
+                            "cross_class_bind_unbind_similarity_star": cross_class_star.get(
+                                "cross_class_bind_unbind_similarity", 0.0
+                            ),
+                            "cross_class_bind_unbind_similarity_perp": cross_class_perp.get(
+                                "cross_class_bind_unbind_similarity", 0.0
+                            ),
                         }
                     )
 
@@ -434,28 +537,52 @@ def main(args):
                         "pca": pca_path,
                     }
                     if bundle_cap_res.get("bundle_capacity_plot"):
-                        images["bundle_capacity"] = bundle_cap_res["bundle_capacity_plot"]
-                    if unbind_bundled_res_pseudo.get("unbind_bundled_plot"):
-                        images["unbind_bundled_pseudo"] = unbind_bundled_res_pseudo["unbind_bundled_plot"]
-                        
-                    sp = fourier_pseudo.get("similarity_after_k_binds_plot_path")
-                    sd = fourier_deconv.get("similarity_after_k_binds_plot_path")
-                    if sp:
-                        images["similarity_after_k_binds_pseudo"] = sp
-                    if sd:
-                        images["similarity_after_k_binds_deconv"] = sd
-                    # reconstructions after m binds (every 10) for pseudo/deconv
-                    rp = fourier_pseudo.get("recon_after_k_binds_plot_path")
-                    rd = fourier_deconv.get("recon_after_k_binds_plot_path")
-                    if rp:
-                        images["recon_after_k_binds_pseudo"] = rp
-                    if rd:
-                        images["recon_after_k_binds_deconv"] = rd
+                        images["bundle_capacity"] = bundle_cap_res[
+                            "bundle_capacity_plot"
+                        ]
+                    if unbind_bundled_res_inv.get("unbind_bundled_plot"):
+                        images["unbind_bundled_inv"] = unbind_bundled_res_inv[
+                            "unbind_bundled_plot"
+                        ]
 
-                    if dist_name == "clifford" and model.latent_dim >= 2:
-                        # manifold visualization
+                    baseline_bundle_plot = os.path.join(
+                        baseline_dir, "bundle_capacity.png"
+                    )
+                    baseline_unbind_plot = os.path.join(
+                        baseline_dir, "unbind_bundled_pairs_pseudo.png"
+                    )
+                    if os.path.exists(baseline_bundle_plot):
+                        images["baseline_bundle_capacity"] = baseline_bundle_plot
+                    if os.path.exists(baseline_unbind_plot):
+                        images["baseline_unbind_bundled"] = baseline_unbind_plot
+
+                    sp = fourier_star.get("similarity_after_k_binds_plot_path")
+                    sd = fourier_perp.get("similarity_after_k_binds_plot_path")
+                    if sp:
+                        images["similarity_after_k_binds_*"] = sp
+                    if sd:
+                        images["similarity_after_k_binds_†"] = sd
+                    # reconstructions after m binds (every 10) for */ †
+                    rp = fourier_star.get("recon_after_k_binds_plot_path")
+                    rd = fourier_perp.get("recon_after_k_binds_plot_path")
+                    if rp:
+                        images["recon_after_k_binds_*"] = rp
+                    if rd:
+                        images["recon_after_k_binds_†"] = rd
+
+                    if cross_class_star.get("cross_class_bind_unbind_plot_path"):
+                        images["cross_class_binding_star"] = cross_class_star[
+                            "cross_class_bind_unbind_plot_path"
+                        ]
+                    if cross_class_perp.get("cross_class_bind_unbind_plot_path"):
+                        images["cross_class_binding_perp"] = cross_class_perp[
+                            "cross_class_bind_unbind_plot_path"
+                        ]
+
+                    if dist_name == "clifford" and model.latent_dim in [2, 4]:
+                        # manifold visualization for clifford (only d=2,4)
                         cliff_viz = plot_clifford_manifold_visualization(
-                            model, DEVICE, output_dir, n_samples=1000, dims=(0, 1)
+                            model, DEVICE, output_dir, n_grid=16, dims=(0, 1)
                         )
                         if cliff_viz:
                             images["clifford_manifold_visualization"] = cliff_viz
@@ -474,98 +601,16 @@ def main(args):
                         if gauss_viz:
                             images["gaussian_manifold_visualization"] = gauss_viz
 
-                    hrr_fashion_pseudo = test_hrr_sentence(
-                        model, test_loader, DEVICE, output_dir,
-                        unbind_method="pseudo", unitary_keys=True,
-                        normalize_vectors=normalize_vectors,
-                        dataset_name=dataset_name,
-                    )
-                    hrr_fashion_deconv = test_hrr_sentence(
-                        model, test_loader, DEVICE, output_dir,
-                        unbind_method="deconv", unitary_keys=True,
-                        normalize_vectors=normalize_vectors,
-                        dataset_name=dataset_name,
-                    )
-                    # hrr_fashion_pseudo_proj = test_hrr_sentence(
-                    #     model, test_loader, DEVICE, output_dir, unbind_method="pseudo", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True, dataset_name=dataset_name
-                    # )
-                    # hrr_fashion_deconv_proj = test_hrr_sentence(
-                    #     model, test_loader, DEVICE, output_dir, unbind_method="deconv", unitary_keys=True, normalize_vectors=normalize_vectors, project_fillers=True, dataset_name=dataset_name
-                    # )
-
-                    if hrr_fashion_pseudo.get("hrr_fashion_plot"):
-                        images["hrr_fashion_pseudo"] = hrr_fashion_pseudo["hrr_fashion_plot"]
-                    if hrr_fashion_deconv.get("hrr_fashion_plot"):
-                        images["hrr_fashion_deconv"] = hrr_fashion_deconv["hrr_fashion_plot"]
-                    # if hrr_fashion_pseudo_proj.get("hrr_fashion_plot"):
-                    #     images["hrr_fashion_pseudo_proj"] = hrr_fashion_pseudo_proj["hrr_fashion_plot"]
-                    # if hrr_fashion_deconv_proj.get("hrr_fashion_plot"):
-                    #     images["hrr_fashion_deconv_proj"] = hrr_fashion_deconv_proj["hrr_fashion_plot"]
                     summary = {
                         "final_best_loss": best,
                         **fourier_metrics,
                         **knn_metrics,
                         mean_metric_key: float(mean_vector_acc),
-                        # "vsa_bind_unbind_similarity_pseudo": float(vsa_bind_sim_pseudo),
-                        # "vsa_bind_unbind_similarity_deconv": float(vsa_bind_sim_deconv),
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)
 
                 logger.finish_run()
-
-        for results, name in [
-            (all_bundle_capacity_results, "bundle_capacity"),
-            (all_unbind_bundled_results, "unbind_bundled_pairs"),
-        ]:
-            plt.figure(figsize=(8, 6))
-            any_line = False
-            slopes = {}
-            intercepts = {}
-            for dist_name, data in results.items():
-                dims_list = data["dims"]
-                k_list = data["max_k_at_99_acc"]
-                if dims_list and k_list and len(dims_list) == len(k_list) and len(k_list) >= 2:
-                    plt.plot(dims_list, k_list, marker='o', label=dist_name)
-                    any_line = True
-                    # fit y = dims = a * k + b
-                    # swap axes to match paper
-                    x = np.array(k_list, dtype=float)
-                    y = np.array(dims_list, dtype=float)
-                    a, b = np.polyfit(x, y, 1)
-                    slopes[dist_name] = float(a)
-                    intercepts[dist_name] = float(b)
-                    xs_fit = np.linspace(x.min(), x.max(), 100)
-                    ys_fit = a * xs_fit + b
-                    plt.plot(ys_fit, xs_fit, linestyle='--', alpha=0.6)  # plot in dims (y) vs k (x) space -> swap axes
-                elif dims_list and k_list:
-                    plt.plot(dims_list, k_list, marker='o', label=dist_name)
-                    any_line = True
-
-            plt.xlabel("Latent Dimension")
-            plt.ylabel("Max k for >= 99% Accuracy")
-            plt.title(f"{name.replace('_', ' ').title()} on {dataset_name}")
-            if any_line:
-                plt.legend()
-            plt.grid(True, alpha=0.3)
-            plot_path = f"results/{dataset_name}_{name}_comparison.png"
-            plt.savefig(plot_path, dpi=200, bbox_inches="tight")
-            plt.close()
-            print(f"Saved summary plot to {plot_path}")
-
-            try:
-                import json
-                meta_path = f"results/{dataset_name}_{name}_fit.json"
-                with open(meta_path, 'w') as f:
-                    json.dump({"slope": slopes, "intercept": intercepts}, f, indent=2)
-                print(f"Saved linear fit stats to {meta_path}")
-            except Exception as e:
-                print(f"Warning: could not save slope stats for {name}: {e}")
-
-            if logger.use and logger.run is not None:
-                flat = {f"{name}/slope/{k}": v for k, v in slopes.items()}
-                flat.update({f"{name}/intercept/{k}": v for k, v in intercepts.items()})
-                logger.log_metrics(flat)
 
 
 if __name__ == "__main__":
@@ -574,36 +619,28 @@ if __name__ == "__main__":
     p.add_argument("--warmup_epochs", type=int, default=100)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument(
-        "--recon_loss", type=str, default="mse", choices=["mse", "l1_freq"]
-    )
+    p.add_argument("--recon_loss", type=str, default="mse", choices=["mse", "l1_freq"])
     p.add_argument(
         "--l1_weight", type=float, default=1.0, help="Weight for L1 pixel loss"
     )
     p.add_argument(
         "--freq_weight",
         type=float,
-        default=0.25,
+        default=0.0,
         help="Weight for frequency domain loss",
     )
     p.add_argument("--max_beta", type=float, default=1.0)
     p.add_argument(
-        "--min_beta", type=float, default=0.01, help="Minimum KL beta during cycles"
+        "--min_beta", type=float, default=0.05, help="Minimum KL beta during cycles"
     )
     p.add_argument("--no_wandb", action="store_true")
-    p.add_argument("--wandb_project", type=str, default="conv-experiments-sep-2025")
-    p.add_argument("--patience", type=int, default=50)
+    p.add_argument("--wandb_project", type=str, default="conv-experiments-sep-23")
+    p.add_argument("--patience", type=int, default=25)
     p.add_argument(
         "--cycle_epochs",
         type=int,
-        default=100,
+        default=250,
         help="Cycle length for cyclical KL beta after warmup (0=disabled)",
-    )
-    p.add_argument(
-        "--vsa_normalize",
-        action="store_true",
-        default=True,
-        help="Normalize vectors for vsa tests)",
     )
     args = p.parse_args()
     main(args)

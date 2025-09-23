@@ -18,15 +18,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.wandb_utils import (
     WandbLogger,
-    test_fourier_properties,
+    test_self_binding,
+    test_cross_class_bind_unbind,
     compute_class_means,
     evaluate_mean_vector_cosine,
-    test_hrr_sentence,
-    test_bundle_capacity,
-    test_unbinding_of_bundled_pairs,
-    plot_clifford_manifold_visualization, 
+    plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
+)
+from utils.vsa import (
+    test_bundle_capacity as vsa_bundle_capacity,
+    test_binding_unbinding_pairs as vsa_binding_unbinding,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss
 
@@ -48,7 +50,6 @@ def encode_dataset(model, loader, device):
 
 
 def perform_knn_evaluation(model, train_loader, test_loader, device, n_samples_list):
-    """k-NN classification on latent embeddings with multiple training sample sizes."""
     X_train_full, y_train_full = encode_dataset(model, train_loader, device)
     X_test, y_test = encode_dataset(model, test_loader, device)
 
@@ -75,7 +76,6 @@ def perform_knn_evaluation(model, train_loader, test_loader, device, n_samples_l
 
 
 def plot_reconstructions(model, loader, device, filepath):
-    """Save comparison plot original vs recon imgs."""
     model.eval()
     with torch.no_grad():
         x, _ = next(iter(loader))
@@ -112,7 +112,7 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
         interp_z = []
         alphas = torch.linspace(0, 1, steps, device=device)
 
-        if model.distribution == "clifford":  #
+        if model.distribution == "clifford":
             delta = z_mean2 - z_mean1
             delta_wrapped = (delta + math.pi) % (2 * math.pi) - math.pi
             interp_angles = z_mean1 + alphas.view(-1, 1) * delta_wrapped
@@ -151,7 +151,6 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
 
 
 def plot_latent_space(model, loader, device, filepath, n_plot=2000):
-    """Generate t-SNE visualization grid with multiple perplexity values."""
     print(f"Generating t-SNE plot grid for {n_plot} points...")
     X_z, y = encode_dataset(model, loader, device)
 
@@ -161,7 +160,7 @@ def plot_latent_space(model, loader, device, filepath, n_plot=2000):
     n_perplexities = len(perplexities)
 
     fig, axes = plt.subplots(1, n_perplexities, figsize=(n_perplexities * 5, 5))
-    if n_perplexities == 1:  # this makes sure axes is a list
+    if n_perplexities == 1:
         axes = [axes]
 
     for i, p in enumerate(perplexities):
@@ -299,9 +298,12 @@ def run(args):
 
                 for epoch in range(args.epochs):
                     model.train()
-                    beta = min(
-                        1.0, (epoch + 1) / max(1, args.warmup_epochs)
-                    )  # kl annealing
+                    if args.default_beta is not None:
+                        beta = args.default_beta
+                    else:
+                        beta = min(
+                            1.0, (epoch + 1) / max(1, args.warmup_epochs)
+                        )  # kl annealing
                     total_train_loss = 0
                     for x_mb, _ in train_loader:
                         optimizer.zero_grad()
@@ -356,19 +358,34 @@ def run(args):
                         test_dataset, list(range(min(1000, len(test_dataset))))
                     )
                     test_subset_loader = DataLoader(test_subset, batch_size=64)
-                    fourier_pseudo = test_fourier_properties(
+                    fourier_pseudo = test_self_binding(
                         model,
                         test_subset_loader,
                         device,
                         f"visualizations/d_{mdim}/{dist}",
-                        unbind_method="pseudo",
+                        unbind_method="*",
                     )
-                    fourier_deconv = test_fourier_properties(
+                    fourier_deconv = test_self_binding(
                         model,
                         test_subset_loader,
                         device,
                         f"visualizations/d_{mdim}/{dist}",
-                        unbind_method="deconv",
+                        unbind_method="†",
+                    )
+
+                    cross_class_pseudo = test_cross_class_bind_unbind(
+                        model,
+                        test_subset_loader,
+                        device,
+                        f"visualizations/d_{mdim}/{dist}",
+                        unbind_method="*",
+                    )
+                    cross_class_deconv = test_cross_class_bind_unbind(
+                        model,
+                        test_subset_loader,
+                        device,
+                        f"visualizations/d_{mdim}/{dist}",
+                        unbind_method="†",
                     )
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
@@ -407,60 +424,96 @@ def run(args):
                                 "Latent PCA": pca_path,
                                 "Interpolations": interp_path,
                             }
-                            for tag, fr in {"pseudo": fourier_pseudo, "deconv": fourier_deconv}.items():
+                            for tag, fr in {
+                                "*": fourier_pseudo,
+                                "†": fourier_deconv,
+                            }.items():
                                 if fr.get("fft_spectrum_plot_path"):
-                                    images_to_log[f"Fourier_Analysis_{tag}"] = fr["fft_spectrum_plot_path"]
-                                if fr.get("similarity_after_k_binds_plot_path"):
-                                    images_to_log[f"Similarity_After_K_Binds_{tag}"] = fr[
-                                        "similarity_after_k_binds_plot_path"
+                                    images_to_log[f"Fourier_Analysis_{tag}"] = fr[
+                                        "fft_spectrum_plot_path"
                                     ]
+                                if fr.get("similarity_after_k_binds_plot_path"):
+                                    images_to_log[
+                                        f"Similarity_After_K_Binds_{tag}"
+                                    ] = fr["similarity_after_k_binds_plot_path"]
 
-                            hrr_pseudo = test_hrr_sentence(
-                                model, test_eval_loader, device, vis_dir,
-                                unbind_method="pseudo",
-                                unitary_keys=(dist=="clifford"),
-                                normalize_vectors=getattr(args, "vsa_normalize", False),
-                                dataset_name="mnist",
-                            )
-                            hrr_deconv = test_hrr_sentence(
-                                model, test_eval_loader, device, vis_dir,
-                                unbind_method="deconv",
-                                unitary_keys=(dist=="clifford"),
-                                normalize_vectors=getattr(args, "vsa_normalize", False),
-                                dataset_name="mnist",
-                            )
-                            if hrr_pseudo.get("hrr_fashion_plot"):
-                                images_to_log["HRR_Fashion_pseudo"] = hrr_pseudo["hrr_fashion_plot"]
-                            if hrr_deconv.get("hrr_fashion_plot"):
-                                images_to_log["HRR_Fashion_deconv"] = hrr_deconv["hrr_fashion_plot"]
+                            normalize_vectors = True
+                            latents = []
+                            for x, _ in test_eval_loader:
+                                z_mean, _ = model.encode(x.to(device).view(-1, 784))
+                                latents.append(z_mean.detach())
+                                if len(torch.cat(latents, 0)) >= 1000:
+                                    break
+                            item_memory = torch.cat(latents, 0)[:1000]
 
-                            normalize_vectors = getattr(args, "vsa_normalize", False)
-                            bundle_cap_res = test_bundle_capacity(
-                                model,
-                                test_eval_loader,
-                                device,
-                                vis_dir,
+                            bundle_cap_res = vsa_bundle_capacity(
+                                d=item_memory.shape[-1],
                                 n_items=1000,
                                 k_range=list(range(5, 31, 5)),
                                 n_trials=20,
-                                normalize_vectors=normalize_vectors,
+                                normalize=normalize_vectors,
+                                device=device,
+                                plot=False,
+                                item_memory=item_memory,
                             )
-                            unbind_bundled_res = test_unbinding_of_bundled_pairs(
-                                model,
-                                test_eval_loader,
-                                device,
-                                vis_dir,
-                                unbind_method="pseudo",
+                            bundle_cap_res = {
+                                "bundle_capacity_plot": os.path.join(
+                                    vis_dir, "bundle_capacity.png"
+                                ),
+                                "bundle_capacity_accuracies": {
+                                    k: acc
+                                    for k, acc in zip(
+                                        bundle_cap_res["k"], bundle_cap_res["accuracy"]
+                                    )
+                                },
+                            }
+                            unbind_bundled_res = vsa_binding_unbinding(
+                                d=item_memory.shape[-1],
                                 n_items=1000,
                                 k_range=list(range(5, 31, 5)),
                                 n_trials=20,
-                                normalize_vectors=normalize_vectors,
-                                unitary_keys=(dist=="clifford"),
+                                normalize=normalize_vectors,
+                                device=device,
+                                plot=False,
+                                item_memory=item_memory,
                             )
+                            unbind_bundled_res = {
+                                "unbind_bundled_plot": os.path.join(
+                                    vis_dir, "unbind_bundled_pairs.png"
+                                ),
+                                "unbind_bundled_accuracies": {
+                                    k: acc
+                                    for k, acc in zip(
+                                        unbind_bundled_res["k"],
+                                        unbind_bundled_res["accuracy"],
+                                    )
+                                },
+                            }
                             if bundle_cap_res.get("bundle_capacity_plot"):
-                                images_to_log["Bundle_Capacity"] = bundle_cap_res["bundle_capacity_plot"]
+                                images_to_log["Bundle_Capacity"] = bundle_cap_res[
+                                    "bundle_capacity_plot"
+                                ]
                             if unbind_bundled_res.get("unbind_bundled_plot"):
-                                images_to_log["Unbind_Bundled_Pairs"] = unbind_bundled_res["unbind_bundled_plot"]
+                                images_to_log[
+                                    "Unbind_Bundled_Pairs"
+                                ] = unbind_bundled_res["unbind_bundled_plot"]
+
+                            if cross_class_pseudo.get(
+                                "cross_class_bind_unbind_plot_path"
+                            ):
+                                images_to_log[
+                                    "Cross_Class_Binding_Pseudo"
+                                ] = cross_class_pseudo[
+                                    "cross_class_bind_unbind_plot_path"
+                                ]
+                            if cross_class_deconv.get(
+                                "cross_class_bind_unbind_plot_path"
+                            ):
+                                images_to_log[
+                                    "Cross_Class_Binding_Deconv"
+                                ] = cross_class_deconv[
+                                    "cross_class_bind_unbind_plot_path"
+                                ]
 
                             # manifold-specific visualizations
                             if dist == "clifford" and mdim >= 2:
@@ -486,9 +539,13 @@ def run(args):
 
                             # fourier recon after m binds
                             if fourier_pseudo.get("recon_after_k_binds_plot_path"):
-                                images_to_log["Recon_After_K_Binds_Pseudo"] = fourier_pseudo["recon_after_k_binds_plot_path"]
+                                images_to_log[
+                                    "Recon_After_K_Binds_Pseudo"
+                                ] = fourier_pseudo["recon_after_k_binds_plot_path"]
                             if fourier_deconv.get("recon_after_k_binds_plot_path"):
-                                images_to_log["Recon_After_K_Binds_Deconv"] = fourier_deconv["recon_after_k_binds_plot_path"]
+                                images_to_log[
+                                    "Recon_After_K_Binds_Deconv"
+                                ] = fourier_deconv["recon_after_k_binds_plot_path"]
 
                             logger.log_images(images_to_log)
 
@@ -497,13 +554,21 @@ def run(args):
                             f"knn_acc_{k}": v for k, v in knn_accuracies.items()
                         }
                         fourier_metrics = {}
-                        fourier_metrics.update({
-                            f"pseudo/{k}": v for k, v in fourier_pseudo.items() if isinstance(v, (int, float, bool))
-                        })
-                        fourier_metrics.update({
-                            f"deconv/{k}": v for k, v in fourier_deconv.items() if isinstance(v, (int, float, bool))
-                        })
-                        
+                        fourier_metrics.update(
+                            {
+                                f"pseudo/{k}": v
+                                for k, v in fourier_pseudo.items()
+                                if isinstance(v, (int, float, bool))
+                            }
+                        )
+                        fourier_metrics.update(
+                            {
+                                f"deconv/{k}": v
+                                for k, v in fourier_deconv.items()
+                                if isinstance(v, (int, float, bool))
+                            }
+                        )
+
                         train_subset = torch.utils.data.Subset(
                             train_dataset, list(range(min(5000, len(train_dataset))))
                         )
@@ -521,6 +586,12 @@ def run(args):
                                 **fourier_metrics,
                                 "mean_vector_cosine_acc": float(mean_vector_acc),
                                 "final_val_loss": best_val_loss,
+                                "cross_class_bind_unbind_similarity_pseudo": cross_class_pseudo.get(
+                                    "cross_class_bind_unbind_similarity", 0.0
+                                ),
+                                "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
+                                    "cross_class_bind_unbind_similarity", 0.0
+                                ),
                             }
                         )
 
@@ -529,6 +600,12 @@ def run(args):
                             "final_val_loss": best_val_loss,
                             **fourier_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
+                            "cross_class_bind_unbind_similarity_pseudo": cross_class_pseudo.get(
+                                "cross_class_bind_unbind_similarity", 0.0
+                            ),
+                            "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
+                                "cross_class_bind_unbind_similarity", 0.0
+                            ),
                         }
                         logger.log_summary(summary_metrics)
                         logger.finish_run()
@@ -603,12 +680,16 @@ if __name__ == "__main__":
     )
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument(
-        "--wandb_project", type=str, default="mnist-experiments-sep-2025", help="W&B project name"
+        "--wandb_project",
+        type=str,
+        default="mnist-experiments-sep-2025",
+        help="W&B project name",
     )
     parser.add_argument(
-        "--vsa_normalize",
-        action="store_true",
-        default=True,
+        "--default_beta",
+        type=float,
+        default=None,
+        help="Use fixed beta instead of annealing",
     )
 
     args = parser.parse_args()
