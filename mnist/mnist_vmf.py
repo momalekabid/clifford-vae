@@ -382,10 +382,6 @@ def run(args):
                                 images_to_log[f"Similarity_After_K_Binds_{tag}"] = fr[
                                     "similarity_after_k_binds_plot_path"
                                 ]
-                            if fr.get("recon_after_k_binds_plot_path"):
-                                images_to_log[f"Recon_After_K_Binds_{tag}"] = fr[
-                                    "recon_after_k_binds_plot_path"
-                                ]
                         logger.log_images(images_to_log)
 
                 if logger.use:

@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms
 import torchvision.utils as tu
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
@@ -69,8 +69,10 @@ def perform_knn_evaluation(model, train_loader, test_loader, device, n_samples_l
 
         y_pred = knn.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
-        results[n_samples] = accuracy
-        print(f"  knn acc w/ {n_samples} for train, test: {accuracy:.4f}")
+        f1 = f1_score(y_test, y_pred, average="macro")
+        results[f"knn_acc_{n_samples}"] = float(accuracy)
+        results[f"knn_f1_{n_samples}"] = float(f1)
+        print(f"  knn acc w/ {n_samples} for train, test: {accuracy:.4f}, f1: {f1:.4f}")
 
     return results
 
@@ -348,11 +350,12 @@ def run(args):
                 if os.path.exists(model_path):
                     model.load_state_dict(torch.load(model_path, map_location=device))
 
-                    knn_accuracies = perform_knn_evaluation(
+                    knn_results = perform_knn_evaluation(
                         model, train_eval_loader, test_eval_loader, device, knn_samples
                     )
-                    for n_samples, acc in knn_accuracies.items():
-                        agg_results[dist][n_samples].append(acc)
+                    for n_samples in knn_samples:
+                        if f"knn_acc_{n_samples}" in knn_results:
+                            agg_results[dist][n_samples].append(knn_results[f"knn_acc_{n_samples}"])
 
                     test_subset = torch.utils.data.Subset(
                         test_dataset, list(range(min(1000, len(test_dataset))))
@@ -518,7 +521,7 @@ def run(args):
                             # manifold-specific visualizations
                             if dist == "clifford" and mdim >= 2:
                                 cliff_viz = plot_clifford_manifold_visualization(
-                                    model, device, vis_dir, n_samples=1000, dims=(0, 1)
+                                    model, device, vis_dir, n_grid=16, dims=(0, 1)
                                 )
                                 if cliff_viz:
                                     images_to_log["Clifford_Manifold"] = cliff_viz
@@ -537,21 +540,13 @@ def run(args):
                                 if gauss_viz:
                                     images_to_log["Gaussian_Manifold"] = gauss_viz
 
-                            # fourier recon after m binds
-                            if fourier_pseudo.get("recon_after_k_binds_plot_path"):
-                                images_to_log[
-                                    "Recon_After_K_Binds_Pseudo"
-                                ] = fourier_pseudo["recon_after_k_binds_plot_path"]
-                            if fourier_deconv.get("recon_after_k_binds_plot_path"):
-                                images_to_log[
-                                    "Recon_After_K_Binds_Deconv"
-                                ] = fourier_deconv["recon_after_k_binds_plot_path"]
 
                             logger.log_images(images_to_log)
 
                     if logger.use:
                         knn_metrics = {
-                            f"knn_acc_{k}": v for k, v in knn_accuracies.items()
+                            k: v for k, v in knn_results.items()
+                            if k.startswith("knn_")
                         }
                         fourier_metrics = {}
                         fourier_metrics.update(
