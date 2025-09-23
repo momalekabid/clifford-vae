@@ -25,6 +25,7 @@ from utils.wandb_utils import (
     plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
+    test_vsa_operations,
 )
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
@@ -167,7 +168,7 @@ def plot_latent_space(model, loader, device, filepath, n_plot=2000):
 
     for i, p in enumerate(perplexities):
         ax = axes[i]
-        print(f"  Running t-SNE with perplexity={p}...")
+        print(f"Running t-SNE with perplexity={p}...")
         tsne = TSNE(n_components=2, random_state=42, perplexity=p, max_iter=1000)
         z_tsne = tsne.fit_transform(X_z)
 
@@ -439,6 +440,10 @@ def run(args):
                                     images_to_log[
                                         f"Similarity_After_K_Binds_{tag}"
                                     ] = fr["similarity_after_k_binds_plot_path"]
+                                if fr.get("recon_after_k_binds_plot_path"):
+                                    images_to_log[
+                                        f"Recon_After_K_Binds_{tag}"
+                                    ] = fr["recon_after_k_binds_plot_path"]
 
                             normalize_vectors = True
                             latents = []
@@ -449,14 +454,15 @@ def run(args):
                                     break
                             item_memory = torch.cat(latents, 0)[:1000]
 
-                            bundle_cap_res = vsa_bundle_capacity(
+                            bundle_cap_raw = vsa_bundle_capacity(
                                 d=item_memory.shape[-1],
                                 n_items=1000,
-                                k_range=list(range(5, 31, 5)),
+                                k_range=list(range(5, 51, 5)),
                                 n_trials=20,
                                 normalize=normalize_vectors,
                                 device=device,
-                                plot=False,
+                                plot=True,
+                                save_dir=vis_dir,
                                 item_memory=item_memory,
                             )
                             bundle_cap_res = {
@@ -466,32 +472,47 @@ def run(args):
                                 "bundle_capacity_accuracies": {
                                     k: acc
                                     for k, acc in zip(
-                                        bundle_cap_res["k"], bundle_cap_res["accuracy"]
+                                        bundle_cap_raw["k"], bundle_cap_raw["accuracy"]
                                     )
                                 },
                             }
-                            unbind_bundled_res = vsa_binding_unbinding(
+
+                            unbind_bundled_raw = vsa_binding_unbinding(
                                 d=item_memory.shape[-1],
                                 n_items=1000,
                                 k_range=list(range(5, 31, 5)),
                                 n_trials=20,
                                 normalize=normalize_vectors,
                                 device=device,
-                                plot=False,
+                                plot=True,
+                                save_dir=vis_dir,
                                 item_memory=item_memory,
                             )
                             unbind_bundled_res = {
                                 "unbind_bundled_plot": os.path.join(
-                                    vis_dir, "unbind_bundled_pairs.png"
+                                    vis_dir, "unbind_bundled_pairs_inv.png"
                                 ),
                                 "unbind_bundled_accuracies": {
                                     k: acc
                                     for k, acc in zip(
-                                        unbind_bundled_res["k"],
-                                        unbind_bundled_res["accuracy"],
+                                        unbind_bundled_raw["k"],
+                                        unbind_bundled_raw["accuracy"],
                                     )
                                 },
                             }
+
+                            # additional vsa operations test
+                            vsa_ops_res = test_vsa_operations(
+                                model,
+                                test_eval_loader,
+                                device,
+                                vis_dir,
+                                n_test_pairs=50,
+                                unbind_method="inv",
+                                unitary_keys=False,
+                                normalize_vectors=normalize_vectors,
+                                project_vectors=False,
+                            )
                             if bundle_cap_res.get("bundle_capacity_plot"):
                                 images_to_log["Bundle_Capacity"] = bundle_cap_res[
                                     "bundle_capacity_plot"
@@ -500,6 +521,10 @@ def run(args):
                                 images_to_log[
                                     "Unbind_Bundled_Pairs"
                                 ] = unbind_bundled_res["unbind_bundled_plot"]
+                            if vsa_ops_res.get("vsa_bind_unbind_plot"):
+                                images_to_log[
+                                    "VSA_Bind_Unbind_Operations"
+                                ] = vsa_ops_res["vsa_bind_unbind_plot"]
 
                             if cross_class_pseudo.get(
                                 "cross_class_bind_unbind_plot_path"
@@ -587,6 +612,9 @@ def run(args):
                                 "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
                                     "cross_class_bind_unbind_similarity", 0.0
                                 ),
+                                "vsa_bind_unbind_similarity": vsa_ops_res.get(
+                                    "vsa_bind_unbind_similarity", 0.0
+                                ),
                             }
                         )
 
@@ -600,6 +628,9 @@ def run(args):
                             ),
                             "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
                                 "cross_class_bind_unbind_similarity", 0.0
+                            ),
+                            "vsa_bind_unbind_similarity": vsa_ops_res.get(
+                                "vsa_bind_unbind_similarity", 0.0
                             ),
                         }
                         logger.log_summary(summary_metrics)
