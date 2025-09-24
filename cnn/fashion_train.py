@@ -33,7 +33,7 @@ from utils.wandb_utils import (
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
-    test_bundle_capacity_class_analysis,
+    test_per_class_bundle_capacity,
 )
 
 
@@ -394,9 +394,9 @@ def main(args):
                         item_memory=item_memory,
                     )
 
-                    # class-aware bundle capacity analysis testing hypothesis about clifford vs random sampling
-                    print("running class-aware bundle capacity analysis...")
-                    class_analysis_res = test_bundle_capacity_class_analysis(
+                    # per-class bundle capacity analysis (1 from each of 10 classes)
+                    print("running per-class bundle capacity analysis...")
+                    class_analysis_res = test_per_class_bundle_capacity(
                         d=item_memory.shape[-1],
                         n_items=1000,
                         n_trials=20,
@@ -559,18 +559,10 @@ def main(args):
                             "bundle_capacity_plot"
                         ]
 
-                    # add class analysis plots
-                    class_analysis_plot = os.path.join(output_dir, "bundle_capacity_class_analysis.png")
-                    if os.path.exists(class_analysis_plot):
-                        images["bundle_capacity_class_analysis"] = class_analysis_plot
-
-                    diverse_plot = os.path.join(output_dir, "bundle_capacity_diverse_classes.png")
-                    if os.path.exists(diverse_plot):
-                        images["bundle_capacity_diverse_classes"] = diverse_plot
-
-                    similar_plot = os.path.join(output_dir, "bundle_capacity_similar_classes.png")
-                    if os.path.exists(similar_plot):
-                        images["bundle_capacity_similar_classes"] = similar_plot
+                    # add per-class analysis plot
+                    per_class_plot = os.path.join(output_dir, "per_class_bundle_analysis.png")
+                    if os.path.exists(per_class_plot):
+                        images["per_class_bundle_analysis"] = per_class_plot
                     if unbind_bundled_res_inv.get("unbind_bundled_plot"):
                         images["unbind_bundled_inv"] = unbind_bundled_res_inv[
                             "unbind_bundled_plot"

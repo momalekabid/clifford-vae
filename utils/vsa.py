@@ -264,10 +264,9 @@ def run_all_tests(
     return results
 
 
-def test_bundle_capacity_by_class(
+def test_per_class_bundle_capacity(
     d: int = 1024,
     n_items: int = 1000,
-    k_range: List[int] = None,
     n_trials: int = 20,
     normalize: bool = True,
     device: str = "cpu",
@@ -275,25 +274,15 @@ def test_bundle_capacity_by_class(
     save_dir: Optional[str] = None,
     item_memory: Optional[torch.Tensor] = None,
     labels: Optional[torch.Tensor] = None,
-    test_type: str = "diverse_classes",  # "diverse_classes" or "similar_classes"
 ) -> Dict:
     """
-    test bundle capacity with class-aware sampling
-    test_type:
-    - "diverse_classes": bundle one vector from each of k different classes
-    - "similar_classes": bundle k vectors from the same class
+    bundle 1 item from each of the 10 classes (10 total items)
+    then query that bundle against each class to see retrieval matrix
     """
-    if k_range is None:
-        if test_type == "diverse_classes":
-            k_range = list(range(2, 11))  # max 10 classes for mnist
-        else:
-            k_range = list(range(2, min(51, n_items // 2), 2))
-
     if item_memory is None:
         item_memory = hrr_init(n_items, d, device=device)
         if normalize:
             item_memory = normalize_vectors(item_memory)
-        # create fake labels for random vectors
         labels = torch.randint(0, 10, (n_items,), device=device)
     else:
         item_memory = item_memory[:n_items].to(device)
@@ -304,185 +293,84 @@ def test_bundle_capacity_by_class(
         else:
             labels = labels[:n_items].to(device)
 
-    results = {"k": [], "accuracy": [], "std": [], "similarity_matrices": []}
-    n_classes = len(torch.unique(labels))
+    unique_classes = torch.unique(labels).cpu().numpy()
+    if len(unique_classes) < 10:
+        print(f"warning: only {len(unique_classes)} classes found, need 10")
+        return {"retrieval_matrix": None, "class_names": []}
 
-    for k in k_range:
-        trial_accs = []
-        trial_sim_matrices = []
+    results = {"retrieval_matrices": [], "class_names": [f"class_{int(c)}" for c in unique_classes[:10]]}
 
-        for _ in range(n_trials):
-            if test_type == "diverse_classes":
-                # select one vector from each of k different classes
-                if k > n_classes:
-                    continue  # skip if k > number of available classes
+    # run multiple trials
+    for trial in range(n_trials):
+        # select one item from each of the first 10 classes
+        selected_indices = []
+        for class_id in unique_classes[:10]:
+            class_indices = torch.where(labels == class_id)[0]
+            if len(class_indices) == 0:
+                continue
+            # randomly select one item from this class
+            selected_idx = class_indices[torch.randint(0, len(class_indices), (1,))]
+            selected_indices.append(selected_idx.item())
 
-                unique_classes = torch.unique(labels)[:k]
-                selected_indices = []
-                for class_id in unique_classes:
-                    class_indices = torch.where(labels == class_id)[0]
-                    if len(class_indices) > 0:
-                        selected_idx = class_indices[torch.randint(0, len(class_indices), (1,))]
-                        selected_indices.append(selected_idx.item())
+        if len(selected_indices) < 10:
+            continue
 
-                if len(selected_indices) < k:
-                    continue
+        # bundle the 10 items (1 from each class)
+        selected_vectors = item_memory[selected_indices]
+        bundled = bundle(selected_vectors, normalize=True)
 
-                indices = torch.tensor(selected_indices, device=device)
-            else:  # similar_classes
-                # select k vectors from the same random class
-                unique_classes = torch.unique(labels)
-                class_id = unique_classes[torch.randint(0, len(unique_classes), (1,))]
-                class_indices = torch.where(labels == class_id)[0]
-                if len(class_indices) < k:
-                    continue
-                indices = class_indices[torch.randperm(len(class_indices))[:k]]
+        # compute similarity matrix: for each class, get top similarities
+        retrieval_matrix = np.zeros((10, 10))  # 10 classes x top 10 retrieved
 
-            selected = item_memory[indices]
-            bundled = bundle(selected, normalize=True)
+        for class_idx, class_id in enumerate(unique_classes[:10]):
+            class_indices = torch.where(labels == class_id)[0]
+            if len(class_indices) == 0:
+                continue
 
-            # compute similarity with all vectors
-            sims = similarity(bundled, item_memory)
+            # get similarities to all items in this class
+            class_vectors = item_memory[class_indices]
+            sims = similarity(bundled.unsqueeze(0), class_vectors)
 
-            # store similarity matrix for analysis
-            selected_sims = sims[indices].cpu().numpy()
-            trial_sim_matrices.append(selected_sims)
+            # get top 10 similarities (or all if fewer than 10)
+            top_k = min(10, len(class_indices))
+            top_sims, _ = torch.topk(sims, top_k)
 
-            # compute retrieval accuracy
-            top_k_sims, top_k_indices = torch.topk(sims, k)
-            correct = torch.isin(top_k_indices, indices).sum().item()
-            trial_accs.append(correct / k)
+            # fill in the retrieval matrix row for this class
+            retrieval_matrix[class_idx, :top_k] = top_sims.cpu().numpy()
 
-        if trial_accs:  # only add if we have valid trials
-            mean_acc = np.mean(trial_accs)
-            std_acc = np.std(trial_accs)
-            mean_sim_matrix = np.mean(trial_sim_matrices, axis=0) if trial_sim_matrices else None
+        results["retrieval_matrices"].append(retrieval_matrix)
 
-            results["k"].append(k)
-            results["accuracy"].append(mean_acc)
-            results["std"].append(std_acc)
-            results["similarity_matrices"].append(mean_sim_matrix)
+    # average across trials
+    if results["retrieval_matrices"]:
+        avg_retrieval_matrix = np.mean(results["retrieval_matrices"], axis=0)
+        results["avg_retrieval_matrix"] = avg_retrieval_matrix
 
-    if plot and results["k"]:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+        if plot and save_dir:
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
-        # plot accuracy
-        ax1.errorbar(
-            results["k"],
-            results["accuracy"],
-            yerr=results["std"],
-            marker="o",
-            capsize=3,
-            color="blue" if test_type == "diverse_classes" else "red",
-        )
-        ax1.set_xlabel("Number of bundled vectors (k)")
-        ax1.set_ylabel("Retrieval accuracy")
-        title = f"Bundle Capacity - {test_type.replace('_', ' ').title()} (d={d}, N={n_items})"
-        ax1.set_title(title)
-        ax1.grid(True, alpha=0.3)
-        ax1.set_ylim(0, 1.05)
+            # plot average retrieval matrix
+            im1 = ax1.imshow(avg_retrieval_matrix, cmap="viridis", aspect="auto")
+            ax1.set_title("average retrieval similarities\n(bundle of 1 from each class)")
+            ax1.set_xlabel("top-k retrieved items")
+            ax1.set_ylabel("query class")
+            ax1.set_yticks(range(10))
+            ax1.set_yticklabels([f"class {i}" for i in range(10)])
+            plt.colorbar(im1, ax=ax1)
 
-        # plot similarity matrix heatmap for largest k
-        if results["similarity_matrices"] and results["similarity_matrices"][-1] is not None:
-            sim_matrix = results["similarity_matrices"][-1]
-            im = ax2.imshow(sim_matrix.reshape(1, -1), cmap="viridis", aspect="auto")
-            ax2.set_title(f"Similarity to bundled vectors (k={results['k'][-1]})")
-            ax2.set_xlabel("Vector index in bundle")
-            ax2.set_ylabel("")
-            ax2.set_yticks([])
-            plt.colorbar(im, ax=ax2)
+            diagonal_sims = avg_retrieval_matrix[:, 0]  # top-1 similarity for each class
+            ax2.bar(range(10), diagonal_sims)
+            ax2.set_title("top-1 retrieval similarity per class")
+            ax2.set_xlabel("class")
+            ax2.set_ylabel("similarity")
+            ax2.set_xticks(range(10))
+            ax2.set_xticklabels([f"{i}" for i in range(10)])
+            ax2.grid(True, alpha=0.3)
 
-        plt.tight_layout()
-        if save_dir:
+            plt.tight_layout()
             import os
             os.makedirs(save_dir, exist_ok=True)
-            filename = f"bundle_capacity_{test_type}.png"
-            plt.savefig(os.path.join(save_dir, filename), dpi=200)
-        plt.close()
-
-    return results
-
-
-def test_bundle_capacity_class_analysis(
-    d: int = 1024,
-    n_items: int = 1000,
-    n_trials: int = 20,
-    normalize: bool = True,
-    device: str = "cpu",
-    plot: bool = False,
-    save_dir: Optional[str] = None,
-    item_memory: Optional[torch.Tensor] = None,
-    labels: Optional[torch.Tensor] = None,
-) -> Dict:
-    """
-    comprehensive analysis comparing diverse vs similar class bundling
-    and examining class distribution in bundles
-    """
-    results = {}
-
-    # test diverse classes (one from each class)
-    print("testing bundle capacity with diverse classes...")
-    results["diverse"] = test_bundle_capacity_by_class(
-        d=d, n_items=n_items, k_range=list(range(2, 11)), n_trials=n_trials,
-        normalize=normalize, device=device, plot=plot, save_dir=save_dir,
-        item_memory=item_memory, labels=labels, test_type="diverse_classes"
-    )
-
-    # test similar classes (all from same class)
-    print("testing bundle capacity with similar classes...")
-    results["similar"] = test_bundle_capacity_by_class(
-        d=d, n_items=n_items, k_range=list(range(2, 21, 2)), n_trials=n_trials,
-        normalize=normalize, device=device, plot=plot, save_dir=save_dir,
-        item_memory=item_memory, labels=labels, test_type="similar_classes"
-    )
-
-    # test regular bundle capacity for comparison
-    print("testing regular bundle capacity (random sampling)...")
-    results["random"] = test_bundle_capacity(
-        d=d, n_items=n_items, k_range=list(range(2, 21, 2)), n_trials=n_trials,
-        normalize=normalize, device=device, plot=plot, save_dir=save_dir,
-        item_memory=item_memory
-    )
-
-    # create comprehensive comparison plot
-    if plot:
-        plt.figure(figsize=(12, 8))
-
-        # plot all three curves
-        if results["diverse"]["k"]:
-            plt.errorbar(
-                results["diverse"]["k"], results["diverse"]["accuracy"],
-                yerr=results["diverse"]["std"], marker="o", capsize=3,
-                label="diverse classes (one per class)", color="blue"
-            )
-
-        if results["similar"]["k"]:
-            plt.errorbar(
-                results["similar"]["k"], results["similar"]["accuracy"],
-                yerr=results["similar"]["std"], marker="s", capsize=3,
-                label="similar classes (same class)", color="red"
-            )
-
-        if results["random"]["k"]:
-            plt.errorbar(
-                results["random"]["k"], results["random"]["accuracy"],
-                yerr=results["random"]["std"], marker="^", capsize=3,
-                label="random sampling", color="green"
-            )
-
-        plt.xlabel("number of bundled vectors (k)")
-        plt.ylabel("retrieval accuracy")
-        plt.title(f"bundle capacity analysis by class diversity (d={d}, n={n_items})")
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.ylim(0, 1.05)
-        plt.tight_layout()
-
-        if save_dir:
-            import os
-            os.makedirs(save_dir, exist_ok=True)
-            plt.savefig(os.path.join(save_dir, "bundle_capacity_class_analysis.png"), dpi=200)
-        plt.close()
+            plt.savefig(os.path.join(save_dir, "per_class_bundle_analysis.png"), dpi=200)
+            plt.close()
 
     return results
 
