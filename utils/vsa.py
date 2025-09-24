@@ -39,7 +39,7 @@ def unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "inv") -> torch.Tens
 def bundle(vectors: torch.Tensor, normalize: bool = True) -> torch.Tensor:
     s = torch.sum(vectors, dim=0)
     if normalize:
-        s = s / vectors.shape[0]  # divide by k not sqrt(k)
+        s = s / math.sqrt(vectors.shape[0])  # divide by sqrt(k)
     return s
 
 

@@ -19,18 +19,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.wandb_utils import (
     WandbLogger,
     test_self_binding,
-    test_cross_class_bind_unbind,
     compute_class_means,
     evaluate_mean_vector_cosine,
     plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
-    test_vsa_operations,
-)
-from utils.vsa import (
-    test_bundle_capacity as vsa_bundle_capacity,
-    test_binding_unbinding_pairs as vsa_binding_unbinding,
-    test_bundle_capacity_class_analysis,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss
 
@@ -363,34 +356,12 @@ def run(args):
                         test_dataset, list(range(min(1000, len(test_dataset))))
                     )
                     test_subset_loader = DataLoader(test_subset, batch_size=64)
-                    fourier_pseudo = test_self_binding(
+                    fourier_result = test_self_binding(
                         model,
                         test_subset_loader,
                         device,
                         f"visualizations/d_{mdim}/{dist}",
                         unbind_method="*",
-                    )
-                    fourier_deconv = test_self_binding(
-                        model,
-                        test_subset_loader,
-                        device,
-                        f"visualizations/d_{mdim}/{dist}",
-                        unbind_method="†",
-                    )
-
-                    cross_class_pseudo = test_cross_class_bind_unbind(
-                        model,
-                        test_subset_loader,
-                        device,
-                        f"visualizations/d_{mdim}/{dist}",
-                        unbind_method="*",
-                    )
-                    cross_class_deconv = test_cross_class_bind_unbind(
-                        model,
-                        test_subset_loader,
-                        device,
-                        f"visualizations/d_{mdim}/{dist}",
-                        unbind_method="†",
                     )
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
@@ -429,146 +400,8 @@ def run(args):
                                 "Latent PCA": pca_path,
                                 "Interpolations": interp_path,
                             }
-                            for tag, fr in {
-                                "*": fourier_pseudo,
-                                "†": fourier_deconv,
-                            }.items():
-                                if fr.get("fft_spectrum_plot_path"):
-                                    images_to_log[f"Fourier_Analysis_{tag}"] = fr[
-                                        "fft_spectrum_plot_path"
-                                    ]
-                                if fr.get("similarity_after_k_binds_plot_path"):
-                                    images_to_log[
-                                        f"Similarity_After_K_Binds_{tag}"
-                                    ] = fr["similarity_after_k_binds_plot_path"]
-
-                            normalize_vectors = True
-                            latents = []
-                            labels_list = []
-                            for x, y in test_eval_loader:
-                                z_mean, _ = model.encode(x.to(device).view(-1, 784))
-                                latents.append(z_mean.detach())
-                                labels_list.append(y)
-                                if len(torch.cat(latents, 0)) >= 1000:
-                                    break
-                            item_memory = torch.cat(latents, 0)[:1000]
-                            item_labels = torch.cat(labels_list, 0)[:1000].to(device)
-
-                            bundle_cap_raw = vsa_bundle_capacity(
-                                d=item_memory.shape[-1],
-                                n_items=1000,
-                                k_range=list(range(5, 51, 5)),
-                                n_trials=20,
-                                normalize=normalize_vectors,
-                                device=device,
-                                plot=True,
-                                save_dir=vis_dir,
-                                item_memory=item_memory,
-                            )
-                            bundle_cap_res = {
-                                "bundle_capacity_plot": os.path.join(
-                                    vis_dir, "bundle_capacity.png"
-                                ),
-                                "bundle_capacity_accuracies": {
-                                    k: acc
-                                    for k, acc in zip(
-                                        bundle_cap_raw["k"], bundle_cap_raw["accuracy"]
-                                    )
-                                },
-                            }
-
-                            # new class-aware bundle capacity analysis
-                            print("running class-aware bundle capacity analysis...")
-                            class_analysis_res = test_bundle_capacity_class_analysis(
-                                d=item_memory.shape[-1],
-                                n_items=1000,
-                                n_trials=20,
-                                normalize=normalize_vectors,
-                                device=device,
-                                plot=True,
-                                save_dir=vis_dir,
-                                item_memory=item_memory,
-                                labels=item_labels,
-                            )
-
-                            unbind_bundled_raw = vsa_binding_unbinding(
-                                d=item_memory.shape[-1],
-                                n_items=1000,
-                                k_range=list(range(5, 31, 5)),
-                                n_trials=20,
-                                normalize=normalize_vectors,
-                                device=device,
-                                plot=True,
-                                save_dir=vis_dir,
-                                item_memory=item_memory,
-                            )
-                            unbind_bundled_res = {
-                                "unbind_bundled_plot": os.path.join(
-                                    vis_dir, "unbind_bundled_pairs_inv.png"
-                                ),
-                                "unbind_bundled_accuracies": {
-                                    k: acc
-                                    for k, acc in zip(
-                                        unbind_bundled_raw["k"],
-                                        unbind_bundled_raw["accuracy"],
-                                    )
-                                },
-                            }
-
-                            # additional vsa operations test
-                            vsa_ops_res = test_vsa_operations(
-                                model,
-                                test_eval_loader,
-                                device,
-                                vis_dir,
-                                n_test_pairs=50,
-                                unbind_method="inv",
-                                unitary_keys=False,
-                                normalize_vectors=normalize_vectors,
-                                project_vectors=False,
-                            )
-                            if bundle_cap_res.get("bundle_capacity_plot"):
-                                images_to_log["Bundle_Capacity"] = bundle_cap_res[
-                                    "bundle_capacity_plot"
-                                ]
-
-                            # add class analysis plots
-                            class_analysis_plot = os.path.join(vis_dir, "bundle_capacity_class_analysis.png")
-                            if os.path.exists(class_analysis_plot):
-                                images_to_log["Bundle_Capacity_Class_Analysis"] = class_analysis_plot
-
-                            diverse_plot = os.path.join(vis_dir, "bundle_capacity_diverse_classes.png")
-                            if os.path.exists(diverse_plot):
-                                images_to_log["Bundle_Capacity_Diverse_Classes"] = diverse_plot
-
-                            similar_plot = os.path.join(vis_dir, "bundle_capacity_similar_classes.png")
-                            if os.path.exists(similar_plot):
-                                images_to_log["Bundle_Capacity_Similar_Classes"] = similar_plot
-                            if unbind_bundled_res.get("unbind_bundled_plot"):
-                                images_to_log[
-                                    "Unbind_Bundled_Pairs"
-                                ] = unbind_bundled_res["unbind_bundled_plot"]
-                            if vsa_ops_res.get("vsa_bind_unbind_plot"):
-                                images_to_log[
-                                    "VSA_Bind_Unbind_Operations"
-                                ] = vsa_ops_res["vsa_bind_unbind_plot"]
-
-                            if cross_class_pseudo.get(
-                                "cross_class_bind_unbind_plot_path"
-                            ):
-                                images_to_log[
-                                    "Cross_Class_Binding_Pseudo"
-                                ] = cross_class_pseudo[
-                                    "cross_class_bind_unbind_plot_path"
-                                ]
-                            if cross_class_deconv.get(
-                                "cross_class_bind_unbind_plot_path"
-                            ):
-                                images_to_log[
-                                    "Cross_Class_Binding_Deconv"
-                                ] = cross_class_deconv[
-                                    "cross_class_bind_unbind_plot_path"
-                                ]
+                            if fourier_result.get("similarity_after_k_binds_plot_path"):
+                                images_to_log["Similarity_After_K_Binds"] = fourier_result["similarity_after_k_binds_plot_path"]
 
                             # manifold-specific visualizations
                             if dist == "clifford" and mdim >= 2:
@@ -600,21 +433,10 @@ def run(args):
                             k: v for k, v in knn_results.items()
                             if k.startswith("knn_")
                         }
-                        fourier_metrics = {}
-                        fourier_metrics.update(
-                            {
-                                f"pseudo/{k}": v
-                                for k, v in fourier_pseudo.items()
-                                if isinstance(v, (int, float, bool))
-                            }
-                        )
-                        fourier_metrics.update(
-                            {
-                                f"deconv/{k}": v
-                                for k, v in fourier_deconv.items()
-                                if isinstance(v, (int, float, bool))
-                            }
-                        )
+                        fourier_metrics = {
+                            k: v for k, v in fourier_result.items()
+                            if isinstance(v, (int, float, bool))
+                        }
 
                         train_subset = torch.utils.data.Subset(
                             train_dataset, list(range(min(5000, len(train_dataset))))
@@ -633,15 +455,6 @@ def run(args):
                                 **fourier_metrics,
                                 "mean_vector_cosine_acc": float(mean_vector_acc),
                                 "final_val_loss": best_val_loss,
-                                "cross_class_bind_unbind_similarity_pseudo": cross_class_pseudo.get(
-                                    "cross_class_bind_unbind_similarity", 0.0
-                                ),
-                                "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
-                                    "cross_class_bind_unbind_similarity", 0.0
-                                ),
-                                "vsa_bind_unbind_similarity": vsa_ops_res.get(
-                                    "vsa_bind_unbind_similarity", 0.0
-                                ),
                             }
                         )
 
@@ -650,15 +463,6 @@ def run(args):
                             "final_val_loss": best_val_loss,
                             **fourier_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
-                            "cross_class_bind_unbind_similarity_pseudo": cross_class_pseudo.get(
-                                "cross_class_bind_unbind_similarity", 0.0
-                            ),
-                            "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
-                                "cross_class_bind_unbind_similarity", 0.0
-                            ),
-                            "vsa_bind_unbind_similarity": vsa_ops_res.get(
-                                "vsa_bind_unbind_similarity", 0.0
-                            ),
                         }
                         logger.log_summary(summary_metrics)
                         logger.finish_run()
