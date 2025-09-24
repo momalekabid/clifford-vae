@@ -33,6 +33,7 @@ from utils.wandb_utils import (
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
+    test_bundle_capacity_class_analysis,
 )
 
 
@@ -370,13 +371,16 @@ def main(args):
                     normalize_vectors = True
 
                     latents = []
-                    for x, _ in test_loader:
+                    labels_list = []
+                    for x, y in test_loader:
                         x = x.to(DEVICE)
                         _, _, _, mu = model(x)
                         latents.append(mu.detach())
+                        labels_list.append(y)
                         if len(torch.cat(latents, 0)) >= 1000:
                             break
                     item_memory = torch.cat(latents, 0)[:1000]
+                    item_labels = torch.cat(labels_list, 0)[:1000].to(DEVICE)
 
                     bundle_cap_raw = vsa_bundle_capacity(
                         d=item_memory.shape[-1],
@@ -388,6 +392,20 @@ def main(args):
                         plot=True,
                         save_dir=output_dir,
                         item_memory=item_memory,
+                    )
+
+                    # class-aware bundle capacity analysis testing hypothesis about clifford vs random sampling
+                    print("running class-aware bundle capacity analysis...")
+                    class_analysis_res = test_bundle_capacity_class_analysis(
+                        d=item_memory.shape[-1],
+                        n_items=1000,
+                        n_trials=20,
+                        normalize=normalize_vectors,
+                        device=DEVICE,
+                        plot=True,
+                        save_dir=output_dir,
+                        item_memory=item_memory,
+                        labels=item_labels,
                     )
 
                     # # baseline test for bundle capacity (random Gaussi)
@@ -540,6 +558,19 @@ def main(args):
                         images["bundle_capacity"] = bundle_cap_res[
                             "bundle_capacity_plot"
                         ]
+
+                    # add class analysis plots
+                    class_analysis_plot = os.path.join(output_dir, "bundle_capacity_class_analysis.png")
+                    if os.path.exists(class_analysis_plot):
+                        images["bundle_capacity_class_analysis"] = class_analysis_plot
+
+                    diverse_plot = os.path.join(output_dir, "bundle_capacity_diverse_classes.png")
+                    if os.path.exists(diverse_plot):
+                        images["bundle_capacity_diverse_classes"] = diverse_plot
+
+                    similar_plot = os.path.join(output_dir, "bundle_capacity_similar_classes.png")
+                    if os.path.exists(similar_plot):
+                        images["bundle_capacity_similar_classes"] = similar_plot
                     if unbind_bundled_res_inv.get("unbind_bundled_plot"):
                         images["unbind_bundled_inv"] = unbind_bundled_res_inv[
                             "unbind_bundled_plot"
