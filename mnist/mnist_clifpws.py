@@ -33,14 +33,22 @@ class BinarizeWithRandomThreshold:
         return (x > torch.rand_like(x)).float()
 
 
-def encode_dataset(model, loader, device):
+def encode_dataset(model, loader, device, max_samples=None):
     model.eval()
     zs, ys = [], []
+    total_samples = 0
     with torch.no_grad():
         for x, y in loader:
+            if max_samples and total_samples >= max_samples:
+                break
             z_mean, _ = model.encode(x.to(device).view(-1, 784))
             zs.append(z_mean.cpu())
             ys.append(y)
+            total_samples += len(x)
+
+            # limit batch accumulation
+            if len(zs) > 20:
+                break
     return torch.cat(zs, 0).numpy(), torch.cat(ys, 0).numpy()
 
 
@@ -87,10 +95,15 @@ def plot_reconstructions(model, loader, device, filepath):
 
         plt.figure(figsize=(10, 3))
         plt.imshow(grid.permute(1, 2, 0))
-        plt.title("Top: Original Images | Bottom: Reconstructed Images")
+        plt.title("top: original images | bottom: reconstructed images")
         plt.axis("off")
-        plt.savefig(filepath, dpi=300, bbox_inches="tight")
+        plt.savefig(filepath, dpi=150, bbox_inches="tight")
         plt.close()
+
+        # cleanup
+        del originals, recons, comparison, grid
+        import gc
+        gc.collect()
     return filepath
 
 
@@ -140,56 +153,56 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
         grid = tu.make_grid(x_recon_interp, nrow=steps, pad_value=0.5)
         plt.figure(figsize=(12, 2))
         plt.imshow(grid.cpu().permute(1, 2, 0))
-        plt.title(f"Latent Space Interpolation ({model.distribution.upper()})")
+        plt.title(f"latent space interpolation ({model.distribution.upper()})")
         plt.axis("off")
-        plt.savefig(filepath, dpi=300, bbox_inches="tight")
+        plt.savefig(filepath, dpi=150, bbox_inches="tight")
         plt.close()
+
+        # cleanup
+        del interp_z, x_recon_interp, grid
+        import gc
+        gc.collect()
     return filepath
 
 
-def plot_latent_space(model, loader, device, filepath, n_plot=2000):
-    print(f"Generating t-SNE plot grid for {n_plot} points...")
+def plot_latent_space(model, loader, device, filepath, n_plot=1000):
+    print(f"generating t-sne plot for {n_plot} points...")
     X_z, y = encode_dataset(model, loader, device)
 
+    # reduce memory usage
     X_z, y = X_z[:n_plot], y[:n_plot]
 
-    perplexities = [5, 15, 30, 50, 100]
-    n_perplexities = len(perplexities)
+    # use single perplexity to avoid memory issues
+    perplexity = 30
+    print(f"running t-sne with perplexity={perplexity}...")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity, max_iter=500)
+    z_tsne = tsne.fit_transform(X_z)
 
-    fig, axes = plt.subplots(1, n_perplexities, figsize=(n_perplexities * 5, 5))
-    if n_perplexities == 1:
-        axes = [axes]
-
-    for i, p in enumerate(perplexities):
-        ax = axes[i]
-        print(f"Running t-SNE with perplexity={p}...")
-        tsne = TSNE(n_components=2, random_state=42, perplexity=p, max_iter=1000)
-        z_tsne = tsne.fit_transform(X_z)
-
-        ax.scatter(
-            z_tsne[:, 0],
-            z_tsne[:, 1],
-            c=y,
-            cmap=plt.get_cmap("tab10", 10),
-            s=10,
-            alpha=0.8,
-        )
-        ax.set_title(f"Perplexity: {p}")
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-    fig.suptitle(
-        f"t-SNE of Latent Space (μ) for {model.distribution.upper()}-VAE", fontsize=16
+    plt.figure(figsize=(8, 6))
+    plt.scatter(
+        z_tsne[:, 0],
+        z_tsne[:, 1],
+        c=y,
+        cmap=plt.get_cmap("tab10", 10),
+        s=10,
+        alpha=0.8,
     )
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.title(f"t-sne latent space for {model.distribution.upper()}-vae")
+    plt.xticks([])
+    plt.yticks([])
+    plt.savefig(filepath, dpi=150, bbox_inches="tight")
     plt.close()
+
+    # explicit cleanup
+    del X_z, y, z_tsne
+    import gc
+    gc.collect()
 
     return filepath
 
 
-def plot_pca_analysis(model, loader, device, filepath, n_plot=2000):
-    """PCA analysis: scatter + explained variance."""
+def plot_pca_analysis(model, loader, device, filepath, n_plot=1000):
+    """pca analysis: scatter + explained variance."""
     print(f"pca analysis for {n_plot} points...")
     X_z, y = encode_dataset(model, loader, device)
     X_z, y = X_z[:n_plot], y[:n_plot]
@@ -216,8 +229,14 @@ def plot_pca_analysis(model, loader, device, filepath, n_plot=2000):
     )
 
     plt.tight_layout()
-    plt.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.savefig(filepath, dpi=150, bbox_inches="tight")
     plt.close()
+
+    # explicit cleanup
+    del X_z, y, Z_pca
+    import gc
+    gc.collect()
+
     return filepath
 
 
@@ -246,8 +265,8 @@ def run(args):
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size)
 
-    train_eval_loader = DataLoader(train_dataset, batch_size=1024)
-    test_eval_loader = DataLoader(test_dataset, batch_size=1024)
+    train_eval_loader = DataLoader(train_dataset, batch_size=512, num_workers=0)
+    test_eval_loader = DataLoader(test_dataset, batch_size=512, num_workers=0)
 
     final_results = []
     distributions_to_test = ["normal", "powerspherical", "clifford"]
@@ -295,12 +314,9 @@ def run(args):
 
                 for epoch in range(args.epochs):
                     model.train()
-                    if args.default_beta is not None:
-                        beta = args.default_beta
-                    else:
-                        beta = min(
-                            1.0, (epoch + 1) / max(1, args.warmup_epochs)
-                        )  # kl annealing
+                    beta = min(
+                        1.0, (epoch + 1) / max(1, args.warmup_epochs)
+                    )  # kl annealing
                     total_train_loss = 0
                     for x_mb, _ in train_loader:
                         optimizer.zero_grad()
@@ -469,6 +485,12 @@ def run(args):
 
                     os.remove(model_path)
 
+                    # explicit memory cleanup
+                    del model, optimizer
+                    import gc
+                    gc.collect()
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
         row_data = {"d": mdim}
         for dist in distributions_to_test:
             if not any(agg_results[dist].values()):
@@ -541,12 +563,6 @@ if __name__ == "__main__":
         type=str,
         default="mnist-experiments-sep-2025",
         help="W&B project name",
-    )
-    parser.add_argument(
-        "--default_beta",
-        type=float,
-        default=None,
-        help="Use fixed beta instead of annealing",
     )
 
     args = parser.parse_args()
