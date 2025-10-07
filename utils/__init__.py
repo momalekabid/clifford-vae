@@ -12,10 +12,12 @@ from .wandb_utils import (
     test_self_binding,
     compute_class_means,
     evaluate_mean_vector_cosine,
-    vsa_bind,
-    vsa_unbind,
-    vsa_invert,
     test_vsa_operations,
+)
+from .vsa import (
+    bind as vsa_bind,
+    unbind as vsa_unbind,
+    invert as vsa_invert,
 )
 
 

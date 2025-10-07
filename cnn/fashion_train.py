@@ -13,9 +13,7 @@ from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 from collections import defaultdict
 
-
 import sys
-import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -33,7 +31,8 @@ from utils.wandb_utils import (
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
-    test_per_class_bundle_capacity,
+    test_per_class_bundle_capacity_two_items,
+    test_binding_unbinding_with_self_binding,
 )
 
 
@@ -71,18 +70,18 @@ def train_epoch(model, loader, optimizer, device, beta):
 
     if concentration_stats and hasattr(model, "distribution"):
         all_concentrations = torch.cat(concentration_stats, dim=0)
-        result[
-            f"train/{model.distribution}_concentration_mean"
-        ] = all_concentrations.mean().item()
-        result[
-            f"train/{model.distribution}_concentration_std"
-        ] = all_concentrations.std().item()
-        result[
-            f"train/{model.distribution}_concentration_max"
-        ] = all_concentrations.max().item()
-        result[
-            f"train/{model.distribution}_concentration_min"
-        ] = all_concentrations.min().item()
+        result[f"train/{model.distribution}_concentration_mean"] = (
+            all_concentrations.mean().item()
+        )
+        result[f"train/{model.distribution}_concentration_std"] = (
+            all_concentrations.std().item()
+        )
+        result[f"train/{model.distribution}_concentration_max"] = (
+            all_concentrations.max().item()
+        )
+        result[f"train/{model.distribution}_concentration_min"] = (
+            all_concentrations.min().item()
+        )
 
     return result
 
@@ -111,18 +110,18 @@ def test_epoch(model, loader, device):
 
     if concentration_stats and hasattr(model, "distribution"):
         all_concentrations = torch.cat(concentration_stats, dim=0)
-        result[
-            f"test/{model.distribution}_concentration_mean"
-        ] = all_concentrations.mean().item()
-        result[
-            f"test/{model.distribution}_concentration_std"
-        ] = all_concentrations.std().item()
-        result[
-            f"test/{model.distribution}_concentration_max"
-        ] = all_concentrations.max().item()
-        result[
-            f"test/{model.distribution}_concentration_min"
-        ] = all_concentrations.min().item()
+        result[f"test/{model.distribution}_concentration_mean"] = (
+            all_concentrations.mean().item()
+        )
+        result[f"test/{model.distribution}_concentration_std"] = (
+            all_concentrations.std().item()
+        )
+        result[f"test/{model.distribution}_concentration_max"] = (
+            all_concentrations.max().item()
+        )
+        result[f"test/{model.distribution}_concentration_min"] = (
+            all_concentrations.min().item()
+        )
 
     return result
 
@@ -247,7 +246,7 @@ def main(args):
     print(f"Device: {DEVICE}")
     logger = WandbLogger(args)
 
-    latent_dims = [2, 4, 256, 1024, 2048, 4096]
+    latent_dims = [2, 4, 128, 512, 1024, 2048, 4096]
     distributions = ["clifford", "gaussian", "powerspherical"]
     datasets_to_test = ["fashionmnist", "cifar10"]
     dataset_map = {"fashionmnist": datasets.FashionMNIST, "cifar10": datasets.CIFAR10}
@@ -295,7 +294,7 @@ def main(args):
                     device=DEVICE,
                     recon_loss_type=args.recon_loss,
                     l1_weight=args.l1_weight,
-                    freq_weight=args.freq_weight,
+                    freq_weight=0.0,
                 )
                 logger.watch_model(model)
                 optimizer = optim.AdamW(model.parameters(), lr=args.lr)
@@ -382,6 +381,104 @@ def main(args):
                     item_memory = torch.cat(latents, 0)[:1000]
                     item_labels = torch.cat(labels_list, 0)[:1000].to(DEVICE)
 
+                    # === baseline: random gaussian (hrr_init) ===
+                    print("running baseline hrr_init tests...")
+                    baseline_dir = os.path.join(output_dir, "baseline_gaussian")
+                    os.makedirs(baseline_dir, exist_ok=True)
+
+                    # baseline bundle capacity (no braiding)
+                    baseline_bundle = vsa_bundle_capacity(
+                        d=item_memory.shape[-1],
+                        n_items=1000,
+                        k_range=list(range(5, 51, 5)),
+                        n_trials=20,
+                        normalize=normalize_vectors,
+                        device=DEVICE,
+                        plot=True,
+                        save_dir=baseline_dir,
+                        item_memory=None,  # random gaussian
+                        use_braiding=False,
+                    )
+
+                    # baseline bundle capacity (with braiding)
+                    baseline_bundle_braid = vsa_bundle_capacity(
+                        d=item_memory.shape[-1],
+                        n_items=1000,
+                        k_range=list(range(5, 51, 5)),
+                        n_trials=20,
+                        normalize=normalize_vectors,
+                        device=DEVICE,
+                        plot=True,
+                        save_dir=os.path.join(baseline_dir, "braided"),
+                        item_memory=None,  # random gaussian
+                        use_braiding=True,
+                    )
+
+                    # === test 1: 2-items-per-class similarity matrix (no braiding) ===
+                    print(
+                        f"running 2-items-per-class test ({dist_name}, no braiding)..."
+                    )
+                    two_per_class_res = test_per_class_bundle_capacity_two_items(
+                        d=item_memory.shape[-1],
+                        n_items=1000,
+                        n_classes=10,
+                        items_per_class=2,
+                        n_trials=20,
+                        normalize=normalize_vectors,
+                        device=DEVICE,
+                        plot=True,
+                        save_dir=output_dir,
+                        item_memory=item_memory,
+                        labels=item_labels,
+                        use_braiding=False,
+                    )
+
+                    # test 1b: 2-items-per-class similarity matrix (with random braiding)
+                    print(
+                        f"running 2-items-per-class test ({dist_name}, WITH random braiding)..."
+                    )
+                    two_per_class_res_braid = test_per_class_bundle_capacity_two_items(
+                        d=item_memory.shape[-1],
+                        n_items=1000,
+                        n_classes=10,
+                        items_per_class=2,
+                        n_trials=20,
+                        normalize=normalize_vectors,
+                        device=DEVICE,
+                        plot=True,
+                        save_dir=os.path.join(output_dir, "braided"),
+                        item_memory=item_memory.clone(),
+                        labels=item_labels,
+                        use_braiding=True,
+                        per_class_braid=False,
+                    )
+
+                    # test 1c: 2-items-per-class similarity matrix (with per-class braiding)
+                    print(
+                        f"running 2-items-per-class test ({dist_name}, WITH per-class braiding)..."
+                    )
+                    two_per_class_res_per_class = (
+                        test_per_class_bundle_capacity_two_items(
+                            d=item_memory.shape[-1],
+                            n_items=1000,
+                            n_classes=10,
+                            items_per_class=2,
+                            n_trials=20,
+                            normalize=normalize_vectors,
+                            device=DEVICE,
+                            plot=True,
+                            save_dir=os.path.join(output_dir, "per_class_braid"),
+                            item_memory=item_memory.clone(),
+                            labels=item_labels,
+                            use_braiding=True,
+                            per_class_braid=True,
+                        )
+                    )
+
+                    # === test 2: classical bundle capacity (no braiding) ===
+                    print(
+                        f"running classical bundle capacity ({dist_name}, no braiding)..."
+                    )
                     bundle_cap_raw = vsa_bundle_capacity(
                         d=item_memory.shape[-1],
                         n_items=1000,
@@ -392,36 +489,25 @@ def main(args):
                         plot=True,
                         save_dir=output_dir,
                         item_memory=item_memory,
+                        use_braiding=False,
                     )
 
-                    # per-class bundle capacity analysis (1 from each of 10 classes)
-                    print("running per-class bundle capacity analysis...")
-                    class_analysis_res = test_per_class_bundle_capacity(
+                    # test 2b: classical bundle capacity (with braiding)
+                    print(
+                        f"running classical bundle capacity ({dist_name}, WITH braiding)..."
+                    )
+                    bundle_cap_raw_braid = vsa_bundle_capacity(
                         d=item_memory.shape[-1],
                         n_items=1000,
+                        k_range=list(range(5, 51, 5)),
                         n_trials=20,
                         normalize=normalize_vectors,
                         device=DEVICE,
                         plot=True,
-                        save_dir=output_dir,
-                        item_memory=item_memory,
-                        labels=item_labels,
+                        save_dir=os.path.join(output_dir, "braided"),
+                        item_memory=item_memory.clone(),
+                        use_braiding=True,
                     )
-
-                    # # baseline test for bundle capacity (random Gaussi)
-                    baseline_dir = os.path.join(output_dir, "baseline")
-                    os.makedirs(baseline_dir, exist_ok=True)
-                    # bundle_cap_baseline = vsa_bundle_capacity(
-                    #     d=item_memory.shape[-1],
-                    #     n_items=1000,
-                    #     k_range=list(range(5, 51, 5)),
-                    #     n_trials=20,
-                    #     normalize=normalize_vectors,
-                    #     device=DEVICE,
-                    #     plot=True,
-                    #     save_dir=baseline_dir,
-                    #     item_memory=None,
-                    # )
                     bundle_cap_res = {
                         "bundle_capacity_plot": os.path.join(
                             output_dir, "bundle_capacity.png"
@@ -434,6 +520,10 @@ def main(args):
                         },
                     }
 
+                    # === test 3: bind-bundle-unbind (no braiding) ===
+                    print(
+                        f"running bind-bundle-unbind test ({dist_name}, no braiding)..."
+                    )
                     unbind_bundled_raw = vsa_binding_unbinding(
                         d=item_memory.shape[-1],
                         n_items=1000,
@@ -444,19 +534,8 @@ def main(args):
                         plot=True,
                         save_dir=output_dir,
                         item_memory=item_memory,
+                        use_braiding=False,
                     )
-
-                    # unbind_bundled_baseline = vsa_binding_unbinding(
-                    #     d=item_memory.shape[-1],
-                    #     n_items=1000,
-                    #     k_range=list(range(5, 31, 5)),
-                    #     n_trials=20,
-                    #     normalize=normalize_vectors,
-                    #     device=DEVICE,
-                    #     plot=True,
-                    #     save_dir=baseline_dir,
-                    #     item_memory=None,
-                    # )
                     unbind_bundled_res_inv = {
                         "unbind_bundled_plot": os.path.join(
                             output_dir, "unbind_bundled_pairs_inv.png"
@@ -469,6 +548,71 @@ def main(args):
                         },
                     }
 
+                    # === test 3b: bind-bundle-unbind (WITH braiding) ===
+                    print(
+                        f"running bind-bundle-unbind test ({dist_name}, WITH braiding)..."
+                    )
+                    unbind_bundled_raw_braid = vsa_binding_unbinding(
+                        d=item_memory.shape[-1],
+                        n_items=1000,
+                        k_range=list(range(5, 31, 5)),
+                        n_trials=20,
+                        normalize=normalize_vectors,
+                        device=DEVICE,
+                        plot=True,
+                        save_dir=os.path.join(output_dir, "braided"),
+                        item_memory=item_memory.clone(),
+                        use_braiding=True,
+                    )
+                    unbind_bundled_res_inv_braid = {
+                        "unbind_bundled_plot_braid": os.path.join(
+                            output_dir,
+                            "braided",
+                            "unbind_bundled_pairs_inv_braided.png",
+                        ),
+                        "unbind_bundled_accuracies_braid": {
+                            k: acc
+                            for k, acc in zip(
+                                unbind_bundled_raw_braid["k"],
+                                unbind_bundled_raw_braid["accuracy"],
+                            )
+                        },
+                    }
+
+                    # === test 4: self-binding patterns (no braiding) ===
+                    print(
+                        f"running self-binding patterns test ({dist_name}, no braiding)..."
+                    )
+                    self_binding_raw = test_binding_unbinding_with_self_binding(
+                        d=item_memory.shape[-1],
+                        n_items=1000,
+                        k_range=list(range(2, 31, 2)),
+                        n_trials=20,
+                        normalize=normalize_vectors,
+                        device=DEVICE,
+                        plot=True,
+                        save_dir=output_dir,
+                        item_memory=item_memory,
+                        use_braiding=False,
+                    )
+
+                    # === test 4b: self-binding patterns (braiding) ===
+                    print(
+                        f"running self-binding patterns test ({dist_name}, WITH braiding)..."
+                    )
+                    self_binding_raw_braid = test_binding_unbinding_with_self_binding(
+                        d=item_memory.shape[-1],
+                        n_items=1000,
+                        k_range=list(range(2, 31, 2)),
+                        n_trials=20,
+                        normalize=normalize_vectors,
+                        device=DEVICE,
+                        plot=True,
+                        save_dir=os.path.join(output_dir, "braided"),
+                        item_memory=item_memory.clone(),
+                        use_braiding=True,
+                    )
+
                     fourier_star = test_self_binding(
                         model, test_loader, DEVICE, output_dir, unbind_method="*"
                     )
@@ -477,10 +621,18 @@ def main(args):
                     )
 
                     cross_class_star = test_cross_class_bind_unbind(
-                        model, test_loader, DEVICE, output_dir, unbind_method="*"
+                        model,
+                        test_loader,
+                        DEVICE,
+                        output_dir,
+                        unbind_method="*",  # O(d), only shifting
                     )
                     cross_class_perp = test_cross_class_bind_unbind(
-                        model, test_loader, DEVICE, output_dir, unbind_method="†"
+                        model,
+                        test_loader,
+                        DEVICE,
+                        output_dir,
+                        unbind_method="†",  # this is O(dlogd)
                     )
 
                     # reconstructions
@@ -534,10 +686,86 @@ def main(args):
                         }
                     )
 
+                    # compute braiding metrics
+                    braiding_metrics = {}
+
+                    # baseline (random gaussian) metrics
+                    if baseline_bundle and baseline_bundle_braid:
+                        baseline_acc_no_braid = baseline_bundle["accuracy"]
+                        baseline_acc_braid = baseline_bundle_braid["accuracy"]
+                        for k_val, acc_no, acc_yes in zip(
+                            baseline_bundle["k"],
+                            baseline_acc_no_braid,
+                            baseline_acc_braid,
+                        ):
+                            braiding_metrics[
+                                f"baseline_gaussian/bundle_acc_k{k_val}_no_braid"
+                            ] = acc_no
+                            braiding_metrics[
+                                f"baseline_gaussian/bundle_acc_k{k_val}_braid"
+                            ] = acc_yes
+                            braiding_metrics[
+                                f"baseline_gaussian/bundle_acc_k{k_val}_braid_delta"
+                            ] = (acc_yes - acc_no)
+
+                    # model latents metrics (no braiding vs braiding)
+                    if bundle_cap_raw and bundle_cap_raw_braid:
+                        for k_val, acc_no, acc_yes in zip(
+                            bundle_cap_raw["k"],
+                            bundle_cap_raw["accuracy"],
+                            bundle_cap_raw_braid["accuracy"],
+                        ):
+                            braiding_metrics[
+                                f"{dist_name}/bundle_acc_k{k_val}_no_braid"
+                            ] = acc_no
+                            braiding_metrics[
+                                f"{dist_name}/bundle_acc_k{k_val}_braid"
+                            ] = acc_yes
+                            braiding_metrics[
+                                f"{dist_name}/bundle_acc_k{k_val}_braid_delta"
+                            ] = (acc_yes - acc_no)
+
+                    # bind-bundle-unbind (no braiding vs braiding)
+                    if unbind_bundled_raw and unbind_bundled_raw_braid:
+                        for k_val, acc_no, acc_yes in zip(
+                            unbind_bundled_raw["k"],
+                            unbind_bundled_raw["accuracy"],
+                            unbind_bundled_raw_braid["accuracy"],
+                        ):
+                            braiding_metrics[
+                                f"{dist_name}/unbind_bundled_acc_k{k_val}_no_braid"
+                            ] = acc_no
+                            braiding_metrics[
+                                f"{dist_name}/unbind_bundled_acc_k{k_val}_braid"
+                            ] = acc_yes
+                            braiding_metrics[
+                                f"{dist_name}/unbind_bundled_acc_k{k_val}_braid_delta"
+                            ] = (acc_yes - acc_no)
+
+                    # self-binding patterns (no braiding vs braiding)
+                    if self_binding_raw and self_binding_raw_braid:
+                        for k_val in self_binding_raw["k"]:
+                            idx = self_binding_raw["k"].index(k_val)
+                            for pattern in ["self_filler", "self_role", "circular"]:
+                                acc_no = self_binding_raw[f"accuracy_{pattern}"][idx]
+                                acc_yes = self_binding_raw_braid[f"accuracy_{pattern}"][
+                                    idx
+                                ]
+                                braiding_metrics[
+                                    f"{dist_name}/self_binding_{pattern}_acc_k{k_val}_no_braid"
+                                ] = acc_no
+                                braiding_metrics[
+                                    f"{dist_name}/self_binding_{pattern}_acc_k{k_val}_braid"
+                                ] = acc_yes
+                                braiding_metrics[
+                                    f"{dist_name}/self_binding_{pattern}_acc_k{k_val}_braid_delta"
+                                ] = (acc_yes - acc_no)
+
                     logger.log_metrics(
                         {
                             **knn_metrics,
                             **fourier_metrics,
+                            **braiding_metrics,
                             mean_metric_key: float(mean_vector_acc),
                             "final_best_loss": best,
                             "cross_class_bind_unbind_similarity_star": cross_class_star.get(
@@ -559,25 +787,78 @@ def main(args):
                             "bundle_capacity_plot"
                         ]
 
-                    # add per-class analysis plot
-                    per_class_plot = os.path.join(output_dir, "per_class_bundle_analysis.png")
-                    if os.path.exists(per_class_plot):
-                        images["per_class_bundle_analysis"] = per_class_plot
+                    # add braided bundle capacity plots
+                    bundle_braid_plot = os.path.join(
+                        output_dir, "braided", "bundle_capacity.png"
+                    )
+                    if os.path.exists(bundle_braid_plot):
+                        images["bundle_capacity_BRAIDED"] = bundle_braid_plot
+
+                    # add baseline gaussian plots
+                    baseline_plot = os.path.join(baseline_dir, "bundle_capacity.png")
+                    if os.path.exists(baseline_plot):
+                        images["baseline_gaussian_bundle_capacity"] = baseline_plot
+
+                    baseline_braid_plot = os.path.join(
+                        baseline_dir, "braided", "bundle_capacity.png"
+                    )
+                    if os.path.exists(baseline_braid_plot):
+                        images["baseline_gaussian_bundle_capacity_BRAIDED"] = (
+                            baseline_braid_plot
+                        )
+
+                    two_per_class_plot = os.path.join(
+                        output_dir, "bundle_two_per_class_similarity.png"
+                    )
+                    if os.path.exists(two_per_class_plot):
+                        images["bundle_two_per_class_similarity"] = two_per_class_plot
+
+                    # add braided similarity matrix (random)
+                    two_per_class_braid_plot = os.path.join(
+                        output_dir,
+                        "braided",
+                        "bundle_two_per_class_similarity_braid.png",
+                    )
+                    if os.path.exists(two_per_class_braid_plot):
+                        images["bundle_two_per_class_similarity_RANDOM_BRAID"] = (
+                            two_per_class_braid_plot
+                        )
+
+                    # add per-class braided similarity matrix
+                    two_per_class_per_class_plot = os.path.join(
+                        output_dir,
+                        "per_class_braid",
+                        "bundle_two_per_class_similarity_per_class_braid.png",
+                    )
+                    if os.path.exists(two_per_class_per_class_plot):
+                        images["bundle_two_per_class_similarity_PER_CLASS_BRAID"] = (
+                            two_per_class_per_class_plot
+                        )
                     if unbind_bundled_res_inv.get("unbind_bundled_plot"):
                         images["unbind_bundled_inv"] = unbind_bundled_res_inv[
                             "unbind_bundled_plot"
                         ]
 
-                    baseline_bundle_plot = os.path.join(
-                        baseline_dir, "bundle_capacity.png"
+                    # add braided unbind_bundled plot
+                    if unbind_bundled_res_inv_braid.get("unbind_bundled_plot_braid"):
+                        images["unbind_bundled_inv_BRAIDED"] = (
+                            unbind_bundled_res_inv_braid["unbind_bundled_plot_braid"]
+                        )
+
+                    # add self-binding patterns plots
+                    self_binding_plot = os.path.join(
+                        output_dir, "self_binding_patterns_inv.png"
                     )
-                    baseline_unbind_plot = os.path.join(
-                        baseline_dir, "unbind_bundled_pairs_pseudo.png"
+                    if os.path.exists(self_binding_plot):
+                        images["self_binding_patterns"] = self_binding_plot
+
+                    self_binding_braid_plot = os.path.join(
+                        output_dir, "braided", "self_binding_patterns_inv_braided.png"
                     )
-                    if os.path.exists(baseline_bundle_plot):
-                        images["baseline_bundle_capacity"] = baseline_bundle_plot
-                    if os.path.exists(baseline_unbind_plot):
-                        images["baseline_unbind_bundled"] = baseline_unbind_plot
+                    if os.path.exists(self_binding_braid_plot):
+                        images["self_binding_patterns_BRAIDED"] = (
+                            self_binding_braid_plot
+                        )
 
                     sp = fourier_star.get("similarity_after_k_binds_plot_path")
                     sd = fourier_perp.get("similarity_after_k_binds_plot_path")
@@ -585,7 +866,8 @@ def main(args):
                         images["similarity_after_k_binds_*"] = sp
                     if sd:
                         images["similarity_after_k_binds_†"] = sd
-                    # reconstructions after m binds (every 10) for */ †
+
+                    # reconstructions after m binds (every 10) for different pseudo-inverse methods * / †
                     rp = fourier_star.get("recon_after_k_binds_plot_path")
                     rd = fourier_perp.get("recon_after_k_binds_plot_path")
                     if rp:
@@ -603,7 +885,7 @@ def main(args):
                         ]
 
                     if dist_name == "clifford" and model.latent_dim in [2, 4]:
-                        # manifold visualization for clifford (only d=2,4)
+                        # manifold visualization for clifford
                         cliff_viz = plot_clifford_manifold_visualization(
                             model, DEVICE, output_dir, n_grid=16, dims=(0, 1)
                         )
@@ -628,6 +910,7 @@ def main(args):
                         "final_best_loss": best,
                         **fourier_metrics,
                         **knn_metrics,
+                        **braiding_metrics,
                         mean_metric_key: float(mean_vector_acc),
                     }
                     logger.log_summary(summary)
@@ -642,27 +925,23 @@ if __name__ == "__main__":
     p.add_argument("--warmup_epochs", type=int, default=100)
     p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--recon_loss", type=str, default="mse", choices=["mse", "l1_freq"])
+    p.add_argument(
+        "--recon_loss", type=str, default="l1_freq", choices=["mse", "l1_freq"]
+    )
     p.add_argument(
         "--l1_weight", type=float, default=1.0, help="Weight for L1 pixel loss"
     )
-    p.add_argument(
-        "--freq_weight",
-        type=float,
-        default=0.0,
-        help="Weight for frequency domain loss",
-    )
     p.add_argument("--max_beta", type=float, default=1.0)
     p.add_argument(
-        "--min_beta", type=float, default=0.05, help="Minimum KL beta during cycles"
+        "--min_beta", type=float, default=0.1, help="Minimum KL beta during cycles"
     )
     p.add_argument("--no_wandb", action="store_true")
-    p.add_argument("--wandb_project", type=str, default="conv-experiments-sep-23")
-    p.add_argument("--patience", type=int, default=25)
+    p.add_argument("--wandb_project", type=str, default="clifford-experiments-CNN")
+    p.add_argument("--patience", type=int, default=50)
     p.add_argument(
         "--cycle_epochs",
         type=int,
-        default=250,
+        default=200,
         help="Cycle length for cyclical KL beta after warmup (0=disabled)",
     )
     args = p.parse_args()

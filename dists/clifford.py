@@ -90,16 +90,18 @@ class HypersphericalUniform(Distribution):
 
     def __init__(self, dim, device="cpu", dtype=torch.float32, validate_args=None):
         self.dim = dim
+        self.device, self.dtype = device, dtype
         super().__init__(
             batch_shape=torch.Size(),
             event_shape=torch.Size([dim]),
             validate_args=validate_args,
         )
-        self.device, self.dtype = device, dtype
 
-    def rsample(self, sample_shape=()):
+    def rsample(self, sample_shape=torch.Size()):
         v = torch.randn(
-            sample_shape + self.event_shape, device=self.device, dtype=self.dtype
+            tuple(sample_shape) + tuple(self.event_shape),
+            device=self.device,
+            dtype=self.dtype,
         )
         eps = _get_eps(v)
         return v / (v.norm(dim=-1, keepdim=True) + eps)
@@ -147,7 +149,7 @@ class _JointTSDistribution(Distribution):
         )
         self.marginal_t, self.marginal_s = marginal_t, marginal_s
 
-    def rsample(self, sample_shape=()):
+    def rsample(self, sample_shape=torch.Size()):
         return torch.cat(
             (
                 self.marginal_t.rsample(sample_shape).unsqueeze(-1),
@@ -213,10 +215,10 @@ class CliffordTorusUniform(Distribution):
 
     def __init__(self, dim, device="cpu", dtype=torch.float32, validate_args=None):
         self.dim = dim
+        self.device, self.dtype = device, dtype
         super().__init__(
             event_shape=torch.Size([2 * self.dim]), validate_args=validate_args
         )
-        self.device, self.dtype = device, dtype
 
     def rsample(self, sample_shape=torch.Size()):
         shape = sample_shape + (self.dim,)

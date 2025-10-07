@@ -103,6 +103,7 @@ def plot_reconstructions(model, loader, device, filepath):
         # cleanup
         del originals, recons, comparison, grid
         import gc
+
         gc.collect()
     return filepath
 
@@ -123,6 +124,7 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
         alphas = torch.linspace(0, 1, steps, device=device)
 
         if model.distribution == "clifford":
+            # proper angle interpolation on the torus with normalization
             delta = z_mean2 - z_mean1
             delta_wrapped = (delta + math.pi) % (2 * math.pi) - math.pi
             interp_angles = z_mean1 + alphas.view(-1, 1) * delta_wrapped
@@ -133,7 +135,7 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
             theta_s[..., -model.z_dim + 1 :] = -torch.flip(
                 interp_angles[..., 1:], dims=(-1,)
             )
-            samples_complex = torch.exp(1j * theta_s)
+            samples_complex = torch.exp(1j * theta_s) / math.sqrt(n)  # normalize!
             interp_z = torch.fft.ifft(samples_complex, dim=-1, norm="ortho").real.to(
                 torch.float32
             )
@@ -161,6 +163,7 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
         # cleanup
         del interp_z, x_recon_interp, grid
         import gc
+
         gc.collect()
     return filepath
 
@@ -196,6 +199,7 @@ def plot_latent_space(model, loader, device, filepath, n_plot=1000):
     # explicit cleanup
     del X_z, y, z_tsne
     import gc
+
     gc.collect()
 
     return filepath
@@ -235,6 +239,7 @@ def plot_pca_analysis(model, loader, device, filepath, n_plot=1000):
     # explicit cleanup
     del X_z, y, Z_pca
     import gc
+
     gc.collect()
 
     return filepath
@@ -366,7 +371,9 @@ def run(args):
                     )
                     for n_samples in knn_samples:
                         if f"knn_acc_{n_samples}" in knn_results:
-                            agg_results[dist][n_samples].append(knn_results[f"knn_acc_{n_samples}"])
+                            agg_results[dist][n_samples].append(
+                                knn_results[f"knn_acc_{n_samples}"]
+                            )
 
                     test_subset = torch.utils.data.Subset(
                         test_dataset, list(range(min(1000, len(test_dataset))))
@@ -417,7 +424,9 @@ def run(args):
                                 "Interpolations": interp_path,
                             }
                             if fourier_result.get("similarity_after_k_binds_plot_path"):
-                                images_to_log["Similarity_After_K_Binds"] = fourier_result["similarity_after_k_binds_plot_path"]
+                                images_to_log["Similarity_After_K_Binds"] = (
+                                    fourier_result["similarity_after_k_binds_plot_path"]
+                                )
 
                             # manifold-specific visualizations
                             if dist == "clifford" and mdim >= 2:
@@ -441,16 +450,15 @@ def run(args):
                                 if gauss_viz:
                                     images_to_log["Gaussian_Manifold"] = gauss_viz
 
-
                             logger.log_images(images_to_log)
 
                     if logger.use:
                         knn_metrics = {
-                            k: v for k, v in knn_results.items()
-                            if k.startswith("knn_")
+                            k: v for k, v in knn_results.items() if k.startswith("knn_")
                         }
                         fourier_metrics = {
-                            k: v for k, v in fourier_result.items()
+                            k: v
+                            for k, v in fourier_result.items()
                             if isinstance(v, (int, float, bool))
                         }
 
@@ -488,6 +496,7 @@ def run(args):
                     # explicit memory cleanup
                     del model, optimizer
                     import gc
+
                     gc.collect()
                     torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
@@ -503,9 +512,9 @@ def run(args):
                         np.mean(accuracies) * 100,
                         np.std(accuracies) * 100,
                     )
-                    row_data[
-                        f"{dist.upper()}_{n_samples}"
-                    ] = f"{mean_acc:.1f}±{std_acc:.1f}"
+                    row_data[f"{dist.upper()}_{n_samples}"] = (
+                        f"{mean_acc:.1f}±{std_acc:.1f}"
+                    )
                 else:
                     row_data[f"{dist.upper()}_{n_samples}"] = "N/A"
         final_results.append(row_data)
@@ -535,11 +544,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--h_dim", type=int, default=128, help="Hidden layer size")
 
-    parser.add_argument("--epochs", type=int, default=100, help="Training epochs")
+    parser.add_argument("--epochs", type=int, default=500, help="Training epochs")
     parser.add_argument(
         "--patience",
         type=int,
-        default=10,
+        default=25,
         help="Early stopping patience (0 to disable)",
     )
     parser.add_argument(
@@ -551,7 +560,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_runs",
         type=int,
-        default=1,
+        default=20,
         help="Number of runs (original paper param is 20)",
     )
     parser.add_argument(
@@ -561,7 +570,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--wandb_project",
         type=str,
-        default="mnist-experiments-sep-2025",
+        default="mnist-svae-experiments",
         help="W&B project name",
     )
 

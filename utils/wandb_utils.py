@@ -11,35 +11,7 @@ try:
 except Exception:
     wandb = None
 
-
-def _bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return torch.fft.ifft(
-        torch.fft.fft(a, dim=-1) * torch.fft.fft(b, dim=-1), dim=-1
-    ).real
-
-
-def _unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "*") -> torch.Tensor:
-    """
-    - *: x̂ = (ab) ⊛ a^{-1}, where a^{-1} = (a_n, ..., a_2, a_1)
-    - †: x̂ = IFFT( FFT(ab) / FFT(a) )
-    - inv: same as *, x̂ = (ab) ⊛ a^{-1}
-    """
-    if method == "*" or method == "inv":
-        return _bind(ab, vsa_invert(b))
-    elif method == "†":
-        Fab = torch.fft.fft(ab, dim=-1)
-        Fb = torch.fft.fft(b, dim=-1)
-        rec = torch.fft.ifft(Fab / (Fb + 1e-12), dim=-1).real
-        return rec
-    else:
-        raise ValueError(f"unsupported unbind method: {method}")
-
-
-def _fft_make_unitary(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    Fx = torch.fft.fft(x, dim=-1)
-    mags = torch.abs(Fx)
-    Fx_unit = Fx / torch.clamp(mags, min=eps)
-    return torch.fft.ifft(Fx_unit, dim=-1).real
+from .vsa import bind, unbind, invert
 
 
 def test_self_binding(
@@ -119,9 +91,9 @@ def test_self_binding(
     a = selected_z[0]
     ab = a.clone()
     for _ in range(k_self_bind):
-        ab = _bind(ab, a)
+        ab = bind(ab, a)
     for _ in range(k_self_bind):
-        ab = _unbind(ab, a, method=unbind_method)
+        ab = unbind(ab, a, method=unbind_method)
     cos_sim = torch.nn.functional.cosine_similarity(ab, a, dim=-1).mean().item()
 
     sims = []
@@ -132,9 +104,9 @@ def test_self_binding(
     for m in range(1, k_self_bind + 1):
         cur = a.clone()
         for _ in range(m):
-            cur = _bind(cur, a)
+            cur = bind(cur, a)
         for _ in range(m):
-            cur = _unbind(cur, a, method=unbind_method)
+            cur = unbind(cur, a, method=unbind_method)
         sim_m = torch.nn.functional.cosine_similarity(cur, a, dim=-1).mean().item()
         sims.append(sim_m)
 
@@ -143,9 +115,9 @@ def test_self_binding(
         for m in range(1, k_self_bind + 1):
             cur = start_vec.clone()
             for _ in range(m):
-                cur = _bind(cur, start_vec)
+                cur = bind(cur, start_vec)
             for _ in range(m):
-                cur = _unbind(cur, start_vec, method=unbind_method)
+                cur = unbind(cur, start_vec, method=unbind_method)
             if (m % recon_every == 0) or (m == k_self_bind):
                 recon_vectors_for_this_start.append(cur.squeeze(0))
                 if i == 0:
@@ -217,6 +189,7 @@ def test_self_binding(
             else:
                 plt.imshow(canvas.permute(1, 2, 0))
 
+            # is this even used
             col_labels = [f"m=0"] + [f"m={m}" for m in recon_steps]
             plt.xticks([])
             plt.yticks([])
@@ -232,6 +205,7 @@ def test_self_binding(
             plt.savefig(recon_paths, dpi=200, bbox_inches="tight")
             plt.close()
     except Exception as e:
+        print(e)
         recon_paths = None
 
     return {
@@ -249,7 +223,7 @@ def test_cross_class_bind_unbind(
     unbind_method: str = "*",
 ):
     """
-    Test binding two random vectors from different classes, then unbind to recover each.
+    Test binding/unbinding different classes, with reconstructions.
     """
     try:
         model.eval()
@@ -326,13 +300,13 @@ def test_cross_class_bind_unbind(
         b = torch.nn.functional.normalize(b, p=2, dim=-1)
 
     # bind a and b
-    ab = _bind(a, b)
+    ab = bind(a, b)
 
     # to recover b (ab ⊛ a^-1 = b)
-    recovered_b = _unbind(ab, a, method=unbind_method)
+    recovered_b = unbind(ab, a, method=unbind_method)
 
     #  to recover a (ab ⊛ b^-1 = a)
-    recovered_a = _unbind(ab, b, method=unbind_method)
+    recovered_a = unbind(ab, b, method=unbind_method)
 
     # calculate similarities
     sim_b = torch.nn.functional.cosine_similarity(recovered_b, b, dim=-1).mean().item()
@@ -398,6 +372,7 @@ def test_cross_class_bind_unbind(
         plt.close()
 
     except Exception as e:
+        print(e)
         plot_path = None
 
     return {
@@ -498,12 +473,6 @@ _CLASS_NAMES = {
 }
 
 
-def _resolve_class_names(dataset_name: str, count: int) -> list:
-    key = (dataset_name or "").lower()
-    names = _CLASS_NAMES.get(key, [str(i) for i in range(count)])
-    return names[:count]
-
-
 @torch.no_grad()
 def compute_class_means(model, loader, device, max_per_class: int = 1000):
     model.eval()
@@ -551,21 +520,11 @@ def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
         x = x.to(device)
         mu = _extract_latent_mu(model, x)
 
-        if dist_type == "powerspherical":
-            mu_norm = torch.nn.functional.normalize(mu, p=2, dim=-1)
-            mean_norm = torch.nn.functional.normalize(mean_vector, p=2, dim=-1)
-            sims = torch.nn.functional.cosine_similarity(
-                mu_norm.unsqueeze(1), mean_norm.unsqueeze(0), dim=-1
-            )
-            preds = sims.argmax(dim=1).cpu()
-        elif dist_type == "clifford":
-            sims = torch.nn.functional.cosine_similarity(
-                mu.unsqueeze(1), mean_vector.unsqueeze(0), dim=-1
-            )
-            preds = sims.argmax(dim=1).cpu()
-        else:  # TODO: double check if cosim or cdist is better (was close)
-            dists = torch.cdist(mu, mean_vector, p=2)
-            preds = dists.argmin(dim=1).cpu()
+        # use cosine similarity or dot product for all distributions
+        sims = torch.nn.functional.cosine_similarity(
+            mu.unsqueeze(1), mean_vector.unsqueeze(0), dim=-1
+        )
+        preds = sims.argmax(dim=1).cpu()
 
         y_cpu = y.cpu()
         correct += (preds == y_cpu).sum().item()
@@ -580,21 +539,6 @@ def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
         k: (per_class_correct[k] / max(1, per_class_total[k])) for k in labels_sorted
     }
     return acc, per_class_acc
-
-
-def vsa_bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return _bind(a, b)
-
-
-def vsa_unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "*") -> torch.Tensor:
-    return _unbind(ab, b, method=method)
-
-
-def vsa_invert(a: torch.Tensor) -> torch.Tensor:
-    # [a0, a1, a2, ..., a_{n-1}] -> [a0, a_{n-1}, ..., a2, a1]
-    head = a[..., :1]
-    tail = a[..., 1:]
-    return torch.cat([head, torch.flip(tail, dims=[-1])], dim=-1)
 
 
 @torch.no_grad()
@@ -744,16 +688,12 @@ def test_vsa_operations(
     for i in range(min(n_test_pairs, z_all.shape[0] // 2)):
         key_idx = np.random.randint(z_all.shape[0])
         key = z_all[key_idx]
-        if unitary_keys:
-            key = _fft_make_unitary(key)
         value = z_all[i]
         a = key.unsqueeze(0)
         b = value.unsqueeze(0)
-        if project_vectors:
-            a = _fft_make_unitary(a.squeeze(0)).unsqueeze(0)
-            b = _fft_make_unitary(b.squeeze(0)).unsqueeze(0)
-        bound = _bind(a, b)
-        recovered = _unbind(bound, a, method=unbind_method)
+
+        bound = bind(a, b)
+        recovered = unbind(bound, a, method=unbind_method)
         sim = torch.nn.functional.cosine_similarity(
             recovered, value.unsqueeze(0), dim=-1
         ).item()
@@ -772,7 +712,7 @@ def test_vsa_operations(
             plt.subplot(1, 2, 1)
             plt.hist(single_bind_sims, bins=20, alpha=0.7, edgecolor="black")
             plt.axvline(
-                np.mean(single_bind_sims),
+                np.mean(single_bind_sims),  # weird type error but still works
                 color="red",
                 linestyle="--",
                 label=f"Mean: {np.mean(single_bind_sims):.3f}",
