@@ -15,9 +15,10 @@ from dists.clifford import (
 
 
 class Encoder(nn.Module):
-    def __init__(self, latent_dim: int, in_channels: int, distribution: str):
+    def __init__(self, latent_dim: int, in_channels: int, distribution: str, l2_normalize: bool = False):
         super().__init__()
         self.distribution = distribution
+        self.l2_normalize = l2_normalize
         self.main = nn.Sequential(
             nn.Conv2d(in_channels, 64, 4, 2, 1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -48,6 +49,8 @@ class Encoder(nn.Module):
         x = self.main(x).flatten(start_dim=1)
         mu = self.fc_mu(x)
         if self.distribution == "gaussian":
+            if self.l2_normalize:
+                mu = F.normalize(mu, p=2, dim=-1)
             return mu, self.fc_log_var(x)
         elif self.distribution == "powerspherical":
             mu = F.normalize(mu, p=2, dim=-1)
@@ -96,15 +99,17 @@ class VAE(nn.Module):
         in_channels: int,
         distribution: str,
         device: str,
-        recon_loss_type: str = "l1_freq",
+        recon_loss_type: str = "l1",
         use_perceptual_loss: bool = False,
         l1_weight: float = 1.0,
         freq_weight: float = 1.0,
+        l2_normalize: bool = False,
     ):
         super().__init__()
         self.latent_dim = latent_dim
         self.distribution = distribution
         self.device = device
+        self.l2_normalize = l2_normalize
 
         self.recon_loss_type = recon_loss_type
         self.l1_weight = l1_weight
@@ -112,7 +117,7 @@ class VAE(nn.Module):
         self.use_perceptual_loss = use_perceptual_loss
 
         self.encoder = Encoder(
-            latent_dim, in_channels=in_channels, distribution=distribution
+            latent_dim, in_channels=in_channels, distribution=distribution, l2_normalize=l2_normalize
         )
         dec_in_dim = 2 * latent_dim if distribution == "clifford" else latent_dim
         self.decoder = Decoder(dec_in_dim, out_channels=in_channels)
@@ -143,7 +148,10 @@ class VAE(nn.Module):
             p_z = torch.distributions.Normal(
                 torch.zeros_like(mu), torch.ones_like(params)
             )
-            return q_z.rsample(), q_z, p_z
+            z = q_z.rsample()
+            if self.l2_normalize:
+                z = F.normalize(z, p=2, dim=-1)
+            return z, q_z, p_z
         elif self.distribution == "powerspherical":
             q_z = PowerSpherical(mu, params.squeeze(-1))
             p_z = HypersphericalUniform(
@@ -178,30 +186,30 @@ class VAE(nn.Module):
             # sum over pixels, average over batch
             recon_loss = F.mse_loss(x_recon, x, reduction="sum") / B
 
-        elif self.recon_loss_type == "l1_freq":
-            # pixel L1: sum over pixels, average over batch
+        elif self.recon_loss_type == "l1":
+            # pixel l1: sum over pixels, average over batch
             if self.l1_weight > 0:
                 recon_loss += self.l1_weight * (
                     F.l1_loss(x_recon, x, reduction="sum") / B
                 )
 
-            # frequency L1: sum over all freq bins, average over batch
-            if self.freq_weight > 0:
-                h, w = x.shape[-2:]
-                freq_mask = self._create_radial_freq_mask(h, w)
-                x_fft = torch.fft.fft2(x, dim=(-2, -1))
-                x_recon_fft = torch.fft.fft2(x_recon, dim=(-2, -1))
-                x_fft_mag = torch.abs(x_fft)
-                x_recon_fft_mag = torch.abs(x_recon_fft)
-                loss_freq = (
-                    F.l1_loss(
-                        x_recon_fft_mag * freq_mask,
-                        x_fft_mag * freq_mask,
-                        reduction="sum",
-                    )
-                    / B
-                )
-                recon_loss += self.freq_weight * loss_freq
+            # frequency l1 disabled - too computationally expensive for simple datasets
+            # if self.freq_weight > 0:
+            #     h, w = x.shape[-2:]
+            #     freq_mask = self._create_radial_freq_mask(h, w)
+            #     x_fft = torch.fft.fft2(x, dim=(-2, -1))
+            #     x_recon_fft = torch.fft.fft2(x_recon, dim=(-2, -1))
+            #     x_fft_mag = torch.abs(x_fft)
+            #     x_recon_fft_mag = torch.abs(x_recon_fft)
+            #     loss_freq = (
+            #         F.l1_loss(
+            #             x_recon_fft_mag * freq_mask,
+            #             x_fft_mag * freq_mask,
+            #             reduction="sum",
+            #         )
+            #         / B
+            #     )
+            #     recon_loss += self.freq_weight * loss_freq
         else:
             raise ValueError(
                 f"Unknown reconstruction loss type: {self.recon_loss_type}"

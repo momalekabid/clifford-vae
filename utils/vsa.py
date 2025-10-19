@@ -84,6 +84,7 @@ def test_bundle_capacity(
     save_dir: Optional[str] = None,
     item_memory: Optional[torch.Tensor] = None,
     use_braiding: bool = False,
+    bind_with_random: bool = False,
 ) -> Dict:
     if k_range is None:
         k_range = list(range(2, min(51, n_items // 2), 2))
@@ -117,14 +118,27 @@ def test_bundle_capacity(
             indices = torch.randperm(n_items, device=device)[:k]
             selected = item_memory[indices]
 
-            bundled = bundle(selected, normalize=True)
-
-            sims = similarity(bundled, item_memory)
-
-            top_k_sims, top_k_indices = torch.topk(sims, k)
-            # print(top_k_sims)
-            correct = torch.isin(top_k_indices, indices).sum().item()
-            trial_accs.append(correct / k)
+            if bind_with_random:
+                random_keys = hrr_init(k, d, device=device)
+                if normalize:
+                    random_keys = normalize_vectors(random_keys)
+                bound_vectors = bind(selected, random_keys)
+                bundled = bundle(bound_vectors, normalize=True)
+                unbounded_from_bundle = bind(bundled.unsqueeze(0).expand(k, -1), invert(random_keys))
+                sims = torch.zeros(k, n_items, device=device)
+                for i in range(k):
+                    sims[i] = similarity(unbounded_from_bundle[i].unsqueeze(0), item_memory)
+                correct = 0
+                for i in range(k):
+                    if indices[i] in torch.topk(sims[i], k).indices:
+                        correct += 1
+                trial_accs.append(correct / k)
+            else:
+                bundled = bundle(selected, normalize=True)
+                sims = similarity(bundled, item_memory)
+                top_k_sims, top_k_indices = torch.topk(sims, k)
+                correct = torch.isin(top_k_indices, indices).sum().item()
+                trial_accs.append(correct / k)
 
         mean_acc = np.mean(trial_accs)
         std_acc = np.std(trial_accs)
@@ -134,6 +148,7 @@ def test_bundle_capacity(
 
     if plot:
         plt.figure(figsize=(8, 5))
+        bind_label = " [BIND+BUNDLE]" if bind_with_random else ""
         plt.errorbar(
             results["k"],
             results["accuracy"],
@@ -143,7 +158,7 @@ def test_bundle_capacity(
         )
         plt.xlabel("Number of bundled vectors (k)")
         plt.ylabel("Retrieval accuracy")
-        plt.title(f"Bundle Capacity (d={d}, N={n_items})")
+        plt.title(f"Bundle Capacity{bind_label} (d={d}, N={n_items})")
         plt.grid(True, alpha=0.3)
         plt.ylim(0, 1.05)
         plt.tight_layout()
@@ -151,7 +166,8 @@ def test_bundle_capacity(
             import os
 
             os.makedirs(save_dir, exist_ok=True)
-            plt.savefig(os.path.join(save_dir, "bundle_capacity.png"), dpi=200)
+            suffix = "_bind" if bind_with_random else ""
+            plt.savefig(os.path.join(save_dir, f"bundle_capacity{suffix}.png"), dpi=500)
         plt.close()
 
     return results
@@ -169,7 +185,23 @@ def test_binding_unbinding_pairs(
     save_dir: Optional[str] = None,
     item_memory: Optional[torch.Tensor] = None,
     use_braiding: bool = False,
+    bind_with_random: bool = True,
 ) -> Dict:
+    """
+    test binding/unbinding with bundled pairs.
+
+    if bind_with_random=True (default):
+        - select k random vectors from item_memory
+        - bind each with a random HRR-initialized vector
+        - bundle the bound pairs
+        - test recovery by unbinding and checking similarity
+
+    if bind_with_random=False:
+        - classic role-filler binding test
+        - select k roles and k fillers from item_memory
+        - bind each role with its filler
+        - bundle and test recovery
+    """
     if k_range is None:
         k_range = list(range(2, min(31, n_items // 4), 2))
 
@@ -188,9 +220,16 @@ def test_binding_unbinding_pairs(
         trial_accs = []
 
         for _ in range(n_trials):
-            indices = torch.randperm(n_items, device=device)[: 2 * k]
-            roles = item_memory[indices[:k]]
-            fillers = item_memory[indices[k : 2 * k]]
+            if bind_with_random:
+                indices = torch.randperm(n_items, device=device)[:k]
+                fillers = item_memory[indices]
+                roles = hrr_init(k, d, device=device)
+                if normalize:
+                    roles = normalize_vectors(roles)
+            else:
+                indices = torch.randperm(n_items, device=device)[: 2 * k]
+                roles = item_memory[indices[:k]]
+                fillers = item_memory[indices[k : 2 * k]]
 
             pairs = bind(roles, fillers)
 
@@ -227,7 +266,10 @@ def test_binding_unbinding_pairs(
                 sims = similarity(recovered, item_memory)
                 best_idx = torch.argmax(sims).item()
 
-                target_filler_idx = indices[k + i].item()
+                if bind_with_random:
+                    target_filler_idx = indices[i].item()
+                else:
+                    target_filler_idx = indices[k + i].item()
                 if best_idx == target_filler_idx:
                     correct += 1
 
@@ -242,6 +284,7 @@ def test_binding_unbinding_pairs(
     if plot:
         plt.figure(figsize=(8, 5))
         braid_label = " [BRAIDED]" if use_braiding else ""
+        bind_label = " (random keys)" if bind_with_random else ""
         plt.errorbar(
             results["k"],
             results["accuracy"],
@@ -253,7 +296,7 @@ def test_binding_unbinding_pairs(
         plt.xlabel("number of bundled role-filler pairs (k)")
         plt.ylabel("unbinding accuracy")
         plt.title(
-            f"role-filler query capacity{braid_label} (d={d}, N={n_items}, {unbind_method})"
+            f"role-filler query capacity{bind_label}{braid_label} (d={d}, N={n_items}, {unbind_method})"
         )
         plt.grid(True, alpha=0.3)
         plt.ylim(0, 1.05)
@@ -267,7 +310,7 @@ def test_binding_unbinding_pairs(
                 os.path.join(
                     save_dir, f"unbind_bundled_pairs_{unbind_method}{braid_suffix}.png"
                 ),
-                dpi=200,
+                dpi=500,
             )
         plt.close()
 
@@ -511,7 +554,7 @@ def test_binding_unbinding_with_self_binding(
                 os.path.join(
                     save_dir, f"self_binding_patterns_{unbind_method}{braid_suffix}.png"
                 ),
-                dpi=200,
+                dpi=500,
             )
         plt.close()
 
@@ -733,7 +776,7 @@ def test_bundle_capacity_confusion_matrix(
 
             plt.tight_layout()
             plt.savefig(
-                os.path.join(save_dir, "bundle_capacity_confusion_50x50.png"), dpi=200
+                os.path.join(save_dir, "bundle_capacity_confusion_50x50.png"), dpi=500
             )
             plt.close()
 
@@ -758,6 +801,7 @@ def test_per_class_bundle_capacity_two_items(
     save_dir: Optional[str] = None,
     item_memory: Optional[torch.Tensor] = None,
     labels: Optional[torch.Tensor] = None,
+    item_images: Optional[torch.Tensor] = None,
     use_braiding: bool = False,
     per_class_braid: bool = False,
 ) -> Dict:
@@ -825,11 +869,13 @@ def test_per_class_bundle_capacity_two_items(
         n_classes = len(valid_classes)
 
     similarity_matrices = []
+    last_bundle_img_indices = []
 
     for trial in range(n_trials):
         # select items_per_class items from each class
         selected_bundles = []
         bundle_labels = []
+        bundle_img_indices = []
 
         for class_id in valid_classes:
             class_indices = class_to_items[class_id]
@@ -841,6 +887,7 @@ def test_per_class_bundle_capacity_two_items(
                 item_vector = item_memory[class_indices[idx]]
                 selected_bundles.append(item_vector)
                 bundle_labels.append(class_id)
+                bundle_img_indices.append(class_indices[idx].item())
 
         if len(selected_bundles) < n_classes * items_per_class:
             continue
@@ -856,6 +903,7 @@ def test_per_class_bundle_capacity_two_items(
             similarity_matrix[i, :] = sims.cpu().numpy()
 
         similarity_matrices.append(similarity_matrix)
+        last_bundle_img_indices = bundle_img_indices  # keep last trial for visualization
 
     if similarity_matrices:
         avg_similarity = np.mean(similarity_matrices, axis=0)
@@ -871,21 +919,26 @@ def test_per_class_bundle_capacity_two_items(
 
         if plot and save_dir:
             import os
+            from matplotlib.gridspec import GridSpec
 
             os.makedirs(save_dir, exist_ok=True)
 
-            fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+            # create figure with 2 rows
+            fig = plt.figure(figsize=(20, 16))
+            gs = GridSpec(2, 1, height_ratios=[1, 0.6], hspace=0.3)
 
-            # plot similarity matrix
-            im = ax.imshow(avg_similarity, cmap="viridis", aspect="auto")
+            # top: similarity matrix
+            ax_sim = fig.add_subplot(gs[0])
+            im = ax_sim.imshow(avg_similarity, cmap="viridis", aspect="auto")
             if per_class_braid:
                 braid_label = " [PER-CLASS BRAID]"
             elif use_braiding:
                 braid_label = " [RANDOM BRAID]"
             else:
                 braid_label = ""
-            ax.set_title(
-                f"bundle similarity matrix{braid_label}\n({items_per_class} items per class, {n_classes} classes)"
+            ax_sim.set_title(
+                f"bundle similarity matrix{braid_label}\n({items_per_class} items per class, {n_classes} classes)",
+                fontsize=14, fontweight='bold'
             )
 
             # create labels: a1, a2, b1, b2, c1, c2, ...
@@ -894,15 +947,66 @@ def test_per_class_bundle_capacity_two_items(
                 for j in range(items_per_class):
                     tick_labels.append(f"{chr(97+i)}{j+1}")
 
-            ax.set_xticks(range(len(tick_labels)))
-            ax.set_yticks(range(len(tick_labels)))
-            ax.set_xticklabels(tick_labels, rotation=90)
-            ax.set_yticklabels(tick_labels)
-            ax.set_xlabel("bundle")
-            ax.set_ylabel("bundle")
-            plt.colorbar(im, ax=ax, label="cosine similarity")
+            ax_sim.set_xticks(range(len(tick_labels)))
+            ax_sim.set_yticks(range(len(tick_labels)))
+            ax_sim.set_xticklabels(tick_labels, rotation=90)
+            ax_sim.set_yticklabels(tick_labels)
+            ax_sim.set_xlabel("bundle", fontsize=12)
+            ax_sim.set_ylabel("bundle", fontsize=12)
+            plt.colorbar(im, ax=ax_sim, label="cosine similarity")
 
-            plt.tight_layout()
+            # bottom: simple grid of bundled images
+            ax_images = fig.add_subplot(gs[1])
+            ax_images.axis('off')
+
+            if item_images is not None and len(last_bundle_img_indices) > 0:
+                # create a grid of images: n_classes rows × items_per_class columns
+                is_grayscale = item_images[0].shape[0] == 1
+                img_h, img_w = item_images[0].shape[-2], item_images[0].shape[-1]
+
+                # create canvas
+                canvas_h = n_classes * img_h
+                canvas_w = items_per_class * img_w
+
+                if is_grayscale:
+                    canvas = np.ones((canvas_h, canvas_w)) * 0.5
+                else:
+                    canvas = np.ones((canvas_h, canvas_w, 3)) * 0.5
+
+                # place images in grid
+                for idx, img_idx in enumerate(last_bundle_img_indices):
+                    row = idx // items_per_class
+                    col = idx % items_per_class
+
+                    img = item_images[img_idx]
+
+                    # denormalize
+                    img = (img * 0.5 + 0.5).clamp(0, 1)
+
+                    # convert to numpy
+                    if img.shape[0] == 1:
+                        img_np = img.squeeze(0).cpu().numpy()
+                    else:
+                        img_np = img.permute(1, 2, 0).cpu().numpy()
+
+                    # place in canvas
+                    y_start = row * img_h
+                    x_start = col * img_w
+
+                    if is_grayscale:
+                        canvas[y_start:y_start+img_h, x_start:x_start+img_w] = img_np
+                    else:
+                        canvas[y_start:y_start+img_h, x_start:x_start+img_w, :] = img_np
+
+                if is_grayscale:
+                    ax_images.imshow(canvas, cmap='gray')
+                else:
+                    ax_images.imshow(canvas)
+
+                ax_images.set_title(f'bundled images ({n_classes} classes × {items_per_class} items)',
+                                   fontsize=14, fontweight='bold')
+
+            # gridspec handles layout with hspace, no need for tight_layout
             if per_class_braid:
                 filename = "bundle_two_per_class_similarity_per_class_braid.png"
             elif use_braiding:
@@ -1028,7 +1132,7 @@ def test_per_class_bundle_capacity(
 
             os.makedirs(save_dir, exist_ok=True)
             plt.savefig(
-                os.path.join(save_dir, "per_class_bundle_analysis.png"), dpi=200
+                os.path.join(save_dir, "per_class_bundle_analysis.png"), dpi=500
             )
             plt.close()
 

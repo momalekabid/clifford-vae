@@ -5,6 +5,8 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
 
 try:
     import wandb
@@ -21,6 +23,7 @@ def test_self_binding(
     output_dir,
     k_self_bind: int = 50,
     unbind_method: str = "*",
+    img_shape=(1, 28, 28),
 ):
     try:
         model.eval()
@@ -166,6 +169,8 @@ def test_self_binding(
                         imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
                 else:
                     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
+                # reshape flat output to image dimensions
+                imgs = imgs.view(-1, *img_shape)
                 imgs = imgs.cpu()
 
             C, h, w = imgs.shape[1], imgs.shape[-2], imgs.shape[-1]
@@ -221,6 +226,7 @@ def test_cross_class_bind_unbind(
     device,
     output_dir,
     unbind_method: str = "*",
+    img_shape=(1, 28, 28),
 ):
     """
     Test binding/unbinding different classes, with reconstructions.
@@ -343,6 +349,8 @@ def test_cross_class_bind_unbind(
                     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
             else:
                 imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
+            # reshape flat output to image dimensions
+            imgs = imgs.view(-1, *img_shape)
             imgs = imgs.cpu()
 
         C, h, w = imgs.shape[1], imgs.shape[-2], imgs.shape[-1]
@@ -745,7 +753,7 @@ def test_vsa_operations(
 
 
 def plot_clifford_manifold_visualization(
-    model, device, output_dir, n_grid=16, dims=(0, 1)
+    model, device, output_dir, n_grid=12, dims=(0, 1), img_shape=(1, 28, 28)
 ):
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
     if (
@@ -756,10 +764,10 @@ def plot_clifford_manifold_visualization(
         return None
 
     os.makedirs(output_dir, exist_ok=True)
-    return _plot_clifford_manifold_original(model, device, output_dir, n_grid, dims)
+    return _plot_clifford_manifold_original(model, device, output_dir, n_grid, dims, img_shape)
 
 
-def _plot_clifford_manifold_original(model, device, output_dir, n_grid=16, dims=(0, 1)):
+def _plot_clifford_manifold_original(model, device, output_dir, n_grid=12, dims=(0, 1), img_shape=(1, 28, 28)):
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
     path = os.path.join(output_dir, "clifford_manifold_visualization.png")
 
@@ -786,6 +794,9 @@ def _plot_clifford_manifold_original(model, device, output_dir, n_grid=16, dims=
                 x_recon = x_recon.clamp(0, 1)
         else:
             x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
+
+        # reshape flat output to image dimensions
+        x_recon = x_recon.view(-1, *img_shape)
 
     C = x_recon.shape[1]
     h, w = x_recon.shape[-2:]
@@ -816,7 +827,7 @@ def _plot_clifford_manifold_original(model, device, output_dir, n_grid=16, dims=
 
 
 def plot_powerspherical_manifold_visualization(
-    model, device, output_dir, n_samples=1000, dims=(0, 1)
+    model, device, output_dir, n_samples=256, dims=(0, 1), img_shape=(1, 28, 28)
 ):
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
     if (
@@ -827,22 +838,25 @@ def plot_powerspherical_manifold_visualization(
         return None
 
     os.makedirs(output_dir, exist_ok=True)
-    return _plot_powerspherical_manifold_original(model, device, output_dir, n_samples)
+    return _plot_powerspherical_manifold_original(model, device, output_dir, n_samples, img_shape)
 
 
-def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=1000):
+def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=256, img_shape=(1, 28, 28)):
     path = os.path.join(output_dir, "powerspherical_manifold_visualization.png")
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
+
+    # reduce to 12x12 grid to save memory (instead of 16x16)
+    grid_size = 12
+    n_samples = grid_size * grid_size  # 144 samples
 
     model.eval()
     with torch.no_grad():
         z = torch.randn(n_samples, latent_dim, device=device)
         z = torch.nn.functional.normalize(z, p=2, dim=-1)
         x_recon = model.decoder(z)
-        x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1).cpu()
-
-    n_grid = int(math.sqrt(n_samples))
-    grid_size = min(n_grid, 16)
+        x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
+        # reshape flat output to image dimensions
+        x_recon = x_recon.view(-1, *img_shape).cpu()
     x_recon_grid = x_recon[: grid_size * grid_size]
 
     C = x_recon_grid.shape[1]
@@ -872,32 +886,37 @@ def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=
 
 
 def plot_gaussian_manifold_visualization(
-    model, device, output_dir, n_samples=1000, dims=(0, 1)
+    model, device, output_dir, n_samples=144, dims=(0, 1), img_shape=(1, 28, 28)
 ):
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
+    dist = getattr(model, "distribution", None)
     if (
-        getattr(model, "distribution", None) != "gaussian"
+        dist not in ["gaussian", "normal"]
         or latent_dim is None
         or latent_dim < 2
     ):
         return None
 
     os.makedirs(output_dir, exist_ok=True)
-    return _plot_gaussian_manifold_original(model, device, output_dir, n_samples)
+    return _plot_gaussian_manifold_original(model, device, output_dir, n_samples, img_shape)
 
 
-def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=1000):
+def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=144, img_shape=(1, 28, 28)):
     path = os.path.join(output_dir, "gaussian_manifold_visualization.png")
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
+
+    # reduce to 12x12 grid to save memory (instead of 16x16)
+    grid_size = 12
+    n_samples = grid_size * grid_size  # 144 samples
 
     model.eval()
     with torch.no_grad():
         z = torch.randn(n_samples, latent_dim, device=device)
         x_recon = model.decoder(z)
         x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
+        # reshape flat output to image dimensions
+        x_recon = x_recon.view(-1, *img_shape)
 
-    n_grid = int(math.sqrt(n_samples))
-    grid_size = min(n_grid, 16)
     x_recon_grid = x_recon[: grid_size * grid_size]
 
     C = x_recon_grid.shape[1]
@@ -924,3 +943,264 @@ def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=1000):
     plt.close()
 
     return path
+
+
+def generate_confusion_matrix_with_sample_visualisation(
+    model,
+    test_loader,
+    device,
+    save_path,
+    n_samples_per_class=10,
+    class_names=None,
+):
+    """
+    generate confusion matrix with misclassified sample images showing why confusion happens
+
+    args:
+        model: trained vae model
+        test_loader: dataloader for test set
+        device: torch device
+        save_path: path to save visualisation
+        n_samples_per_class: number of misclassified samples to show per confused pair
+        class_names: list of class names (optional)
+    """
+    model.eval()
+
+    all_preds = []
+    all_labels = []
+    all_images = []
+
+    # detect actual classes present in test_loader
+    actual_classes_present = set()
+
+    with torch.no_grad():
+        for x, y in test_loader:
+            x = x.to(device)
+
+            # encode to latent space
+            if hasattr(model, 'encode'):
+                # mlp vae
+                z_mean, _ = model.encode(x.view(x.size(0), -1))
+            else:
+                # cnn vae
+                _, _, _, z_mean = model(x)
+
+            for i in range(len(y)):
+                label = y[i].item()
+                actual_classes_present.add(label)
+                all_images.append(x[i].cpu())
+
+            all_labels.extend(y.cpu().numpy())
+
+    # only work with classes that are present
+    actual_classes = sorted(actual_classes_present)
+
+    # compute class centroids for classification
+    class_centroids = defaultdict(list)
+    idx = 0
+
+    with torch.no_grad():
+        for x, y in test_loader:
+            x = x.to(device)
+
+            if hasattr(model, 'encode'):
+                z_mean, _ = model.encode(x.view(x.size(0), -1))
+            else:
+                _, _, _, z_mean = model(x)
+
+            for i in range(len(y)):
+                label = y[i].item()
+                class_centroids[label].append(z_mean[i].cpu().numpy())
+
+    # average to get centroids
+    for label in actual_classes:
+        if class_centroids[label]:
+            class_centroids[label] = np.mean(class_centroids[label], axis=0)
+
+    # now compute predictions and collect misclassified examples
+    all_preds = []
+    misclassified = defaultdict(list)  # (true_class, pred_class) -> list of image indices
+
+    idx = 0
+    with torch.no_grad():
+        for x, y in test_loader:
+            x = x.to(device)
+
+            if hasattr(model, 'encode'):
+                z_mean, _ = model.encode(x.view(x.size(0), -1))
+            else:
+                _, _, _, z_mean = model(x)
+
+            z_mean_np = z_mean.cpu().numpy()
+
+            # compute distances to all centroids (only for present classes)
+            for i, z in enumerate(z_mean_np):
+                distances = [np.linalg.norm(z - class_centroids[label]) for label in actual_classes]
+                pred = actual_classes[np.argmin(distances)]
+                all_preds.append(pred)
+
+                true_label = y[i].item()
+                if pred != true_label:
+                    misclassified[(true_label, pred)].append(idx)
+
+                idx += 1
+
+    # compute confusion matrix
+    from matplotlib.gridspec import GridSpec
+    cm = confusion_matrix(all_labels, all_preds, labels=actual_classes)
+    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+
+    # get actual class names for classes present
+    if class_names:
+        actual_class_names = [class_names[i] for i in actual_classes]
+    else:
+        actual_class_names = [str(i) for i in actual_classes]
+
+    # find top confused pairs
+    confused_pairs = []
+    for true_idx, true_class in enumerate(actual_classes):
+        for pred_idx, pred_class in enumerate(actual_classes):
+            if true_idx != pred_idx and cm[true_idx, pred_idx] > 0:
+                confused_pairs.append((
+                    cm[true_idx, pred_idx],
+                    true_class,
+                    pred_class,
+                    actual_class_names[true_idx],
+                    actual_class_names[pred_idx]
+                ))
+
+    confused_pairs.sort(reverse=True)
+    top_confused = confused_pairs[:6]  # show top 6 confused pairs
+
+    # create figure
+    fig = plt.figure(figsize=(22, 12))
+    gs = GridSpec(2, 1, height_ratios=[1, 1], hspace=0.3)
+
+    # top: confusion matrix
+    ax_cm = fig.add_subplot(gs[0])
+
+    sns.heatmap(
+        cm_normalized,
+        annot=True,
+        fmt='.2f',
+        cmap='Blues',
+        square=True,
+        cbar_kws={'label': 'normalized frequency'},
+        ax=ax_cm,
+        xticklabels=actual_class_names,
+        yticklabels=actual_class_names,
+    )
+
+    ax_cm.set_xlabel('predicted class', fontsize=12, fontweight='bold')
+    ax_cm.set_ylabel('true class', fontsize=12, fontweight='bold')
+    ax_cm.set_title('confusion matrix', fontsize=14, fontweight='bold')
+
+    # bottom: misclassified examples
+    ax_img = fig.add_subplot(gs[1])
+    ax_img.axis('off')
+
+    if not top_confused:
+        ax_img.text(0.5, 0.5, 'no misclassifications!', ha='center', va='center', fontsize=20)
+    else:
+        # create grid showing misclassified examples
+        n_pairs = len(top_confused)
+        n_samples = min(5, n_samples_per_class)  # show up to 5 examples per pair
+
+        is_grayscale = all_images[0].shape[0] == 1
+        img_h, img_w = 32, 32
+
+        # create canvas
+        canvas_h = n_pairs * img_h
+        canvas_w = n_samples * img_w
+
+        if is_grayscale:
+            canvas = np.ones((canvas_h, canvas_w)) * 0.5
+        else:
+            canvas = np.ones((canvas_h, canvas_w, 3)) * 0.5
+
+        for pair_idx, (count, true_class, pred_class, true_name, pred_name) in enumerate(top_confused):
+            # get misclassified images for this pair
+            img_indices = misclassified[(true_class, pred_class)][:n_samples]
+
+            for img_idx, global_idx in enumerate(img_indices):
+                img = all_images[global_idx]
+
+                # denormalize
+                img = (img * 0.5 + 0.5).clamp(0, 1)
+
+                # convert to numpy
+                if img.shape[0] == 1:
+                    img_np = img.squeeze(0).numpy()
+                else:
+                    img_np = img.permute(1, 2, 0).numpy()
+
+                # place in canvas
+                y_start = pair_idx * img_h
+                x_start = img_idx * img_w
+
+                if is_grayscale:
+                    canvas[y_start:y_start+img_h, x_start:x_start+img_w] = img_np
+                else:
+                    canvas[y_start:y_start+img_h, x_start:x_start+img_w, :] = img_np
+
+        if is_grayscale:
+            ax_img.imshow(canvas, cmap='gray')
+        else:
+            ax_img.imshow(canvas)
+
+        # add labels
+        for pair_idx, (count, true_class, pred_class, true_name, pred_name) in enumerate(top_confused):
+            y_pos = (pair_idx + 0.5) * img_h
+            label = f'{true_name} → {pred_name} ({int(count)})'
+            ax_img.text(-10, y_pos, label, fontsize=10, ha='right', va='center', fontweight='bold')
+
+        ax_img.set_title(f'top misclassified examples (true → predicted)', fontsize=14, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    print(f"saved confusion matrix with misclassified samples to {save_path}")
+    plt.close()
+
+    return cm, cm_normalized
+
+
+def generate_confusion_matrix_simple_visualisation(
+    predictions,
+    labels,
+    save_path,
+    class_names=None,
+):
+    """
+    generate simple confusion matrix from predictions and labels
+
+    args:
+        predictions: array of predicted labels
+        labels: array of true labels
+        save_path: path to save visualisation
+        class_names: list of class names (optional)
+    """
+    cm = confusion_matrix(labels, predictions)
+    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+
+    plt.figure(figsize=(10, 8))
+
+    sns.heatmap(
+        cm_normalized,
+        annot=True,
+        fmt='.2f',
+        cmap='Blues',
+        square=True,
+        cbar_kws={'label': 'normalized frequency'},
+        xticklabels=class_names if class_names else range(len(cm)),
+        yticklabels=class_names if class_names else range(len(cm)),
+    )
+
+    plt.xlabel('predicted class', fontsize=12, fontweight='bold')
+    plt.ylabel('true class', fontsize=12, fontweight='bold')
+    plt.title('confusion matrix', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    print(f"saved confusion matrix to {save_path}")
+    plt.close()
+
+    return cm, cm_normalized

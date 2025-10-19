@@ -6,19 +6,29 @@ from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms
 import torchvision.utils as tu
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
+from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import sys
 import os
+import time
+import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.wandb_utils import (
     WandbLogger,
     test_self_binding,
-    test_bundle_capacity,
-    test_unbinding_of_bundled_pairs,
+    test_cross_class_bind_unbind,
+    compute_class_means,
+    evaluate_mean_vector_cosine,
+    plot_powerspherical_manifold_visualization,
+)
+from utils.vsa import (
+    test_bundle_capacity as vsa_bundle_capacity,
+    test_binding_unbinding_pairs as vsa_binding_unbinding,
+    test_per_class_bundle_capacity_two_items,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss
 
@@ -62,8 +72,10 @@ def perform_knn_evaluation(model, train_loader, test_loader, device, n_samples_l
 
         y_pred = knn.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
-        results[n_samples] = accuracy
-        print(f"  k-NN Accuracy with {n_samples} training samples: {accuracy:.4f}")
+        f1 = f1_score(y_test, y_pred, average="macro")
+        results[f"knn_acc_{n_samples}"] = float(accuracy)
+        results[f"knn_f1_{n_samples}"] = float(f1)
+        print(f"  knn acc w/ {n_samples} for train, test: {accuracy:.4f}, f1: {f1:.4f}")
 
     return results
 
@@ -83,9 +95,9 @@ def plot_reconstructions(model, loader, device, filepath):
 
         plt.figure(figsize=(10, 3))
         plt.imshow(grid.permute(1, 2, 0))
-        plt.title("Top: Original Images | Bottom: Reconstructed Images")
+        plt.title("top: original images | bottom: reconstructed images")
         plt.axis("off")
-        plt.savefig(filepath, dpi=300, bbox_inches="tight")
+        plt.savefig(filepath, dpi=200, bbox_inches="tight")
         plt.close()
     return filepath
 
@@ -104,7 +116,7 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
         alphas = torch.linspace(0, 1, steps, device=device)
         interp_z = []
 
-        # vMF interp
+        # vmf interp
         for alpha in alphas:
             z = (1 - alpha) * z_mean1 + alpha * z_mean2
             interp_z.append(torch.nn.functional.normalize(z, p=2, dim=-1))
@@ -115,58 +127,48 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
         grid = tu.make_grid(x_recon_interp, nrow=steps, pad_value=0.5)
         plt.figure(figsize=(12, 2))
         plt.imshow(grid.cpu().permute(1, 2, 0))
-        plt.title("Latent Space Interpolation (vMF)")
+        plt.title("latent space interpolation (vmf)")
         plt.axis("off")
-        plt.savefig(filepath, dpi=300, bbox_inches="tight")
+        plt.savefig(filepath, dpi=200, bbox_inches="tight")
         plt.close()
     return filepath
 
 
-def plot_latent_space(model, loader, device, filepath, n_plot=2000):
-    """Generate t-SNE visualization grid with multiple perplexity values."""
-    print(f"Generating t-SNE plot grid for {n_plot} points...")
+def plot_latent_space(model, loader, device, filepath, n_plot=1000):
+    """generate t-sne visualization."""
+    print(f"generating t-sne plot for {n_plot} points...")
     X_z, y = encode_dataset(model, loader, device)
 
+    # reduce memory usage
     X_z, y = X_z[:n_plot], y[:n_plot]
 
-    perplexities = [5, 15, 30, 50, 100]
-    n_perplexities = len(perplexities)
+    # use single perplexity to avoid memory issues
+    perplexity = 30
+    print(f"running t-sne with perplexity={perplexity}...")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity, max_iter=1000)
+    z_tsne = tsne.fit_transform(X_z)
 
-    fig, axes = plt.subplots(1, n_perplexities, figsize=(n_perplexities * 5, 5))
-    if n_perplexities == 1:  # this makes sure axes is a list
-        axes = [axes]
-
-    for i, p in enumerate(perplexities):
-        ax = axes[i]
-        print(f"  Running t-SNE with perplexity={p}...")
-        tsne = TSNE(n_components=2, random_state=42, perplexity=p, max_iter=1000)
-        z_tsne = tsne.fit_transform(X_z)
-
-        ax.scatter(
-            z_tsne[:, 0],
-            z_tsne[:, 1],
-            c=y,
-            cmap=plt.get_cmap("tab10", 10),
-            s=10,
-            alpha=0.8,
-        )
-        ax.set_title(f"Perplexity: {p}")
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-    fig.suptitle("t-SNE of Latent Space (μ) for vMF-VAE", fontsize=16)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.figure(figsize=(8, 6))
+    plt.scatter(
+        z_tsne[:, 0],
+        z_tsne[:, 1],
+        c=y,
+        cmap=plt.get_cmap("tab10", 10),
+        s=10,
+        alpha=0.8,
+    )
+    plt.title("t-sne of latent space (μ) for vmf-vae")
+    plt.xticks([])
+    plt.yticks([])
+    plt.savefig(filepath, dpi=200, bbox_inches="tight")
     plt.close()
 
     return filepath
 
 
-def plot_pca_analysis(model, loader, device, filepath, n_plot=2000):
-    """Generate PCA analysis: scatter + explained variance."""
-    from sklearn.decomposition import PCA
-
-    print(f"Generating PCA analysis for {n_plot} points...")
+def plot_pca_analysis(model, loader, device, filepath, n_plot=1000):
+    """generate pca analysis: scatter + explained variance."""
+    print(f"generating pca analysis for {n_plot} points...")
     X_z, y = encode_dataset(model, loader, device)
     X_z, y = X_z[:n_plot], y[:n_plot]
 
@@ -180,25 +182,28 @@ def plot_pca_analysis(model, loader, device, filepath, n_plot=2000):
     )
     ax1.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)")
     ax1.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)")
-    ax1.set_title("PCA of Latent Space (μ) - vMF")
+    ax1.set_title("pca of latent space (μ) - vmf")
     plt.colorbar(sc, ax=ax1, ticks=np.unique(y))
 
     # explained variance plot
     n_components = min(20, len(pca.explained_variance_ratio_))
     ax2.bar(range(1, n_components + 1), pca.explained_variance_ratio_[:n_components])
-    ax2.set_xlabel("Principal Component")
-    ax2.set_ylabel("Explained Variance Ratio")
+    ax2.set_xlabel("principal component")
+    ax2.set_ylabel("explained variance ratio")
     ax2.set_title(
-        f"PCA Explained Variance\n(Total: {pca.explained_variance_ratio_.sum():.1%})"
+        f"pca explained variance\n(total: {pca.explained_variance_ratio_.sum():.1%})"
     )
 
     plt.tight_layout()
-    plt.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.savefig(filepath, dpi=200, bbox_inches="tight")
     plt.close()
     return filepath
 
 
 def run(args):
+    script_start_time = time.time()
+    timing_results = {}
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -223,7 +228,7 @@ def run(args):
     test_eval_loader = DataLoader(test_dataset, batch_size=1024)
 
     final_results = []
-    knn_samples = [100, 600, 1000, 2048]
+    knn_samples = [100, 600, 1000]
     logger = WandbLogger(args)
 
     for d_manifold in args.d_dims:
@@ -240,6 +245,7 @@ def run(args):
 
         for run in range(args.n_runs):
             print(f"\n--- Run {run+1}/{args.n_runs} ---")
+            run_start_time = time.time()
 
             # wandb setup
             if logger.use:
@@ -255,6 +261,7 @@ def run(args):
             best_val_loss = float("inf")
             patience_counter = 0
             model_path = f"best_model_vmf_d{d_manifold}_run{run}.pt"
+            train_start_time = time.time()
 
             for epoch in range(args.epochs):
                 model.train()
@@ -302,15 +309,22 @@ def run(args):
                     print(f"\nEarly stopping at epoch {epoch+1}")
                     break
 
+            train_time = time.time() - train_start_time
+            print(f"training time for vmf-d{d_manifold}-run{run+1}: {train_time:.2f}s")
+
             if os.path.exists(model_path):
                 model.load_state_dict(torch.load(model_path, map_location=device))
 
+                eval_start_time = time.time()
                 # knn eval
-                knn_accuracies = perform_knn_evaluation(
+                knn_results = perform_knn_evaluation(
                     model, train_eval_loader, test_eval_loader, device, knn_samples
                 )
-                for n_samples, acc in knn_accuracies.items():
-                    agg_results[n_samples].append(acc)
+                for n_samples in knn_samples:
+                    if f"knn_acc_{n_samples}" in knn_results:
+                        agg_results[n_samples].append(
+                            knn_results[f"knn_acc_{n_samples}"]
+                        )
 
                 # fourier property testing of latent vectors
                 fourier_pseudo = {}
@@ -337,56 +351,68 @@ def run(args):
                 )
 
                 # visualizations
-                if args.visualize or logger.use:
-                    vis_dir = f"visualizations/d_{d_manifold}/vmf"
-                    os.makedirs(vis_dir, exist_ok=True)
-                    print(f"Generating visualizations in {vis_dir}...")
+                vis_dir = f"visualizations/d_{d_manifold}/vmf"
+                os.makedirs(vis_dir, exist_ok=True)
+                print(f"Generating visualizations in {vis_dir}...")
 
-                    recon_path = plot_reconstructions(
-                        model,
-                        test_eval_loader,
-                        device,
-                        os.path.join(vis_dir, "reconstructions.png"),
-                    )
-                    tsne_path = plot_latent_space(
-                        model,
-                        test_eval_loader,
-                        device,
-                        os.path.join(vis_dir, "tsne.png"),
-                    )
-                    pca_path = plot_pca_analysis(
-                        model,
-                        test_eval_loader,
-                        device,
-                        os.path.join(vis_dir, "pca.png"),
-                    )
-                    interp_path = plot_interpolations(
-                        model,
-                        test_eval_loader,
-                        device,
-                        os.path.join(vis_dir, "interpolations.png"),
+                recon_path = plot_reconstructions(
+                    model,
+                    test_eval_loader,
+                    device,
+                    os.path.join(vis_dir, "reconstructions.png"),
+                )
+                tsne_path = plot_latent_space(
+                    model,
+                    test_eval_loader,
+                    device,
+                    os.path.join(vis_dir, "tsne.png"),
+                )
+                pca_path = plot_pca_analysis(
+                    model,
+                    test_eval_loader,
+                    device,
+                    os.path.join(vis_dir, "pca.png"),
+                )
+                interp_path = plot_interpolations(
+                    model,
+                    test_eval_loader,
+                    device,
+                    os.path.join(vis_dir, "interpolations.png"),
+                )
+
+                # manifold visualization for vmf
+                if d_manifold >= 2:
+                    vmf_viz = plot_powerspherical_manifold_visualization(
+                        model, device, vis_dir, n_samples=1000, dims=(0, 1)
                     )
 
-                    if logger.use:
-                        images_to_log = {
-                            "Reconstructions": recon_path,
-                            "Latent t-SNE": tsne_path,
-                            "Latent PCA": pca_path,
-                            "Interpolations": interp_path,
-                        }
-                        for tag, fr in {
-                            "*": fourier_pseudo,
-                            "†": fourier_deconv,
-                        }.items():
-                            if fr.get("similarity_after_k_binds_plot_path"):
-                                images_to_log[f"Similarity_After_K_Binds_{tag}"] = fr[
-                                    "similarity_after_k_binds_plot_path"
-                                ]
-                        logger.log_images(images_to_log)
+                if logger.use:
+                    images_to_log = {
+                        "Reconstructions": recon_path,
+                        "Latent t-SNE": tsne_path,
+                        "Latent PCA": pca_path,
+                        "Interpolations": interp_path,
+                    }
+                    for tag, fr in {
+                        "*": fourier_pseudo,
+                        "†": fourier_deconv,
+                    }.items():
+                        if fr.get("similarity_after_k_binds_plot_path"):
+                            images_to_log[f"Similarity_After_K_Binds_{tag}"] = fr[
+                                "similarity_after_k_binds_plot_path"
+                            ]
+
+                    # add manifold visualization to wandb
+                    if d_manifold >= 2 and vmf_viz:
+                        images_to_log["vMF_Manifold"] = vmf_viz
+
+                    logger.log_images(images_to_log)
 
                 if logger.use:
                     # wandb logging k-NN as metrics
-                    knn_metrics = {f"knn_acc_{k}": v for k, v in knn_accuracies.items()}
+                    knn_metrics = {
+                        k: v for k, v in knn_results.items() if k.startswith("knn_")
+                    }
                     fourier_metrics = {}
                     fourier_metrics.update(
                         {
@@ -403,10 +429,23 @@ def run(args):
                         }
                     )
 
+                    # compute class means and mean vector cosine accuracy
+                    train_subset = torch.utils.data.Subset(
+                        train_dataset, list(range(min(5000, len(train_dataset))))
+                    )
+                    train_subset_loader = DataLoader(train_subset, batch_size=256)
+                    class_means = compute_class_means(
+                        model, train_subset_loader, device, max_per_class=1000
+                    )
+                    mean_vector_acc, per_class_acc = evaluate_mean_vector_cosine(
+                        model, test_eval_loader, device, class_means
+                    )
+
                     logger.log_metrics(
                         {
                             **knn_metrics,
                             **fourier_metrics,
+                            "mean_vector_cosine_acc": float(mean_vector_acc),
                             "final_val_loss": best_val_loss,
                         }
                     )
@@ -415,9 +454,22 @@ def run(args):
                         **knn_metrics,
                         "final_val_loss": best_val_loss,
                         **fourier_metrics,
+                        "mean_vector_cosine_acc": float(mean_vector_acc),
                     }
                     logger.log_summary(summary_metrics)
                     logger.finish_run()
+
+                eval_time = time.time() - eval_start_time
+                run_time = time.time() - run_start_time
+
+                # store timing info
+                timing_key = f"vmf_d{d_manifold}_run{run+1}"
+                timing_results[timing_key] = {
+                    "train_time_s": train_time,
+                    "eval_time_s": eval_time,
+                    "total_run_time_s": run_time,
+                }
+                print(f"eval time: {eval_time:.2f}s, total run time: {run_time:.2f}s")
 
                 os.remove(model_path)
 
@@ -441,6 +493,14 @@ def run(args):
     else:
         print("No results were generated.")
 
+    # save timing results
+    script_total_time = time.time() - script_start_time
+    timing_results["total_script_time_s"] = script_total_time
+    with open("mnist_vmf_timing.json", "w") as f:
+        json.dump(timing_results, f, indent=2)
+    print(f"\ntotal script execution time: {script_total_time:.2f}s")
+    print(f"timing results saved to mnist_vmf_timing.json")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run vMF-VAE experiments on MNIST.")
@@ -454,7 +514,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--h_dim", type=int, default=128, help="Hidden layer size")
 
-    parser.add_argument("--epochs", type=int, default=200, help="Training epochs")
+    parser.add_argument("--epochs", type=int, default=500, help="Training epochs")
     parser.add_argument(
         "--patience",
         type=int,
@@ -468,12 +528,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lr", type=float, default=3e-4, help="Learning rate"
     )  # modified for greater stability at d=40
+    parser.add_argument(
+        "--l2_norm",
+        action="store_true",
+        help="L2 normalize latents (not typically used for vMF)",
+    )
 
     parser.add_argument(
-        "--n_runs", type=int, default=5, help="Number of runs for statistical averaging"
-    )
-    parser.add_argument(
-        "--visualize", action="store_true", help="Generate visualizations"
+        "--n_runs",
+        type=int,
+        default=20,
+        help="Number of runs for statistical averaging",
     )
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument(

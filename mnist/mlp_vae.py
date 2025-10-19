@@ -17,10 +17,11 @@ from dists.clifford import (
 
 
 class MLPVAE(nn.Module):
-    def __init__(self, h_dim: int, z_dim: int, distribution: str = "normal"):
+    def __init__(self, h_dim: int, z_dim: int, distribution: str = "normal", l2_normalize: bool = False):
         super().__init__()
         self.z_dim = z_dim
         self.distribution = distribution
+        self.l2_normalize = l2_normalize
 
         # encoder: 784 -> 256 -> 128
         self.encoder = nn.Sequential(
@@ -59,7 +60,10 @@ class MLPVAE(nn.Module):
     def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         h = self.encoder(x)
         if self.distribution == "normal":
-            return self.fc_mean(h), self.fc_var(h)
+            z_mean = self.fc_mean(h)
+            if self.l2_normalize:
+                z_mean = F.normalize(z_mean, p=2, dim=-1)
+            return z_mean, self.fc_var(h)
         elif self.distribution in ["powerspherical", "vmf"]:
             z_mean = F.normalize(self.fc_mean(h), p=2, dim=-1)
             z_scale = F.softplus(self.fc_scale(h)) + 1
@@ -99,6 +103,8 @@ class MLPVAE(nn.Module):
         z_mean, z_param2 = self.encode(x.view(-1, 784))
         q_z, p_z = self.reparameterize(z_mean, z_param2)
         z = q_z.rsample()
+        if self.distribution == "normal" and self.l2_normalize:
+            z = F.normalize(z, p=2, dim=-1)
         x_recon = self.decoder(z)
         return (z_mean, z_param2), (q_z, p_z), z, x_recon
 

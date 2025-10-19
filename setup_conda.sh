@@ -12,15 +12,15 @@ conda activate $ENV_NAME
 
 echo "Installing core packages..."
 conda install -y \
-    numpy>=1.24 \
-    scipy>=1.10 \
-    matplotlib>=3.7 \
-    scikit-learn>=1.3 \
-    pandas>=1.5
+  numpy \
+  scipy \
+  matplotlib \
+  scikit-learn \
+  pandas >=1.24 >=1.10 >=3.7 >=1.3 >=1.5
 
-# Install PyTorch 
+# Install PyTorch
 echo "Installing PyTorch..."
-# GPU 
+# GPU
 # conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia -y
 # CPU
 conda install pytorch torchvision torchaudio -c pytorch -y
@@ -30,3 +30,4 @@ echo "Installing additional packages..."
 pip install wandb lpips
 
 echo "Setup complete! Activate with: conda activate $ENV_NAME"
+
