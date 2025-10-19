@@ -557,14 +557,6 @@ def run(args):
                         os.path.join(vis_dir, "interpolations.png"),
                     )
 
-                    # confusion matrix disabled for mnist (only works with cnn datasets)
-                    # mnist_class_names = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
-                    # confusion_path = os.path.join(vis_dir, "confusion_matrix_with_samples.png")
-                    # generate_confusion_matrix_with_sample_visualisation(
-                    #     model, test_eval_loader, device, confusion_path,
-                    #     n_samples_per_class=10, class_names=mnist_class_names
-                    # )
-
                     # manifold-specific visualizations
                     if dist == "clifford" and mdim >= 2:
                         cliff_viz = plot_clifford_manifold_visualization(
