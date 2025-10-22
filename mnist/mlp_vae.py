@@ -67,12 +67,12 @@ class MLPVAE(nn.Module):
         elif self.distribution in ["powerspherical", "vmf"]:
             z_mean = F.normalize(self.fc_mean(h), p=2, dim=-1)
             z_scale = F.softplus(self.fc_scale(h)) + 1
-            z_scale = torch.clamp(z_scale, max=100.0)
+            z_scale = torch.clamp(z_scale, max=1.0)
             return z_mean, z_scale
         else:  # clifford
             z_mean_angles = self.fc_mean(h)
             z_scale = F.softplus(self.fc_scale(h)) + 1
-            z_scale = torch.clamp(z_scale, max=100.0)
+            z_scale = torch.clamp(z_scale, max=1.0)
             return z_mean_angles, z_scale
 
     def reparameterize(self, z_mean: torch.Tensor, z_param2: torch.Tensor):
