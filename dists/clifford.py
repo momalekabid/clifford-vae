@@ -1,4 +1,6 @@
 import math
+from typing import Dict
+
 import torch
 from torch.distributions import (
     Distribution,
@@ -238,7 +240,7 @@ class CliffordTorusUniform(Distribution):
 
 
 class CliffordTorusDistribution(Distribution):
-    arg_constraints = {}
+    arg_constraints: Dict[str, constraints.Constraint] = {}
     has_rsample = True
 
     def __init__(self, loc, concentration, validate_args=None):
@@ -274,7 +276,6 @@ class CliffordTorusDistribution(Distribution):
 
 class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
     arg_constraints = {"loc": constraints.real, "concentration": constraints.positive}
-    support = constraints.real
     has_rsample = True
 
     def __init__(
@@ -284,7 +285,7 @@ class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
         self.normalize_ifft = normalize_ifft
         self.dtype = loc.dtype
 
-    def rsample(self, sample_shape=torch.Size()):
+    def rsample(self, sample_shape=torch.Size()) -> torch.Tensor:
         mean_dir = torch.stack((torch.cos(self.loc), torch.sin(self.loc)), -1)
         ps = PowerSpherical(mean_dir, self.concentration)
         v = ps.rsample(sample_shape)
