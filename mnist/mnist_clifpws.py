@@ -415,13 +415,13 @@ def run(args):
                     item_labels = torch.cat(labels_list, 0)[:500].to(device)
                     item_images = torch.cat(images_list, 0)[:500]
 
-                    # test 1: 2-items-per-class bundle capacity (no braiding)
-                    print(f"running 2-items-per-class test ({dist}, no braiding)...")
+                    # test 1: 1-item-per-class bundle capacity (no braiding)
+                    print(f"running 1-item-per-class test ({dist}, no braiding)...")
                     two_per_class_res = test_per_class_bundle_capacity_two_items(
                         d=item_memory.shape[-1],
                         n_items=500,
                         n_classes=10,
-                        items_per_class=2,
+                        items_per_class=1,
                         n_trials=10,
                         normalize=normalize_vectors,
                         device=device,
@@ -450,7 +450,7 @@ def run(args):
 
                     # test 2b: classical bundle capacity (with braiding)
                     bundle_cap_raw_braid = {}
-                    if not args.no_braid:
+                    if args.braid:
                         print(
                             f"running classical bundle capacity ({dist}, WITH braiding)..."
                         )
@@ -507,7 +507,7 @@ def run(args):
                     # test 3b: bind-bundle-unbind (WITH braiding)
                     unbind_bundled_raw_braid = {}
                     unbind_bundled_res_inv_braid = {}
-                    if not args.no_braid:
+                    if args.braid:
                         print(f"running bind-bundle-unbind test ({dist}, WITH braiding)...")
                         unbind_bundled_raw_braid = vsa_binding_unbinding(
                             d=item_memory.shape[-1],
@@ -866,9 +866,9 @@ if __name__ == "__main__":
         help="W&B project name",
     )
     parser.add_argument(
-        "--no_braid",
+        "--braid",
         action="store_true",
-        help="skip braiding tests",
+        help="run braiding tests",
     )
 
     args = parser.parse_args()

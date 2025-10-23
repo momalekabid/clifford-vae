@@ -438,15 +438,15 @@ def main(args):
                         item_labels = torch.cat(labels_list, 0)[:1000].to(DEVICE)
                         item_images = torch.cat(images_list, 0)[:1000]
 
-                        # === test 1: 2-items-per-class similarity matrix (no braiding) ===
+                        # === test 1: 1-item-per-class similarity matrix (no braiding) ===
                         print(
-                            f"running 2-items-per-class test ({dist_name}, no braiding)..."
+                            f"running 1-item-per-class test ({dist_name}, no braiding)..."
                         )
                         two_per_class_res = test_per_class_bundle_capacity_two_items(
                             d=item_memory.shape[-1],
                             n_items=1000,
                             n_classes=10,
-                            items_per_class=2,
+                            items_per_class=1,
                             n_trials=20,
                             normalize=normalize_vectors,
                             device=DEVICE,
@@ -477,7 +477,7 @@ def main(args):
 
                         # test 2b: classical bundle capacity (with braiding)
                         bundle_cap_raw_braid = {}
-                        if not args.no_braid:
+                        if args.braid:
                             print(
                                 f"running classical bundle capacity ({dist_name}, WITH braiding)..."
                             )
@@ -537,7 +537,7 @@ def main(args):
                         # === test 3b: bind-bundle-unbind (WITH braiding) ===
                         unbind_bundled_raw_braid = {}
                         unbind_bundled_res_inv_braid = {}
-                        if not args.no_braid:
+                        if args.braid:
                             print(
                                 f"running bind-bundle-unbind test ({dist_name}, WITH braiding)..."
                             )
@@ -951,9 +951,9 @@ if __name__ == "__main__":
         help="latent dims to test (default=[2,4,128,512,1024,2048,4096])",
     )
     p.add_argument(
-        "--no_braid",
+        "--braid",
         action="store_true",
-        help="skip braiding tests",
+        help="run braiding tests",
     )
     args = p.parse_args()
     main(args)
