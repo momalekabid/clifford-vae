@@ -392,15 +392,6 @@ def main(args):
                             patience_counter = 0
                         else:
                             patience_counter += 1
-                        if hasattr(model, "distribution") and model.distribution in [
-                            "powerspherical",
-                            "clifford",
-                        ]:
-                            conc_key = f"test/{model.distribution}_concentration_mean"
-                            if conc_key in test_losses:
-                                print(
-                                    f"Epoch {epoch}: {model.distribution} concentration mean={test_losses[conc_key]:.4f}, max={test_losses[f'test/{model.distribution}_concentration_max']:.4f}"
-                                )
 
                         logger.log_metrics(
                             {
@@ -485,21 +476,23 @@ def main(args):
                         )
 
                         # test 2b: classical bundle capacity (with braiding)
-                        print(
-                            f"running classical bundle capacity ({dist_name}, WITH braiding)..."
-                        )
-                        bundle_cap_raw_braid = vsa_bundle_capacity(
-                            d=item_memory.shape[-1],
-                            n_items=1000,
-                            k_range=list(range(5, 51, 5)),
-                            n_trials=20,
-                            normalize=normalize_vectors,
-                            device=DEVICE,
-                            plot=True,
-                            save_dir=os.path.join(output_dir, "braided"),
-                            item_memory=item_memory.clone(),
-                            use_braiding=True,
-                        )
+                        bundle_cap_raw_braid = {}
+                        if not args.no_braid:
+                            print(
+                                f"running classical bundle capacity ({dist_name}, WITH braiding)..."
+                            )
+                            bundle_cap_raw_braid = vsa_bundle_capacity(
+                                d=item_memory.shape[-1],
+                                n_items=1000,
+                                k_range=list(range(5, 51, 5)),
+                                n_trials=20,
+                                normalize=normalize_vectors,
+                                device=DEVICE,
+                                plot=True,
+                                save_dir=os.path.join(output_dir, "braided"),
+                                item_memory=item_memory.clone(),
+                                use_braiding=True,
+                            )
                         bundle_cap_res = {
                             "bundle_capacity_plot": os.path.join(
                                 output_dir, "bundle_capacity.png"
@@ -542,35 +535,38 @@ def main(args):
                         }
 
                         # === test 3b: bind-bundle-unbind (WITH braiding) ===
-                        print(
-                            f"running bind-bundle-unbind test ({dist_name}, WITH braiding)..."
-                        )
-                        unbind_bundled_raw_braid = vsa_binding_unbinding(
-                            d=item_memory.shape[-1],
-                            n_items=1000,
-                            k_range=list(range(5, 31, 5)),
-                            n_trials=20,
-                            normalize=normalize_vectors,
-                            device=DEVICE,
-                            plot=True,
-                            save_dir=os.path.join(output_dir, "braided"),
-                            item_memory=item_memory.clone(),
-                            use_braiding=True,
-                        )
-                        unbind_bundled_res_inv_braid = {
-                            "unbind_bundled_plot_braid": os.path.join(
-                                output_dir,
-                                "braided",
-                                "unbind_bundled_pairs_inv_braided.png",
-                            ),
-                            "unbind_bundled_accuracies_braid": {
-                                k: acc
-                                for k, acc in zip(
-                                    unbind_bundled_raw_braid["k"],
-                                    unbind_bundled_raw_braid["accuracy"],
-                                )
-                            },
-                        }
+                        unbind_bundled_raw_braid = {}
+                        unbind_bundled_res_inv_braid = {}
+                        if not args.no_braid:
+                            print(
+                                f"running bind-bundle-unbind test ({dist_name}, WITH braiding)..."
+                            )
+                            unbind_bundled_raw_braid = vsa_binding_unbinding(
+                                d=item_memory.shape[-1],
+                                n_items=1000,
+                                k_range=list(range(5, 31, 5)),
+                                n_trials=20,
+                                normalize=normalize_vectors,
+                                device=DEVICE,
+                                plot=True,
+                                save_dir=os.path.join(output_dir, "braided"),
+                                item_memory=item_memory.clone(),
+                                use_braiding=True,
+                            )
+                            unbind_bundled_res_inv_braid = {
+                                "unbind_bundled_plot_braid": os.path.join(
+                                    output_dir,
+                                    "braided",
+                                    "unbind_bundled_pairs_inv_braided.png",
+                                ),
+                                "unbind_bundled_accuracies_braid": {
+                                    k: acc
+                                    for k, acc in zip(
+                                        unbind_bundled_raw_braid["k"],
+                                        unbind_bundled_raw_braid["accuracy"],
+                                    )
+                                },
+                            }
 
                         fourier_star = test_self_binding(
                             model,
@@ -953,6 +949,11 @@ if __name__ == "__main__":
         nargs="+",
         default=None,
         help="latent dims to test (default=[2,4,128,512,1024,2048,4096])",
+    )
+    p.add_argument(
+        "--no_braid",
+        action="store_true",
+        help="skip braiding tests",
     )
     args = p.parse_args()
     main(args)

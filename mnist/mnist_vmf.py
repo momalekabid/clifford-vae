@@ -544,6 +544,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--wandb_project", type=str, default="aug-19-mnistvmf", help="W&B project name"
     )
+    parser.add_argument(
+        "--no_braid",
+        action="store_true",
+        help="skip braiding tests",
+    )
 
     args = parser.parse_args()
     run(args)

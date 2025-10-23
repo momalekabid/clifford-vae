@@ -449,21 +449,23 @@ def run(args):
                     )
 
                     # test 2b: classical bundle capacity (with braiding)
-                    print(
-                        f"running classical bundle capacity ({dist}, WITH braiding)..."
-                    )
-                    bundle_cap_raw_braid = vsa_bundle_capacity(
-                        d=item_memory.shape[-1],
-                        n_items=500,
-                        k_range=list(range(5, 31, 5)),
-                        n_trials=10,
-                        normalize=normalize_vectors,
-                        device=device,
-                        plot=True,
-                        save_dir=os.path.join(vis_dir, "braided"),
-                        item_memory=item_memory.clone(),
-                        use_braiding=True,
-                    )
+                    bundle_cap_raw_braid = {}
+                    if not args.no_braid:
+                        print(
+                            f"running classical bundle capacity ({dist}, WITH braiding)..."
+                        )
+                        bundle_cap_raw_braid = vsa_bundle_capacity(
+                            d=item_memory.shape[-1],
+                            n_items=500,
+                            k_range=list(range(5, 31, 5)),
+                            n_trials=10,
+                            normalize=normalize_vectors,
+                            device=device,
+                            plot=True,
+                            save_dir=os.path.join(vis_dir, "braided"),
+                            item_memory=item_memory.clone(),
+                            use_braiding=True,
+                        )
                     bundle_cap_res = {
                         "bundle_capacity_plot": os.path.join(
                             vis_dir, "bundle_capacity.png"
@@ -503,31 +505,34 @@ def run(args):
                     }
 
                     # test 3b: bind-bundle-unbind (WITH braiding)
-                    print(f"running bind-bundle-unbind test ({dist}, WITH braiding)...")
-                    unbind_bundled_raw_braid = vsa_binding_unbinding(
-                        d=item_memory.shape[-1],
-                        n_items=500,
-                        k_range=list(range(5, 21, 5)),
-                        n_trials=10,
-                        normalize=normalize_vectors,
-                        device=device,
-                        plot=True,
-                        save_dir=os.path.join(vis_dir, "braided"),
-                        item_memory=item_memory.clone(),
-                        use_braiding=True,
-                    )
-                    unbind_bundled_res_inv_braid = {
-                        "unbind_bundled_plot_braid": os.path.join(
-                            vis_dir, "braided", "unbind_bundled_pairs_inv_braided.png"
-                        ),
-                        "unbind_bundled_accuracies_braid": {
-                            k: acc
-                            for k, acc in zip(
-                                unbind_bundled_raw_braid["k"],
-                                unbind_bundled_raw_braid["accuracy"],
-                            )
-                        },
-                    }
+                    unbind_bundled_raw_braid = {}
+                    unbind_bundled_res_inv_braid = {}
+                    if not args.no_braid:
+                        print(f"running bind-bundle-unbind test ({dist}, WITH braiding)...")
+                        unbind_bundled_raw_braid = vsa_binding_unbinding(
+                            d=item_memory.shape[-1],
+                            n_items=500,
+                            k_range=list(range(5, 21, 5)),
+                            n_trials=10,
+                            normalize=normalize_vectors,
+                            device=device,
+                            plot=True,
+                            save_dir=os.path.join(vis_dir, "braided"),
+                            item_memory=item_memory.clone(),
+                            use_braiding=True,
+                        )
+                        unbind_bundled_res_inv_braid = {
+                            "unbind_bundled_plot_braid": os.path.join(
+                                vis_dir, "braided", "unbind_bundled_pairs_inv_braided.png"
+                            ),
+                            "unbind_bundled_accuracies_braid": {
+                                k: acc
+                                for k, acc in zip(
+                                    unbind_bundled_raw_braid["k"],
+                                    unbind_bundled_raw_braid["accuracy"],
+                                )
+                            },
+                        }
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
@@ -859,6 +864,11 @@ if __name__ == "__main__":
         type=str,
         default="mnist-svae-experiments",
         help="W&B project name",
+    )
+    parser.add_argument(
+        "--no_braid",
+        action="store_true",
+        help="skip braiding tests",
     )
 
     args = parser.parse_args()
