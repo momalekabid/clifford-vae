@@ -35,6 +35,7 @@ from utils.vsa import (
     test_binding_unbinding_pairs as vsa_binding_unbinding,
     test_per_class_bundle_capacity_two_items,
     test_binding_unbinding_with_self_binding,
+    test_cross_class_bind_interpolation_and_memory,
 )
 
 
@@ -269,12 +270,8 @@ def main(args):
     print(f"Device: {DEVICE}")
     logger = WandbLogger(args)
 
-    latent_dims = (
-        args.latent_dims
-        if args.latent_dims
-        else [2, 4, 128, 256, 512, 1024, 2048, 4096]
-    )
-    distributions = ["clifford", "gaussian", "powerspherical"]
+    latent_dims = args.latent_dims if args.latent_dims else [2, 4, 512, 2048, 4096]
+    distributions = ["clifford", "gaussian"]
     datasets_to_test = ["fashionmnist", "cifar10"]
     dataset_map = {"fashionmnist": datasets.FashionMNIST, "cifar10": datasets.CIFAR10}
 
@@ -568,6 +565,28 @@ def main(args):
                                 },
                             }
 
+                        # === test 4: cross-class bind interpolation and memory test ===
+                        print(
+                            f"running cross-class bind interpolation and memory test ({dist_name})..."
+                        )
+                        cross_class_memory_res = (
+                            test_cross_class_bind_interpolation_and_memory(
+                                d=item_memory.shape[-1],
+                                n_items=1000,
+                                n_classes=10,
+                                n_trials=20,
+                                normalize=normalize_vectors,
+                                device=DEVICE,
+                                plot=True,
+                                save_dir=output_dir,
+                                item_memory=item_memory,
+                                labels=item_labels,
+                                item_images=item_images,
+                                unbind_method="inv",
+                                n_interp_steps=5,
+                            )
+                        )
+
                         fourier_star = test_self_binding(
                             model,
                             test_loader,
@@ -706,6 +725,12 @@ def main(args):
                                 "cross_class_bind_unbind_similarity_perp": cross_class_perp.get(
                                     "cross_class_bind_unbind_similarity", 0.0
                                 ),
+                                "cross_class_memory_accuracy": cross_class_memory_res.get(
+                                    "memory_accuracy_mean", 0.0
+                                ),
+                                "cross_class_memory_accuracy_std": cross_class_memory_res.get(
+                                    "memory_accuracy_std", 0.0
+                                ),
                             }
                         )
 
@@ -773,6 +798,11 @@ def main(args):
                         if cross_class_perp.get("cross_class_bind_unbind_plot_path"):
                             images["cross_class_binding_perp"] = cross_class_perp[
                                 "cross_class_bind_unbind_plot_path"
+                            ]
+
+                        if cross_class_memory_res.get("plot_path"):
+                            images["cross_class_memory_test"] = cross_class_memory_res[
+                                "plot_path"
                             ]
 
                         if dist_name == "clifford" and 2 <= model.latent_dim <= 8:
@@ -855,6 +885,12 @@ def main(args):
                             **braiding_metrics,
                             **excluded_metrics,
                             mean_metric_key: float(mean_vector_acc),
+                            "cross_class_memory_accuracy": cross_class_memory_res.get(
+                                "memory_accuracy_mean", 0.0
+                            ),
+                            "cross_class_memory_accuracy_std": cross_class_memory_res.get(
+                                "memory_accuracy_std", 0.0
+                            ),
                         }
                         logger.log_summary(summary)
                         logger.log_images(images)
@@ -894,10 +930,10 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(
         description="clifford vae experiments on fashionmnist/cifar10"
     )
-    p.add_argument("--epochs", type=int, default=500, help="training epochs")
+    p.add_argument("--epochs", type=int, default=600, help="training epochs")
     p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs")
-    p.add_argument("--batch_size", type=int, default=128, help="batch size")
-    p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
+    p.add_argument("--batch_size", type=int, default=256, help="batch size")
+    p.add_argument("--lr", type=float, default=6e-4, help="learning rate")
     p.add_argument(
         "--no-l2_norm",
         dest="l2_norm",
@@ -924,17 +960,17 @@ if __name__ == "__main__":
         default="clifford-experiments-CNN",
         help="wandb project name",
     )
-    p.add_argument("--patience", type=int, default=50, help="early stopping patience")
+    p.add_argument("--patience", type=int, default=100, help="early stopping patience")
     p.add_argument(
         "--cycle_epochs",
         type=int,
-        default=100,
+        default=200,
         help="cycle length for cyclical kl beta (0=off)",
     )
     p.add_argument(
         "--n_trials",
         type=int,
-        default=5,
+        default=1,
         help="trials per config for statistical averaging",
     )
     p.add_argument(

@@ -1021,6 +1021,256 @@ def test_per_class_bundle_capacity_two_items(
     return {"avg_similarity_matrix": None}
 
 
+def test_cross_class_bind_interpolation_and_memory(
+    d: int = 1024,
+    n_items: int = 1000,
+    n_classes: int = 10,
+    n_trials: int = 20,
+    normalize: bool = True,
+    device: str = "cpu",
+    plot: bool = False,
+    save_dir: Optional[str] = None,
+    item_memory: Optional[torch.Tensor] = None,
+    labels: Optional[torch.Tensor] = None,
+    item_images: Optional[torch.Tensor] = None,
+    unbind_method: str = "inv",
+    n_interp_steps: int = 5,
+) -> Dict:
+    """
+    cross-class binding with interpolation and memory test.
+
+    part 1: bind two classes and interpolate between them
+    part 2: memory test - bind pairs (1,2), (3,4), (5,6), (7,8), (9,0)
+            bundle all 5 pairs together
+            try to recover original vectors from the bundle using unbinding
+    """
+    if item_memory is None:
+        item_memory = hrr_init(n_items, d, device=device)
+        if normalize:
+            item_memory = normalize_vectors(item_memory)
+        labels = torch.randint(0, n_classes, (n_items,), device=device)
+    else:
+        item_memory = item_memory[:n_items].to(device)
+        if normalize:
+            item_memory = normalize_vectors(item_memory)
+        if labels is None:
+            labels = torch.randint(0, n_classes, (n_items,), device=device)
+        else:
+            labels = labels[:n_items].to(device)
+
+    unique_classes = torch.unique(labels).cpu().numpy()
+    if len(unique_classes) < n_classes:
+        print(f"warning: only {len(unique_classes)} classes found, need {n_classes}")
+        n_classes = len(unique_classes)
+
+    # build class-to-items mapping
+    class_to_items = {}
+    for class_id in unique_classes[:n_classes]:
+        class_indices = torch.where(labels == class_id)[0]
+        if len(class_indices) > 0:
+            class_to_items[class_id] = class_indices
+
+    # part 1: interpolation between two bound classes
+    interp_results = []
+    interp_vectors = []
+
+    if len(class_to_items) >= 2:
+        # pick first two classes
+        classes = list(class_to_items.keys())[:2]
+        class_a_idx = class_to_items[classes[0]][0].item()
+        class_b_idx = class_to_items[classes[1]][0].item()
+
+        vec_a = item_memory[class_a_idx]
+        vec_b = item_memory[class_b_idx]
+
+        # bind a and b
+        ab = bind(vec_a.unsqueeze(0), vec_b.unsqueeze(0)).squeeze(0)
+
+        # interpolate between a and ab
+        alphas = torch.linspace(0, 1, n_interp_steps, device=device)
+        for alpha in alphas:
+            interp = (1 - alpha) * vec_a + alpha * ab
+            if normalize:
+                interp = normalize_vectors(interp.unsqueeze(0)).squeeze(0)
+            interp_vectors.append(interp)
+
+        interp_results = {
+            "class_a_idx": class_a_idx,
+            "class_b_idx": class_b_idx,
+            "class_a_label": int(classes[0]),
+            "class_b_label": int(classes[1]),
+        }
+
+    # part 2: memory test with multiple bound pairs
+    memory_accuracies = []
+
+    for trial in range(n_trials):
+        # create pairs: (0,1), (2,3), (4,5), (6,7), (8,9)
+        pairs = []
+        pair_classes = []
+
+        # ensure we have 10 classes for 5 pairs
+        available_classes = list(class_to_items.keys())[:min(10, len(class_to_items))]
+        if len(available_classes) < 10:
+            # pad with available classes
+            while len(available_classes) < 10:
+                available_classes.append(available_classes[len(available_classes) % len(class_to_items)])
+
+        for i in range(0, min(10, len(available_classes)), 2):
+            if i+1 < len(available_classes):
+                class_a = available_classes[i]
+                class_b = available_classes[i+1]
+
+                # randomly select one item from each class
+                idx_a = class_to_items[class_a][torch.randint(0, len(class_to_items[class_a]), (1,))].item()
+                idx_b = class_to_items[class_b][torch.randint(0, len(class_to_items[class_b]), (1,))].item()
+
+                vec_a = item_memory[idx_a]
+                vec_b = item_memory[idx_b]
+
+                # bind a and b
+                bound = bind(vec_a.unsqueeze(0), vec_b.unsqueeze(0)).squeeze(0)
+
+                pairs.append({
+                    "bound": bound,
+                    "vec_a": vec_a,
+                    "vec_b": vec_b,
+                    "class_a": class_a,
+                    "class_b": class_b,
+                    "idx_a": idx_a,
+                    "idx_b": idx_b,
+                })
+                pair_classes.append((class_a, class_b))
+
+        if len(pairs) < 2:
+            continue
+
+        # bundle all pairs
+        all_bounds = torch.stack([p["bound"] for p in pairs])
+        bundled = bundle(all_bounds, normalize=True)
+
+        # try to recover each vector from the bundle
+        correct_recoveries = 0
+        total_recoveries = 0
+
+        for i, pair in enumerate(pairs):
+            # recover b from bundled using a
+            recovered_b = unbind(
+                bundled.unsqueeze(0),
+                pair["vec_a"].unsqueeze(0),
+                method=unbind_method
+            ).squeeze(0)
+
+            # check if recovered_b is most similar to original vec_b
+            sims_b = similarity(recovered_b.unsqueeze(0), item_memory)
+            best_idx_b = torch.argmax(sims_b).item()
+
+            if best_idx_b == pair["idx_b"]:
+                correct_recoveries += 1
+            total_recoveries += 1
+
+            # recover a from bundled using b
+            recovered_a = unbind(
+                bundled.unsqueeze(0),
+                pair["vec_b"].unsqueeze(0),
+                method=unbind_method
+            ).squeeze(0)
+
+            # check if recovered_a is most similar to original vec_a
+            sims_a = similarity(recovered_a.unsqueeze(0), item_memory)
+            best_idx_a = torch.argmax(sims_a).item()
+
+            if best_idx_a == pair["idx_a"]:
+                correct_recoveries += 1
+            total_recoveries += 1
+
+        accuracy = correct_recoveries / max(1, total_recoveries)
+        memory_accuracies.append(accuracy)
+
+    results = {
+        "interpolation": interp_results,
+        "interpolation_vectors": interp_vectors,
+        "memory_accuracy_mean": float(np.mean(memory_accuracies)) if memory_accuracies else 0.0,
+        "memory_accuracy_std": float(np.std(memory_accuracies)) if memory_accuracies else 0.0,
+        "n_pairs_bundled": len(pairs) if pairs else 0,
+    }
+
+    # plotting
+    if plot and save_dir:
+        import os
+        os.makedirs(save_dir, exist_ok=True)
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+        # plot 1: interpolation visualization (if we have images)
+        if item_images is not None and interp_vectors:
+            # we'll need to decode the interpolation vectors
+            # for now, just show the original images
+            ax = axes[0]
+            if len(interp_results) > 0:
+                # show original images for class a and b
+                class_a_idx = interp_results["class_a_idx"]
+                class_b_idx = interp_results["class_b_idx"]
+
+                img_a = item_images[class_a_idx]
+                img_b = item_images[class_b_idx]
+
+                # denormalize
+                img_a = (img_a * 0.5 + 0.5).clamp(0, 1)
+                img_b = (img_b * 0.5 + 0.5).clamp(0, 1)
+
+                # convert to numpy
+                if img_a.shape[0] == 1:
+                    img_a_np = img_a.squeeze(0).cpu().numpy()
+                    img_b_np = img_b.squeeze(0).cpu().numpy()
+                    cmap = 'gray'
+                else:
+                    img_a_np = img_a.permute(1, 2, 0).cpu().numpy()
+                    img_b_np = img_b.permute(1, 2, 0).cpu().numpy()
+                    cmap = None
+
+                # create side-by-side visualization
+                if cmap == 'gray':
+                    combined = np.concatenate([img_a_np, img_b_np], axis=1)
+                    ax.imshow(combined, cmap=cmap)
+                else:
+                    combined = np.concatenate([img_a_np, img_b_np], axis=1)
+                    ax.imshow(combined)
+
+                ax.set_title(f'cross-class binding: class {interp_results["class_a_label"]} ⊛ class {interp_results["class_b_label"]}')
+                ax.axis('off')
+            else:
+                ax.text(0.5, 0.5, 'no interpolation data', ha='center', va='center')
+                ax.axis('off')
+        else:
+            axes[0].text(0.5, 0.5, 'interpolation visualization\nrequires decoder', ha='center', va='center')
+            axes[0].axis('off')
+
+        # plot 2: memory test results
+        ax = axes[1]
+        if memory_accuracies:
+            ax.bar(range(len(memory_accuracies)), memory_accuracies, alpha=0.7, edgecolor='black')
+            ax.axhline(np.mean(memory_accuracies), color='red', linestyle='--',
+                      label=f'mean: {np.mean(memory_accuracies):.3f}')
+            ax.set_xlabel('trial')
+            ax.set_ylabel('recovery accuracy')
+            ax.set_title(f'memory test: {len(pairs)} bound pairs bundled')
+            ax.legend()
+            ax.grid(alpha=0.3)
+            ax.set_ylim(0, 1.05)
+        else:
+            ax.text(0.5, 0.5, 'no memory test data', ha='center', va='center')
+            ax.axis('off')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, 'cross_class_bind_memory_test.png'), dpi=200)
+        plt.close()
+
+        results["plot_path"] = os.path.join(save_dir, 'cross_class_bind_memory_test.png')
+
+    return results
+
+
 def test_per_class_bundle_capacity(
     d: int = 1024,
     n_items: int = 1000,

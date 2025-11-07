@@ -33,6 +33,7 @@ from utils.vsa import (
     test_binding_unbinding_pairs as vsa_binding_unbinding,
     test_per_class_bundle_capacity_two_items,
     test_binding_unbinding_with_self_binding,
+    test_cross_class_bind_interpolation_and_memory,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss
 
@@ -534,6 +535,24 @@ def run(args):
                             },
                         }
 
+                    # test 4: cross-class bind interpolation and memory test
+                    print(f"running cross-class bind interpolation and memory test ({dist})...")
+                    cross_class_memory_res = test_cross_class_bind_interpolation_and_memory(
+                        d=item_memory.shape[-1],
+                        n_items=500,
+                        n_classes=10,
+                        n_trials=10,
+                        normalize=normalize_vectors,
+                        device=device,
+                        plot=True,
+                        save_dir=vis_dir,
+                        item_memory=item_memory,
+                        labels=item_labels,
+                        item_images=item_images,
+                        unbind_method="inv",
+                        n_interp_steps=5,
+                    )
+
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
 
@@ -654,6 +673,12 @@ def run(args):
                                 ]
                             )
 
+                        # add cross-class memory test
+                        if cross_class_memory_res.get("plot_path"):
+                            images_to_log["Cross_Class_Memory_Test"] = (
+                                cross_class_memory_res["plot_path"]
+                            )
+
                         # add manifold-specific visualizations to wandb
                         if dist == "clifford" and mdim >= 2 and cliff_viz:
                             images_to_log["Clifford_Manifold"] = cliff_viz
@@ -747,6 +772,12 @@ def run(args):
                                 "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
                                     "cross_class_bind_unbind_similarity", 0.0
                                 ),
+                                "cross_class_memory_accuracy": cross_class_memory_res.get(
+                                    "memory_accuracy_mean", 0.0
+                                ),
+                                "cross_class_memory_accuracy_std": cross_class_memory_res.get(
+                                    "memory_accuracy_std", 0.0
+                                ),
                             }
                         )
 
@@ -761,6 +792,12 @@ def run(args):
                             ),
                             "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
                                 "cross_class_bind_unbind_similarity", 0.0
+                            ),
+                            "cross_class_memory_accuracy": cross_class_memory_res.get(
+                                "memory_accuracy_mean", 0.0
+                            ),
+                            "cross_class_memory_accuracy_std": cross_class_memory_res.get(
+                                "memory_accuracy_std", 0.0
                             ),
                         }
                         logger.log_summary(summary_metrics)
