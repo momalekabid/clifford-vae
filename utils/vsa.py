@@ -124,10 +124,14 @@ def test_bundle_capacity(
                     random_keys = normalize_vectors(random_keys)
                 bound_vectors = bind(selected, random_keys)
                 bundled = bundle(bound_vectors, normalize=True)
-                unbounded_from_bundle = bind(bundled.unsqueeze(0).expand(k, -1), invert(random_keys))
+                unbounded_from_bundle = bind(
+                    bundled.unsqueeze(0).expand(k, -1), invert(random_keys)
+                )
                 sims = torch.zeros(k, n_items, device=device)
                 for i in range(k):
-                    sims[i] = similarity(unbounded_from_bundle[i].unsqueeze(0), item_memory)
+                    sims[i] = similarity(
+                        unbounded_from_bundle[i].unsqueeze(0), item_memory
+                    )
                 correct = 0
                 for i in range(k):
                     if indices[i] in torch.topk(sims[i], k).indices:
@@ -673,14 +677,12 @@ def test_bundle_capacity_confusion_matrix(
                 selected_indices.append(selected_idx.item())
                 selected_classes.append(class_id)
 
-        if len(selected_indices) < 10:  # need minimum classes for meaningful analysis
+        if len(selected_indices) < 10:
             continue
 
-        # bundle the selected items
         selected_vectors = item_memory[selected_indices]
         bundled = bundle(selected_vectors, normalize=True)
 
-        # compute confusion matrix: similarity of bundle to all items per class
         confusion_matrix = np.zeros((len(selected_classes), len(selected_classes)))
         all_similarities = []
 
@@ -903,7 +905,9 @@ def test_per_class_bundle_capacity_two_items(
             similarity_matrix[i, :] = sims.cpu().numpy()
 
         similarity_matrices.append(similarity_matrix)
-        last_bundle_img_indices = bundle_img_indices  # keep last trial for visualization
+        last_bundle_img_indices = (
+            bundle_img_indices  # keep last trial for visualization
+        )
 
     if similarity_matrices:
         avg_similarity = np.mean(similarity_matrices, axis=0)
@@ -937,8 +941,9 @@ def test_per_class_bundle_capacity_two_items(
             else:
                 braid_label = ""
             ax_sim.set_title(
-                f"bundle similarity matrix{braid_label}\n({items_per_class} items per class, {n_classes} classes)",
-                fontsize=14, fontweight='bold'
+                f"bundle similarity matrix{braid_label}\n({items_per_class} item per class, {n_classes} classes)",
+                fontsize=14,
+                fontweight="bold",
             )
 
             # create labels: a1, a2, b1, b2, c1, c2, ...
@@ -957,7 +962,7 @@ def test_per_class_bundle_capacity_two_items(
 
             # bottom: simple grid of bundled images
             ax_images = fig.add_subplot(gs[1])
-            ax_images.axis('off')
+            ax_images.axis("off")
 
             if item_images is not None and len(last_bundle_img_indices) > 0:
                 # create a grid of images: n_classes rows × items_per_class columns
@@ -994,17 +999,24 @@ def test_per_class_bundle_capacity_two_items(
                     x_start = col * img_w
 
                     if is_grayscale:
-                        canvas[y_start:y_start+img_h, x_start:x_start+img_w] = img_np
+                        canvas[y_start : y_start + img_h, x_start : x_start + img_w] = (
+                            img_np
+                        )
                     else:
-                        canvas[y_start:y_start+img_h, x_start:x_start+img_w, :] = img_np
+                        canvas[
+                            y_start : y_start + img_h, x_start : x_start + img_w, :
+                        ] = img_np
 
                 if is_grayscale:
-                    ax_images.imshow(canvas, cmap='gray')
+                    ax_images.imshow(canvas, cmap="gray")
                 else:
                     ax_images.imshow(canvas)
 
-                ax_images.set_title(f'bundled images ({n_classes} classes × {items_per_class} items)',
-                                   fontsize=14, fontweight='bold')
+                ax_images.set_title(
+                    f"bundled images ({n_classes} classes × {items_per_class} items)",
+                    fontsize=14,
+                    fontweight="bold",
+                )
 
             # gridspec handles layout with hspace, no need for tight_layout
             if per_class_braid:
@@ -1037,12 +1049,14 @@ def test_cross_class_bind_interpolation_and_memory(
     n_interp_steps: int = 5,
 ) -> Dict:
     """
-    cross-class binding with interpolation and memory test.
+    simplified memory test: create 5 bound pairs (A,B,C,D,E), bundle them,
+    and test retrieval accuracy for each individual item.
 
-    part 1: bind two classes and interpolate between them
-    part 2: memory test - bind pairs (1,2), (3,4), (5,6), (7,8), (9,0)
-            bundle all 5 pairs together
-            try to recover original vectors from the bundle using unbinding
+    for each pair v1*v2 in the bundle, test:
+    - retrieval of v1: apply v2^-1 to bundle -> measure similarity with v1
+    - retrieval of v2: apply v1^-1 to bundle -> measure similarity with v2
+
+    visualize the pairs and show per-item retrieval accuracy.
     """
     if item_memory is None:
         item_memory = hrr_init(n_items, d, device=device)
@@ -1070,203 +1084,201 @@ def test_cross_class_bind_interpolation_and_memory(
         if len(class_indices) > 0:
             class_to_items[class_id] = class_indices
 
-    # part 1: interpolation between two bound classes
-    interp_results = []
-    interp_vectors = []
+    # create 5 pairs from 10 different classes
+    available_classes = list(class_to_items.keys())[: min(10, len(class_to_items))]
+    if len(available_classes) < 10:
+        # pad with available classes if needed
+        while len(available_classes) < 10:
+            available_classes.append(
+                available_classes[len(available_classes) % len(class_to_items)]
+            )
 
-    if len(class_to_items) >= 2:
-        # pick first two classes
-        classes = list(class_to_items.keys())[:2]
-        class_a_idx = class_to_items[classes[0]][0].item()
-        class_b_idx = class_to_items[classes[1]][0].item()
+    # collect accuracy per item across trials
+    item_accuracies = {i: [] for i in range(10)}  # 10 items total (5 pairs × 2)
+    pair_letters = ['A', 'B', 'C', 'D', 'E']
 
-        vec_a = item_memory[class_a_idx]
-        vec_b = item_memory[class_b_idx]
-
-        # bind a and b
-        ab = bind(vec_a.unsqueeze(0), vec_b.unsqueeze(0)).squeeze(0)
-
-        # interpolate between a and ab
-        alphas = torch.linspace(0, 1, n_interp_steps, device=device)
-        for alpha in alphas:
-            interp = (1 - alpha) * vec_a + alpha * ab
-            if normalize:
-                interp = normalize_vectors(interp.unsqueeze(0)).squeeze(0)
-            interp_vectors.append(interp)
-
-        interp_results = {
-            "class_a_idx": class_a_idx,
-            "class_b_idx": class_b_idx,
-            "class_a_label": int(classes[0]),
-            "class_b_label": int(classes[1]),
-        }
-
-    # part 2: memory test with multiple bound pairs
-    memory_accuracies = []
+    # store one example for visualization
+    example_pairs = None
+    example_pair_images = None
 
     for trial in range(n_trials):
-        # create pairs: (0,1), (2,3), (4,5), (6,7), (8,9)
         pairs = []
-        pair_classes = []
 
-        # ensure we have 10 classes for 5 pairs
-        available_classes = list(class_to_items.keys())[:min(10, len(class_to_items))]
-        if len(available_classes) < 10:
-            # pad with available classes
-            while len(available_classes) < 10:
-                available_classes.append(available_classes[len(available_classes) % len(class_to_items)])
-
+        # create 5 pairs from classes 0-9
         for i in range(0, min(10, len(available_classes)), 2):
-            if i+1 < len(available_classes):
+            if i + 1 < len(available_classes):
                 class_a = available_classes[i]
-                class_b = available_classes[i+1]
+                class_b = available_classes[i + 1]
 
                 # randomly select one item from each class
-                idx_a = class_to_items[class_a][torch.randint(0, len(class_to_items[class_a]), (1,))].item()
-                idx_b = class_to_items[class_b][torch.randint(0, len(class_to_items[class_b]), (1,))].item()
+                idx_a = class_to_items[class_a][
+                    torch.randint(0, len(class_to_items[class_a]), (1,))
+                ].item()
+                idx_b = class_to_items[class_b][
+                    torch.randint(0, len(class_to_items[class_b]), (1,))
+                ].item()
 
                 vec_a = item_memory[idx_a]
                 vec_b = item_memory[idx_b]
 
-                # bind a and b
+                # bind a and b to create pair
                 bound = bind(vec_a.unsqueeze(0), vec_b.unsqueeze(0)).squeeze(0)
 
                 pairs.append({
                     "bound": bound,
                     "vec_a": vec_a,
                     "vec_b": vec_b,
-                    "class_a": class_a,
-                    "class_b": class_b,
                     "idx_a": idx_a,
                     "idx_b": idx_b,
                 })
-                pair_classes.append((class_a, class_b))
 
-        if len(pairs) < 2:
+        if len(pairs) < 5:
             continue
 
-        # bundle all pairs
+        # save first trial for visualization
+        if example_pairs is None:
+            example_pairs = pairs
+            if item_images is not None:
+                example_pair_images = [(p["idx_a"], p["idx_b"]) for p in pairs]
+
+        # bundle all 5 bound pairs
         all_bounds = torch.stack([p["bound"] for p in pairs])
         bundled = bundle(all_bounds, normalize=True)
 
-        # try to recover each vector from the bundle
-        correct_recoveries = 0
-        total_recoveries = 0
+        # test retrieval for each item in each pair
+        for pair_idx, pair in enumerate(pairs):
+            item_base_idx = pair_idx * 2
 
-        for i, pair in enumerate(pairs):
-            # recover b from bundled using a
-            recovered_b = unbind(
-                bundled.unsqueeze(0),
-                pair["vec_a"].unsqueeze(0),
-                method=unbind_method
+            # retrieve v1 by applying v2^-1 to bundle
+            recovered_v1 = unbind(
+                bundled.unsqueeze(0), pair["vec_b"].unsqueeze(0), method=unbind_method
             ).squeeze(0)
 
-            # check if recovered_b is most similar to original vec_b
-            sims_b = similarity(recovered_b.unsqueeze(0), item_memory)
-            best_idx_b = torch.argmax(sims_b).item()
+            sim_v1 = similarity(recovered_v1.unsqueeze(0), pair["vec_a"].unsqueeze(0)).item()
+            item_accuracies[item_base_idx].append(sim_v1)
 
-            if best_idx_b == pair["idx_b"]:
-                correct_recoveries += 1
-            total_recoveries += 1
-
-            # recover a from bundled using b
-            recovered_a = unbind(
-                bundled.unsqueeze(0),
-                pair["vec_b"].unsqueeze(0),
-                method=unbind_method
+            # retrieve v2 by applying v1^-1 to bundle
+            recovered_v2 = unbind(
+                bundled.unsqueeze(0), pair["vec_a"].unsqueeze(0), method=unbind_method
             ).squeeze(0)
 
-            # check if recovered_a is most similar to original vec_a
-            sims_a = similarity(recovered_a.unsqueeze(0), item_memory)
-            best_idx_a = torch.argmax(sims_a).item()
+            sim_v2 = similarity(recovered_v2.unsqueeze(0), pair["vec_b"].unsqueeze(0)).item()
+            item_accuracies[item_base_idx + 1].append(sim_v2)
 
-            if best_idx_a == pair["idx_a"]:
-                correct_recoveries += 1
-            total_recoveries += 1
-
-        accuracy = correct_recoveries / max(1, total_recoveries)
-        memory_accuracies.append(accuracy)
+    # compute mean accuracies
+    mean_accuracies = [np.mean(item_accuracies[i]) if item_accuracies[i] else 0.0
+                       for i in range(10)]
+    std_accuracies = [np.std(item_accuracies[i]) if item_accuracies[i] else 0.0
+                      for i in range(10)]
 
     results = {
-        "interpolation": interp_results,
-        "interpolation_vectors": interp_vectors,
-        "memory_accuracy_mean": float(np.mean(memory_accuracies)) if memory_accuracies else 0.0,
-        "memory_accuracy_std": float(np.std(memory_accuracies)) if memory_accuracies else 0.0,
-        "n_pairs_bundled": len(pairs) if pairs else 0,
+        "memory_accuracy_mean": float(np.mean(mean_accuracies)),
+        "memory_accuracy_std": float(np.mean(std_accuracies)),
+        "per_item_accuracies": mean_accuracies,
+        "per_item_stds": std_accuracies,
+        "n_pairs_bundled": 5,
     }
 
     # plotting
     if plot and save_dir:
         import os
+        from matplotlib.gridspec import GridSpec
+
         os.makedirs(save_dir, exist_ok=True)
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig = plt.figure(figsize=(16, 6))
+        gs = GridSpec(1, 2, width_ratios=[1, 1.2], wspace=0.3)
 
-        # plot 1: interpolation visualization (if we have images)
-        if item_images is not None and interp_vectors:
-            # we'll need to decode the interpolation vectors
-            # for now, just show the original images
-            ax = axes[0]
-            if len(interp_results) > 0:
-                # show original images for class a and b
-                class_a_idx = interp_results["class_a_idx"]
-                class_b_idx = interp_results["class_b_idx"]
+        # left: show the 5 pairs with their images
+        ax_pairs = fig.add_subplot(gs[0])
+        ax_pairs.axis('off')
 
-                img_a = item_images[class_a_idx]
-                img_b = item_images[class_b_idx]
+        if item_images is not None and example_pair_images is not None:
+            is_grayscale = item_images[0].shape[0] == 1
+            img_h, img_w = item_images[0].shape[-2], item_images[0].shape[-1]
+
+            # create canvas for 5 rows (pairs) × 2 columns (items)
+            canvas_h = 5 * img_h
+            canvas_w = 2 * img_w
+
+            if is_grayscale:
+                canvas = np.ones((canvas_h, canvas_w)) * 0.5
+            else:
+                canvas = np.ones((canvas_h, canvas_w, 3)) * 0.5
+
+            # place pair images
+            for pair_idx, (idx_a, idx_b) in enumerate(example_pair_images):
+                img_a = item_images[idx_a]
+                img_b = item_images[idx_b]
 
                 # denormalize
                 img_a = (img_a * 0.5 + 0.5).clamp(0, 1)
                 img_b = (img_b * 0.5 + 0.5).clamp(0, 1)
 
                 # convert to numpy
-                if img_a.shape[0] == 1:
+                if is_grayscale:
                     img_a_np = img_a.squeeze(0).cpu().numpy()
                     img_b_np = img_b.squeeze(0).cpu().numpy()
-                    cmap = 'gray'
                 else:
                     img_a_np = img_a.permute(1, 2, 0).cpu().numpy()
                     img_b_np = img_b.permute(1, 2, 0).cpu().numpy()
-                    cmap = None
 
-                # create side-by-side visualization
-                if cmap == 'gray':
-                    combined = np.concatenate([img_a_np, img_b_np], axis=1)
-                    ax.imshow(combined, cmap=cmap)
+                y_start = pair_idx * img_h
+
+                # place v1 (left column)
+                if is_grayscale:
+                    canvas[y_start:y_start + img_h, 0:img_w] = img_a_np
+                    canvas[y_start:y_start + img_h, img_w:2*img_w] = img_b_np
                 else:
-                    combined = np.concatenate([img_a_np, img_b_np], axis=1)
-                    ax.imshow(combined)
+                    canvas[y_start:y_start + img_h, 0:img_w, :] = img_a_np
+                    canvas[y_start:y_start + img_h, img_w:2*img_w, :] = img_b_np
 
-                ax.set_title(f'cross-class binding: class {interp_results["class_a_label"]} ⊛ class {interp_results["class_b_label"]}')
-                ax.axis('off')
+            if is_grayscale:
+                ax_pairs.imshow(canvas, cmap='gray')
             else:
-                ax.text(0.5, 0.5, 'no interpolation data', ha='center', va='center')
-                ax.axis('off')
-        else:
-            axes[0].text(0.5, 0.5, 'interpolation visualization\nrequires decoder', ha='center', va='center')
-            axes[0].axis('off')
+                ax_pairs.imshow(canvas)
 
-        # plot 2: memory test results
-        ax = axes[1]
-        if memory_accuracies:
-            ax.bar(range(len(memory_accuracies)), memory_accuracies, alpha=0.7, edgecolor='black')
-            ax.axhline(np.mean(memory_accuracies), color='red', linestyle='--',
-                      label=f'mean: {np.mean(memory_accuracies):.3f}')
-            ax.set_xlabel('trial')
-            ax.set_ylabel('recovery accuracy')
-            ax.set_title(f'memory test: {len(pairs)} bound pairs bundled')
-            ax.legend()
-            ax.grid(alpha=0.3)
-            ax.set_ylim(0, 1.05)
-        else:
-            ax.text(0.5, 0.5, 'no memory test data', ha='center', va='center')
-            ax.axis('off')
+            ax_pairs.set_title(f'5 bound pairs (A-E)\nv1 ⊛ v2 for each pair',
+                             fontsize=12, fontweight='bold')
 
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, 'cross_class_bind_memory_test.png'), dpi=200)
+            # add pair labels on the left
+            for i, letter in enumerate(pair_letters):
+                y_pos = (i + 0.5) * img_h
+                ax_pairs.text(-5, y_pos, letter, fontsize=14, fontweight='bold',
+                            ha='right', va='center')
+
+        # right: bar plot showing retrieval accuracy for each item
+        ax_acc = fig.add_subplot(gs[1])
+
+        item_labels = []
+        for i, letter in enumerate(pair_letters):
+            item_labels.append(f'{letter}₁')
+            item_labels.append(f'{letter}₂')
+
+        x_pos = np.arange(10)
+        colors = []
+        for i in range(5):
+            colors.extend(['#3498db', '#e74c3c'])  # alternating blue/red for v1/v2
+
+        bars = ax_acc.bar(x_pos, mean_accuracies, yerr=std_accuracies,
+                         color=colors, alpha=0.7, capsize=4, edgecolor='black', linewidth=1.2)
+
+        ax_acc.axhline(np.mean(mean_accuracies), color='green', linestyle='--',
+                      linewidth=2, label=f'mean: {np.mean(mean_accuracies):.3f}')
+        ax_acc.set_xlabel('item', fontsize=12, fontweight='bold')
+        ax_acc.set_ylabel('retrieval accuracy (cosine similarity)', fontsize=12, fontweight='bold')
+        ax_acc.set_title(f'per-item retrieval from bundled pairs\n(method: {unbind_method})',
+                        fontsize=12, fontweight='bold')
+        ax_acc.set_xticks(x_pos)
+        ax_acc.set_xticklabels(item_labels, rotation=0)
+        ax_acc.set_ylim(0, 1.05)
+        ax_acc.legend()
+        ax_acc.grid(alpha=0.3, axis='y')
+
+        plt.savefig(os.path.join(save_dir, "cross_class_bind_memory_test.png"), dpi=200, bbox_inches='tight')
         plt.close()
 
-        results["plot_path"] = os.path.join(save_dir, 'cross_class_bind_memory_test.png')
+        results["plot_path"] = os.path.join(save_dir, "cross_class_bind_memory_test.png")
 
     return results
 
