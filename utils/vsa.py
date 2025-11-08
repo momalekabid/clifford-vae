@@ -76,7 +76,7 @@ def test_bundle_capacity(
     d: int = 1024,
     n_items: int = 1000,
     k_range=None,
-    n_trials: int = 20,
+    n_trials: int = 1,
     normalize: bool = True,
     device: str = "cpu",
     plot: bool = False,
@@ -181,7 +181,7 @@ def test_binding_unbinding_pairs(
     d: int = 1024,
     n_items: int = 1000,
     k_range=None,
-    n_trials: int = 20,
+    n_trials: int = 1,
     normalize: bool = True,
     device: str = "cpu",
     plot: bool = False,
@@ -325,7 +325,7 @@ def test_binding_unbinding_with_self_binding(
     d: int = 1024,
     n_items: int = 1000,
     k_range=None,
-    n_trials: int = 20,
+    n_trials: int = 1,
     normalize: bool = True,
     device: str = "cpu",
     plot: bool = False,
@@ -621,7 +621,7 @@ def test_bundle_capacity_confusion_matrix(
     d: int = 1024,
     n_items: int = 2500,  # 50 classes x 50 items each
     n_classes: int = 50,
-    n_trials: int = 10,
+    n_trials: int = 1,
     normalize: bool = True,
     device: str = "cpu",
     plot: bool = False,
@@ -796,7 +796,7 @@ def test_per_class_bundle_capacity_two_items(
     n_items: int = 1000,
     n_classes: int = 10,
     items_per_class: int = 2,
-    n_trials: int = 20,
+    n_trials: int = 1,
     normalize: bool = True,
     device: str = "cpu",
     plot: bool = False,
@@ -1037,7 +1037,7 @@ def test_cross_class_bind_interpolation_and_memory(
     d: int = 1024,
     n_items: int = 1000,
     n_classes: int = 10,
-    n_trials: int = 20,
+    n_trials: int = 1,
     normalize: bool = True,
     device: str = "cpu",
     plot: bool = False,
@@ -1208,6 +1208,10 @@ def test_cross_class_bind_interpolation_and_memory(
 
             # place pair images
             for pair_idx, (idx_a, idx_b) in enumerate(example_pair_images):
+                # check bounds
+                if idx_a >= len(item_images) or idx_b >= len(item_images):
+                    continue
+
                 img_a = item_images[idx_a]
                 img_b = item_images[idx_b]
 
@@ -1267,7 +1271,9 @@ def test_cross_class_bind_interpolation_and_memory(
                       linewidth=2, label=f'mean: {np.mean(mean_accuracies):.3f}')
         ax_acc.set_xlabel('item', fontsize=12, fontweight='bold')
         ax_acc.set_ylabel('retrieval accuracy (cosine similarity)', fontsize=12, fontweight='bold')
-        ax_acc.set_title(f'per-item retrieval from bundled pairs\n(method: {unbind_method})',
+        # map unbind method to readable name
+        method_label = '†' if unbind_method in ['†', 'deconv'] else '*'
+        ax_acc.set_title(f'per-item retrieval from bundled pairs\n(method: {method_label})',
                         fontsize=12, fontweight='bold')
         ax_acc.set_xticks(x_pos)
         ax_acc.set_xticklabels(item_labels, rotation=0)
@@ -1286,7 +1292,7 @@ def test_cross_class_bind_interpolation_and_memory(
 def test_per_class_bundle_capacity(
     d: int = 1024,
     n_items: int = 1000,
-    n_trials: int = 20,
+    n_trials: int = 1,
     normalize: bool = True,
     device: str = "cpu",
     plot: bool = False,

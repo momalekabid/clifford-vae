@@ -35,7 +35,6 @@ from utils.vsa import (
     test_binding_unbinding_pairs as vsa_binding_unbinding,
     test_per_class_bundle_capacity_two_items,
     test_binding_unbinding_with_self_binding,
-    test_cross_class_bind_interpolation_and_memory,
 )
 
 
@@ -564,28 +563,6 @@ def main(args):
                                     )
                                 },
                             }
-
-                        # === test 4: cross-class bind interpolation and memory test ===
-                        print(
-                            f"running cross-class bind interpolation and memory test ({dist_name})..."
-                        )
-                        cross_class_memory_res = (
-                            test_cross_class_bind_interpolation_and_memory(
-                                d=item_memory.shape[-1],
-                                n_items=1000,
-                                n_classes=10,
-                                n_trials=20,
-                                normalize=normalize_vectors,
-                                device=DEVICE,
-                                plot=True,
-                                save_dir=output_dir,
-                                item_memory=item_memory,
-                                labels=item_labels,
-                                item_images=item_images,
-                                unbind_method="inv",
-                                n_interp_steps=5,
-                            )
-                        )
 
                         fourier_star = test_self_binding(
                             model,
