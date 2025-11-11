@@ -29,6 +29,7 @@ from utils.wandb_utils import (
     plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
+    plot_latent_dimension_exploration,
 )
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
@@ -271,15 +272,28 @@ def main(args):
 
     latent_dims = args.latent_dims if args.latent_dims else [2, 4, 512, 2048, 4096]
     distributions = ["clifford", "gaussian"]
-    datasets_to_test = ["fashionmnist", "cifar10"]
-    dataset_map = {"fashionmnist": datasets.FashionMNIST, "cifar10": datasets.CIFAR10}
+    datasets_to_test = ["fashionmnist", "cifar10", "cinic10"]
+
+    # import cinic10 if available
+    try:
+        from pytorch_cinic.dataset import CINIC10
+        dataset_map = {
+            "fashionmnist": datasets.FashionMNIST,
+            "cifar10": datasets.CIFAR10,
+            "cinic10": CINIC10,
+        }
+    except ImportError:
+        print("warning: pytorch-cinic not installed. cinic10 will be skipped.")
+        print("install with: pip install pytorch-cinic")
+        dataset_map = {"fashionmnist": datasets.FashionMNIST, "cifar10": datasets.CIFAR10}
+        datasets_to_test = ["fashionmnist", "cifar10"]
 
     for dataset_name in datasets_to_test:
-        is_color = dataset_name == "cifar10"
+        is_color = dataset_name in ["cifar10", "cinic10"]
         in_channels = 3 if is_color else 1
         IMG_SHAPE = (
             (3, 32, 32) if is_color else (1, 32, 32)
-        )  # cifar: 3x32x32, fashion: 1x32x32
+        )  # cifar/cinic: 3x32x32, fashion: 1x32x32
         dataset_class = dataset_map[dataset_name]
         norm_mean, norm_std = (
             ((0.5,), (0.5,)) if not is_color else ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
@@ -291,12 +305,23 @@ def main(args):
                 transforms.Normalize(norm_mean, norm_std),
             ]
         )
-        train_set_full = dataset_class(
-            "data", train=True, download=True, transform=transform
-        )
-        test_set_full = dataset_class(
-            "data", train=False, download=True, transform=transform
-        )
+
+        # handle different dataset apis
+        if dataset_name == "cinic10":
+            # cinic10 uses partition instead of train parameter
+            train_set_full = dataset_class(
+                "data/cinic10", partition="train", download=True, transform=transform
+            )
+            test_set_full = dataset_class(
+                "data/cinic10", partition="test", download=True, transform=transform
+            )
+        else:
+            train_set_full = dataset_class(
+                "data", train=True, download=True, transform=transform
+            )
+            test_set_full = dataset_class(
+                "data", train=False, download=True, transform=transform
+            )
 
         # filter out excluded class if specified
         train_set = filter_dataset_by_class(train_set_full, args.exclude_class)
@@ -822,6 +847,20 @@ def main(args):
                             )
                             if gauss_viz:
                                 images["gaussian_manifold_visualization"] = gauss_viz
+
+                        # style exploration for d>4 (for both clifford and gaussian)
+                        if model.latent_dim > 4 and dist_name in ["clifford", "gaussian"]:
+                            style_viz = plot_latent_dimension_exploration(
+                                model,
+                                test_loader,
+                                DEVICE,
+                                output_dir,
+                                n_dims_to_explore=6,
+                                n_steps=9,
+                                img_shape=IMG_SHAPE,
+                            )
+                            if style_viz:
+                                images[f"{dist_name}_style_exploration"] = style_viz
 
                         # evaluate on excluded class if specified
                         excluded_metrics = {}

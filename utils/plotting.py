@@ -380,8 +380,10 @@ def plot_comparison_grid(aggregated, dataset_name, save_path=None):
         if row == 0 and col == 1:
             ax.legend(frameon=True, fancybox=True, shadow=True, loc="best", fontsize=9)
 
-    dataset_title = dataset_name.replace("fashionmnist", "Fashion-MNIST").replace(
-        "cifar10", "CIFAR-10"
+    dataset_title = (
+        dataset_name.replace("fashionmnist", "Fashion-MNIST")
+        .replace("cifar10", "CIFAR-10")
+        .replace("cinic10", "CINIC-10")
     )
     fig.suptitle(
         f"Performance Comparison on {dataset_title}",
@@ -479,8 +481,10 @@ def plot_binding_quality(aggregated, dataset_name, save_path=None):
         if ax == ax1:
             ax.legend(frameon=True, fancybox=True, shadow=True, loc="best")
 
-    dataset_title = dataset_name.replace("fashionmnist", "Fashion-MNIST").replace(
-        "cifar10", "CIFAR-10"
+    dataset_title = (
+        dataset_name.replace("fashionmnist", "Fashion-MNIST")
+        .replace("cifar10", "CIFAR-10")
+        .replace("cinic10", "CINIC-10")
     )
     fig.suptitle(
         f"HRR Binding Quality on {dataset_title}", fontsize=14, fontweight="bold", y=1.0
@@ -600,8 +604,10 @@ def plot_bundle_capacity_comparison(
         ax.legend(frameon=True, fancybox=True)
         ax.set_ylim([0, 1.05])
 
-    dataset_title = dataset_filter.replace("fashionmnist", "Fashion-MNIST").replace(
-        "cifar10", "CIFAR-10"
+    dataset_title = (
+        dataset_filter.replace("fashionmnist", "Fashion-MNIST")
+        .replace("cifar10", "CIFAR-10")
+        .replace("cinic10", "CINIC-10")
     )
     fig.suptitle(
         f"Bundle Capacity Comparison on {dataset_title}",
@@ -666,8 +672,10 @@ def generate_all_plots(
             print(f"no data for {dataset}")
             continue
 
-        dataset_title = dataset.replace("fashionmnist", "Fashion-MNIST").replace(
-            "cifar10", "CIFAR-10"
+        dataset_title = (
+            dataset.replace("fashionmnist", "Fashion-MNIST")
+            .replace("cifar10", "CIFAR-10")
+            .replace("cinic10", "CINIC-10")
         )
 
         # comparison grid

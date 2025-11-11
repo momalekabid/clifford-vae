@@ -475,6 +475,18 @@ _CLASS_NAMES = {
         "ship",
         "truck",
     ],
+    "cinic10": [
+        "airplane",
+        "automobile",
+        "bird",
+        "cat",
+        "deer",
+        "dog",
+        "frog",
+        "horse",
+        "ship",
+        "truck",
+    ],
 }
 
 
@@ -935,6 +947,140 @@ def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=144, i
     plt.xticks([])
     plt.yticks([])
     plt.title("Gaussian Manifold Reconstructions")
+    plt.tight_layout()
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close()
+
+    return path
+
+
+@torch.no_grad()
+def plot_latent_dimension_exploration(
+    model, loader, device, output_dir, n_dims_to_explore=6, n_steps=9, img_shape=(1, 28, 28)
+):
+    """
+    explore individual latent dimensions by encoding a sample and varying each dimension.
+    inspired by stitch fix's style space exploration.
+
+    for clifford: varies angles in [-pi, pi]
+    for gaussian: varies in [-3, 3] (3 std devs)
+    """
+    latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
+    dist = getattr(model, "distribution", None)
+
+    if latent_dim is None or latent_dim < 4:
+        return None
+
+    # get a sample image to encode
+    model.eval()
+    for x, y in loader:
+        x_sample = x[0:1].to(device)  # take first image
+        break
+
+    # encode to get base latent code
+    out = model(x_sample)
+    if isinstance(out, (tuple, list)):
+        _, _, _, mu = out
+    else:
+        mu = out
+
+    base_latent = mu.detach().clone()
+
+    # determine which dimensions to explore
+    dims_to_explore = min(n_dims_to_explore, latent_dim)
+    if latent_dim > 10:
+        # for very high dims, sample evenly spaced dimensions
+        dim_indices = [int(i * latent_dim / dims_to_explore) for i in range(dims_to_explore)]
+    else:
+        dim_indices = list(range(dims_to_explore))
+
+    # set up range for variation based on distribution
+    if dist == "clifford":
+        # vary angles from -pi to pi
+        variation_range = torch.linspace(-math.pi, math.pi, n_steps, device=device)
+    else:  # gaussian or other
+        # vary from -3 to 3 standard deviations
+        variation_range = torch.linspace(-3.0, 3.0, n_steps, device=device)
+
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, f"{dist}_style_exploration.png")
+
+    # create grid: rows = dimensions, cols = variation steps
+    all_reconstructions = []
+
+    for dim_idx in dim_indices:
+        row_reconstructions = []
+        for val in variation_range:
+            # create modified latent code
+            modified_latent = base_latent.clone()
+            modified_latent[:, dim_idx] = val
+
+            # decode based on distribution
+            if dist == "clifford":
+                # convert angles to clifford vectors
+                z = _angles_to_clifford_vector(modified_latent, normalize_ifft=True)
+            else:
+                z = modified_latent
+
+            # decode
+            x_recon = model.decoder(z)
+
+            # normalize output
+            if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
+                if model.decoder.output_activation == "sigmoid":
+                    x_recon = torch.sigmoid(x_recon)
+                else:
+                    x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
+            else:
+                x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
+
+            x_recon = x_recon.view(-1, *img_shape)
+            row_reconstructions.append(x_recon[0])
+
+        all_reconstructions.append(row_reconstructions)
+
+    # create canvas
+    C = img_shape[0]
+    h, w = img_shape[1], img_shape[2]
+    n_rows = len(dim_indices)
+    n_cols = n_steps
+    canvas = torch.zeros(C, n_rows * h, n_cols * w)
+
+    for row_idx, row_recons in enumerate(all_reconstructions):
+        for col_idx, img in enumerate(row_recons):
+            canvas[:, row_idx * h : (row_idx + 1) * h, col_idx * w : (col_idx + 1) * w] = img.cpu()
+
+    # plot
+    fig_height = max(8, n_rows * 1.5)
+    fig_width = max(12, n_cols * 1.5)
+    plt.figure(figsize=(fig_width, fig_height))
+
+    if C == 1:
+        plt.imshow(canvas.squeeze(0).cpu().numpy(), cmap="gray")
+    else:
+        plt.imshow(canvas.permute(1, 2, 0).cpu().numpy())
+
+    # add labels
+    plt.yticks(
+        [h * i + h // 2 for i in range(n_rows)],
+        [f"Dim {dim_indices[i]}" for i in range(n_rows)]
+    )
+
+    if dist == "clifford":
+        range_str = "[-π, π]"
+    else:
+        range_str = "[-3σ, 3σ]"
+
+    plt.xticks(
+        [w * i + w // 2 for i in range(n_cols)],
+        [f"{variation_range[i]:.2f}" for i in range(n_cols)],
+        rotation=45
+    )
+
+    plt.title(
+        f"{dist.capitalize()} Latent Space Exploration (d={latent_dim})\n"
+        f"Each row shows variations along one dimension {range_str}"
+    )
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()

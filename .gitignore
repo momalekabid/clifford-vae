@@ -1,9 +1,11 @@
 # macOS
 .DS_Store
 
+
 # Python
 __pycache__/
 .csv
+uv.lock
 
 # Envs
 .venv/
