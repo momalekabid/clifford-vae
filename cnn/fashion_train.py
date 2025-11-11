@@ -270,9 +270,9 @@ def main(args):
     print(f"Device: {DEVICE}")
     logger = WandbLogger(args)
 
-    latent_dims = args.latent_dims if args.latent_dims else [2, 4, 512, 2048, 4096]
-    distributions = ["clifford", "gaussian"]
-    datasets_to_test = ["fashionmnist", "cifar10", "cinic10"]
+    latent_dims = args.latent_dims if args.latent_dims else [4096]
+    distributions = ["clifford", "gaussian", "powerspherical"]
+    datasets_to_test = ["fashionmnist", "cinic10"]
 
     # import cinic10 if available
     try:
@@ -946,10 +946,10 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(
         description="clifford vae experiments on fashionmnist/cifar10"
     )
-    p.add_argument("--epochs", type=int, default=600, help="training epochs")
+    p.add_argument("--epochs", type=int, default=1000, help="training epochs")
     p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs")
     p.add_argument("--batch_size", type=int, default=256, help="batch size")
-    p.add_argument("--lr", type=float, default=6e-4, help="learning rate")
+    p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
     p.add_argument(
         "--no-l2_norm",
         dest="l2_norm",
@@ -999,8 +999,8 @@ if __name__ == "__main__":
         "--latent_dims",
         type=int,
         nargs="+",
-        default=None,
-        help="latent dims to test (default=[2,4,128,512,1024,2048,4096])",
+        default=[4096],
+        help="latent dims to test",
     )
     p.add_argument(
         "--braid",

@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""
-unified script to run training experiments and generate publication-quality plots.
-runs both fashion_train.py and plot_results.py with configurable parameters.
-
-usage:
-    # run training and plotting with default settings:
-    python run_experiments.py
-
-    # skip training and only generate plots:
-    python run_experiments.py --skip-training
-
-    # custom config:
-    python run_experiments.py --epochs 100 --latent-dims 4 128 512 --datasets fashionmnist
-"""
 
 import argparse
 import subprocess
@@ -22,7 +8,6 @@ from pathlib import Path
 
 
 def run_training(args):
-    """run the training script with specified parameters"""
     print("\n" + "=" * 80)
     print("STARTING TRAINING PHASE")
     print("=" * 80 + "\n")
@@ -79,12 +64,10 @@ def run_training(args):
 
 
 def run_plotting(args):
-    """run the plotting script to generate figures"""
     print("\n" + "=" * 80)
     print("STARTING PLOTTING PHASE")
     print("=" * 80 + "\n")
 
-    # import plotting utilities
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from utils.plotting import generate_all_plots
 
@@ -118,17 +101,16 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    # training parameters
     train_group = parser.add_argument_group("training parameters")
-    train_group.add_argument("--epochs", type=int, default=500, help="training epochs")
+    train_group.add_argument("--epochs", type=int, default=1000, help="training epochs")
     train_group.add_argument(
         "--warmup_epochs", type=int, default=100, help="kl warmup epochs"
     )
-    train_group.add_argument("--batch_size", type=int, default=128, help="batch size")
+    train_group.add_argument("--batch_size", type=int, default=256, help="batch size")
     train_group.add_argument("--lr", type=float, default=3e-4, help="learning rate")
     train_group.add_argument("--max_beta", type=float, default=1.0, help="max kl beta")
     train_group.add_argument(
-        "--patience", type=int, default=75, help="early stopping patience"
+        "--patience", type=int, default=100, help="early stopping patience"
     )
     train_group.add_argument(
         "--cycle_epochs",
@@ -150,12 +132,11 @@ def main():
         "--latent_dims",
         type=int,
         nargs="+",
-        default=None,
-        help="latent dimensions to test (default: [4, 1024, 4096])",
+        default=[4096],
+        help="latent dimensions to test",
     )
     train_group.add_argument("--braid", action="store_true", help="run braiding tests")
 
-    # plotting parameters
     plot_group = parser.add_argument_group("plotting parameters")
     plot_group.add_argument(
         "--plot_source",
@@ -177,7 +158,6 @@ def main():
         help="directory to save plots",
     )
 
-    # wandb parameters
     wandb_group = parser.add_argument_group("wandb parameters")
     wandb_group.add_argument(
         "--no_wandb", action="store_true", help="disable wandb logging"
@@ -192,7 +172,6 @@ def main():
         "--wandb_entity", type=str, default=None, help="wandb entity (username/org)"
     )
 
-    # execution control
     exec_group = parser.add_argument_group("execution control")
     exec_group.add_argument(
         "--skip-training",
@@ -212,12 +191,10 @@ def main():
 
     args = parser.parse_args()
 
-    # validate arguments
     if args.skip_training and args.skip_plotting:
         print("error: cannot skip both training and plotting")
         sys.exit(1)
 
-    # run training
     train_result = 0
     if not args.skip_training:
         train_result = run_training(args)
@@ -226,14 +203,12 @@ def main():
     else:
         print("skipping training phase (--skip-training specified)")
 
-    # run plotting
     plot_result = 0
     if not args.skip_plotting:
         plot_result = run_plotting(args)
     else:
         print("skipping plotting phase (--skip-plotting specified)")
 
-    # final summary
     print("\n" + "=" * 80)
     print("EXPERIMENT SUMMARY")
     print("=" * 80)
