@@ -102,6 +102,7 @@ def test_bundle_capacity(
     # "if two images are shuffled differently, the shuffled versions will have only incidental similarity"
     perm_dict = {}
     if use_braiding:
+        print(f"  applying braiding to {n_items} vectors...")
         braided_memory = torch.zeros_like(item_memory)
         for i in range(n_items):
             perm = torch.randperm(d, device=device)
@@ -110,8 +111,10 @@ def test_bundle_capacity(
         item_memory = braided_memory
 
     results = {"k": [], "accuracy": [], "std": []}
+    print(f"  testing bundle capacity for k in {k_range} (d={d}, n_items={n_items})")
 
-    for k in k_range:
+    for k_idx, k in enumerate(k_range):
+        print(f"    k={k} ({k_idx+1}/{len(k_range)})...", end=" ", flush=True)
         trial_accs = []
 
         for _ in range(n_trials):
@@ -149,6 +152,7 @@ def test_bundle_capacity(
         results["k"].append(k)
         results["accuracy"].append(mean_acc)
         results["std"].append(std_acc)
+        print(f"acc={mean_acc:.3f}")
 
     if plot:
         plt.figure(figsize=(8, 5))
@@ -171,7 +175,9 @@ def test_bundle_capacity(
 
             os.makedirs(save_dir, exist_ok=True)
             suffix = "_bind" if bind_with_random else ""
-            plt.savefig(os.path.join(save_dir, f"bundle_capacity{suffix}.png"), dpi=500)
+            filename = f"bundle_capacity{suffix}.png"
+            plt.savefig(os.path.join(save_dir, filename), dpi=500)
+            print(f"  saved plot to {save_dir}/{filename}")
         plt.close()
 
     return results
@@ -316,6 +322,142 @@ def test_binding_unbinding_pairs(
                 ),
                 dpi=500,
             )
+        plt.close()
+
+    return results
+
+
+def test_binding_unbinding_triplets(
+    d: int = 1024,
+    n_items: int = 1000,
+    k_range=None,
+    n_trials: int = 1,
+    normalize: bool = True,
+    device: str = "cpu",
+    plot: bool = False,
+    unbind_method: str = "inv",
+    save_dir: Optional[str] = None,
+    item_memory: Optional[torch.Tensor] = None,
+    use_braiding: bool = False,
+) -> Dict:
+    """
+    test binding/unbinding with bundled triplets (harder than pairs).
+
+    for each triplet:
+        - select a filler from item_memory
+        - bind with two random role vectors: triplet = role1 ⊛ role2 ⊛ filler
+        - bundle k such triplets
+        - test recovery by unbinding with both roles and checking similarity
+
+    this is harder than pairs because:
+        1. two unbind operations required
+        2. more interference from bundling
+    """
+    if k_range is None:
+        k_range = list(range(2, min(21, n_items // 4), 2))
+
+    if item_memory is None:
+        item_memory = hrr_init(n_items, d, device=device)
+        if normalize:
+            item_memory = normalize_vectors(item_memory)
+    else:
+        item_memory = item_memory[:n_items].to(device)
+        if normalize:
+            item_memory = normalize_vectors(item_memory)
+
+    results = {"k": [], "accuracy": [], "std": []}
+
+    for k in k_range:
+        trial_accs = []
+
+        for _ in range(n_trials):
+            # select k fillers from item memory
+            indices = torch.randperm(n_items, device=device)[:k]
+            fillers = item_memory[indices]
+
+            # create two random role vectors per triplet
+            roles1 = hrr_init(k, d, device=device)
+            roles2 = hrr_init(k, d, device=device)
+            if normalize:
+                roles1 = normalize_vectors(roles1)
+                roles2 = normalize_vectors(roles2)
+
+            # bind: triplet = role1 ⊛ role2 ⊛ filler
+            triplets = bind(bind(roles1, roles2), fillers)
+
+            if use_braiding:
+                braided_triplets = []
+                perms = []
+                for i in range(k):
+                    perm = torch.randperm(d, device=device)
+                    perms.append(perm)
+                    braided = permute_vector(triplets[i], perm)
+                    braided_triplets.append(braided)
+                bundled = bundle(torch.stack(braided_triplets), normalize=True)
+            else:
+                bundled = bundle(triplets, normalize=True)
+
+            correct = 0
+            for i in range(k):
+                if use_braiding:
+                    unbraided = unpermute_vector(bundled, perms[i])
+                    # unbind twice: first with role1, then with role2
+                    partial = unbind(
+                        unbraided.unsqueeze(0),
+                        roles1[i].unsqueeze(0),
+                        method=unbind_method,
+                    ).squeeze()
+                    recovered = unbind(
+                        partial.unsqueeze(0),
+                        roles2[i].unsqueeze(0),
+                        method=unbind_method,
+                    ).squeeze()
+                else:
+                    # unbind twice: first with role1, then with role2
+                    partial = unbind(
+                        bundled.unsqueeze(0),
+                        roles1[i].unsqueeze(0),
+                        method=unbind_method,
+                    ).squeeze()
+                    recovered = unbind(
+                        partial.unsqueeze(0),
+                        roles2[i].unsqueeze(0),
+                        method=unbind_method,
+                    ).squeeze()
+
+                sims = similarity(recovered, item_memory)
+                best_idx = torch.argmax(sims).item()
+                target_idx = indices[i].item()
+
+                if best_idx == target_idx:
+                    correct += 1
+
+            trial_accs.append(correct / k)
+
+        results["k"].append(k)
+        results["accuracy"].append(np.mean(trial_accs))
+        results["std"].append(np.std(trial_accs))
+
+    if plot and save_dir is not None:
+        import os
+
+        os.makedirs(save_dir, exist_ok=True)
+        braid_suffix = "_braided" if use_braiding else ""
+        plt.figure(figsize=(8, 6))
+        plt.errorbar(
+            results["k"], results["accuracy"], yerr=results["std"], capsize=3, marker="o"
+        )
+        plt.xlabel("k (bundled triplets)")
+        plt.ylabel("retrieval accuracy")
+        plt.title(f"bundled triplet retrieval (d={d}, unbind={unbind_method})")
+        plt.ylim([0, 1.05])
+        plt.grid(True, alpha=0.3)
+        plt.savefig(
+            os.path.join(
+                save_dir, f"unbind_bundled_triplets_{unbind_method}{braid_suffix}.png"
+            ),
+            dpi=500,
+        )
         plt.close()
 
     return results
@@ -831,6 +973,7 @@ def test_per_class_bundle_capacity_two_items(
     # apply permutation based on braiding mode
     perm_dict = {}
     if use_braiding:
+        print(f"  applying braiding to item memory...")
         braided_memory = torch.zeros_like(item_memory)
         if per_class_braid:
             # per-class braiding: same permutation for all items in same class
@@ -873,7 +1016,10 @@ def test_per_class_bundle_capacity_two_items(
     similarity_matrices = []
     last_bundle_img_indices = []
 
+    print(f"  computing similarity matrix for {items_per_class} items/class across {n_classes} classes...")
     for trial in range(n_trials):
+        if n_trials > 1:
+            print(f"    trial {trial+1}/{n_trials}...", end=" ", flush=True)
         # select items_per_class items from each class
         selected_bundles = []
         bundle_labels = []
@@ -905,6 +1051,8 @@ def test_per_class_bundle_capacity_two_items(
             similarity_matrix[i, :] = sims.cpu().numpy()
 
         similarity_matrices.append(similarity_matrix)
+        if n_trials > 1:
+            print(f"done")  # complete the line started above
         last_bundle_img_indices = (
             bundle_img_indices  # keep last trial for visualization
         )
@@ -1020,13 +1168,14 @@ def test_per_class_bundle_capacity_two_items(
 
             # gridspec handles layout with hspace, no need for tight_layout
             if per_class_braid:
-                filename = "bundle_two_per_class_similarity_per_class_braid.png"
+                filename = "bundle_similarity_matrix_per_class_braid.png"
             elif use_braiding:
-                filename = "bundle_two_per_class_similarity_braid.png"
+                filename = "bundle_similarity_matrix_braid.png"
             else:
-                filename = "bundle_two_per_class_similarity.png"
+                filename = "bundle_similarity_matrix.png"
             plt.savefig(os.path.join(save_dir, filename), dpi=200)
             plt.close()
+            print(f"  saved plot to {save_dir}/{filename}")
 
         return results
 

@@ -7,7 +7,6 @@ from torchvision import datasets, transforms
 import torchvision.utils as tu
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
-from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import math
@@ -31,11 +30,12 @@ from utils.wandb_utils import (
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
+    test_binding_unbinding_triplets as vsa_binding_triplets,
     test_per_class_bundle_capacity_two_items,
     test_binding_unbinding_with_self_binding,
     test_cross_class_bind_interpolation_and_memory,
 )
-from mnist.mlp_vae import MLPVAE, vae_loss
+from mnist.mlp_vae import MLPVAE, vae_loss, compute_test_metrics
 
 
 class BinarizeWithRandomThreshold:
@@ -188,39 +188,6 @@ def plot_latent_space(model, loader, device, filepath, n_plot=1000):
     return filepath
 
 
-def plot_pca_analysis(model, loader, device, filepath, n_plot=1000):
-    """pca analysis: scatter + explained variance."""
-    print(f"pca analysis for {n_plot} points...")
-    X_z, y = encode_dataset(model, loader, device)
-    X_z, y = X_z[:n_plot], y[:n_plot]
-
-    pca = PCA(n_components=min(50, X_z.shape[1]))
-    Z_pca = pca.fit_transform(X_z)
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-
-    sc = ax1.scatter(
-        Z_pca[:, 0], Z_pca[:, 1], c=y, cmap=plt.get_cmap("tab10", 10), s=10, alpha=0.8
-    )
-    ax1.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)")
-    ax1.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)")
-    ax1.set_title(f"PCA of Latent Space (μ) - {model.distribution.upper()}")
-    plt.colorbar(sc, ax=ax1, ticks=np.unique(y))
-
-    n_components = min(20, len(pca.explained_variance_ratio_))
-    ax2.bar(range(1, n_components + 1), pca.explained_variance_ratio_[:n_components])
-    ax2.set_xlabel("Principal Component")
-    ax2.set_ylabel("Explained Variance Ratio")
-    ax2.set_title(
-        f"PCA Explained Variance\n(Total: {pca.explained_variance_ratio_.sum():.1%})"
-    )
-
-    plt.tight_layout()
-    plt.savefig(filepath, dpi=200, bbox_inches="tight")
-    plt.close()
-    return filepath
-
-
 def run(args):
     script_start_time = time.time()
     timing_results = {}
@@ -253,6 +220,7 @@ def run(args):
     test_eval_loader = DataLoader(test_dataset, batch_size=512, num_workers=0)
 
     final_results = []
+    elbo_results = []  # for davidson-style table
     distributions_to_test = ["normal", "powerspherical", "clifford"]
     knn_samples = [100, 600, 1000]
     logger = WandbLogger(args)
@@ -262,6 +230,11 @@ def run(args):
 
         agg_results = {
             dist: {s: [] for s in knn_samples} for dist in distributions_to_test
+        }
+        # aggregate elbo metrics for results table
+        agg_metrics = {
+            dist: {"ll": [], "entropy": [], "recon": [], "kl": []}
+            for dist in distributions_to_test
         }
 
         for dist in distributions_to_test:
@@ -351,6 +324,14 @@ def run(args):
                     model.load_state_dict(torch.load(model_path, map_location=device))
 
                     eval_start_time = time.time()
+
+                    # compute elbo metrics for results table (LL, L[q], RE, KL)
+                    test_metrics = compute_test_metrics(model, test_eval_loader, device)
+                    for metric_name in ["ll", "entropy", "recon", "kl"]:
+                        agg_metrics[dist][metric_name].append(test_metrics[metric_name])
+                    print(f"  LL: {test_metrics['ll']:.2f}, L[q]: {test_metrics['entropy']:.2f}, "
+                          f"RE: {test_metrics['recon']:.2f}, KL: {test_metrics['kl']:.2f}")
+
                     knn_results = perform_knn_evaluation(
                         model, train_eval_loader, test_eval_loader, device, knn_samples
                     )
@@ -373,15 +354,10 @@ def run(args):
                         f"visualizations/d_{mdim}/{dist}",
                         unbind_method="*",
                     )
-                    fourier_deconv = test_self_binding(
-                        model,
-                        test_subset_loader,
-                        device,
-                        f"visualizations/d_{mdim}/{dist}",
-                        unbind_method="†",
-                    )
+                    # skipping deconv test - using only flip inverse
+                    fourier_deconv = {}
 
-                    # cross-class binding tests with both methods
+                    # cross-class binding tests with flip inverse only
                     cross_class_pseudo = test_cross_class_bind_unbind(
                         model,
                         test_subset_loader,
@@ -389,13 +365,8 @@ def run(args):
                         f"visualizations/d_{mdim}/{dist}",
                         unbind_method="*",
                     )
-                    cross_class_deconv = test_cross_class_bind_unbind(
-                        model,
-                        test_subset_loader,
-                        device,
-                        f"visualizations/d_{mdim}/{dist}",
-                        unbind_method="†",
-                    )
+                    # skipping deconv test - using only flip inverse
+                    cross_class_deconv = {}
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
@@ -535,6 +506,30 @@ def run(args):
                             },
                         }
 
+                    # test 3c: bundled triplet retrieval (harder than pairs)
+                    print(f"running bundled triplet retrieval test ({dist})...")
+                    triplet_raw = vsa_binding_triplets(
+                        d=item_memory.shape[-1],
+                        n_items=500,
+                        k_range=list(range(2, 12, 2)),
+                        n_trials=10,
+                        normalize=normalize_vectors,
+                        device=device,
+                        plot=True,
+                        save_dir=vis_dir,
+                        item_memory=item_memory,
+                        use_braiding=False,
+                    )
+                    triplet_res = {
+                        "triplet_retrieval_plot": os.path.join(
+                            vis_dir, "unbind_bundled_triplets_inv.png"
+                        ),
+                        "triplet_retrieval_accuracies": {
+                            k: acc
+                            for k, acc in zip(triplet_raw["k"], triplet_raw["accuracy"])
+                        },
+                    }
+
                     # test 4: cross-class bind interpolation and memory test
                     print(f"running cross-class bind interpolation and memory test ({dist})...")
                     cross_class_memory_res = test_cross_class_bind_interpolation_and_memory(
@@ -568,12 +563,6 @@ def run(args):
                         device,
                         os.path.join(vis_dir, "tsne.png"),
                     )
-                    pca_path = plot_pca_analysis(
-                        model,
-                        test_eval_loader,
-                        device,
-                        os.path.join(vis_dir, "pca.png"),
-                    )
                     interp_path = plot_interpolations(
                         model,
                         test_eval_loader,
@@ -599,7 +588,6 @@ def run(args):
                         images_to_log = {
                             "Reconstructions": recon_path,
                             "Latent t-SNE": tsne_path,
-                            "Latent PCA": pca_path,
                             "Interpolations": interp_path,
                         }
 
@@ -634,10 +622,10 @@ def run(args):
 
                         # add two-per-class test
                         two_per_class_plot = os.path.join(
-                            vis_dir, "bundle_two_per_class_similarity.png"
+                            vis_dir, "bundle_similarity_matrix.png"
                         )
                         if os.path.exists(two_per_class_plot):
-                            images_to_log["Bundle_Two_Per_Class_Similarity"] = (
+                            images_to_log["Bundle_Similarity_Matrix"] = (
                                 two_per_class_plot
                             )
 
@@ -654,6 +642,12 @@ def run(args):
                                     "unbind_bundled_plot_braid"
                                 ]
                             )
+
+                        # add triplet retrieval test
+                        if triplet_res.get("triplet_retrieval_plot"):
+                            images_to_log["Triplet_Retrieval"] = triplet_res[
+                                "triplet_retrieval_plot"
+                            ]
 
                         # add cross-class binding tests
                         if cross_class_pseudo.get(
@@ -766,6 +760,11 @@ def run(args):
                                 **braiding_metrics,
                                 "mean_vector_cosine_acc": float(mean_vector_acc),
                                 "final_val_loss": best_val_loss,
+                                # elbo metrics for results table
+                                "test/ll": test_metrics["ll"],
+                                "test/entropy": test_metrics["entropy"],
+                                "test/recon": test_metrics["recon"],
+                                "test/kl": test_metrics["kl"],
                                 "cross_class_bind_unbind_similarity_pseudo": cross_class_pseudo.get(
                                     "cross_class_bind_unbind_similarity", 0.0
                                 ),
@@ -781,12 +780,23 @@ def run(args):
                             }
                         )
 
+                        # triplet retrieval metrics
+                        triplet_metrics = {}
+                        for k, acc in triplet_res.get("triplet_retrieval_accuracies", {}).items():
+                            triplet_metrics[f"triplet_retrieval_acc_k{k}"] = acc
+
                         summary_metrics = {
                             **knn_metrics,
                             "final_val_loss": best_val_loss,
                             **fourier_metrics,
+                            **triplet_metrics,
                             **braiding_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
+                            # elbo metrics for results table
+                            "test/ll": test_metrics["ll"],
+                            "test/entropy": test_metrics["entropy"],
+                            "test/recon": test_metrics["recon"],
+                            "test/kl": test_metrics["kl"],
                             "cross_class_bind_unbind_similarity_pseudo": cross_class_pseudo.get(
                                 "cross_class_bind_unbind_similarity", 0.0
                             ),
@@ -838,6 +848,19 @@ def run(args):
                     row_data[f"{dist.upper()}_{n_samples}"] = "N/A"
         final_results.append(row_data)
 
+        # aggregate elbo metrics for davidson-style table
+        elbo_row = {"d": mdim}
+        for dist in distributions_to_test:
+            for metric in ["ll", "entropy", "recon", "kl"]:
+                values = agg_metrics[dist][metric]
+                if values:
+                    mean_val = np.mean(values)
+                    std_val = np.std(values)
+                    elbo_row[f"{dist.upper()}_{metric}"] = f"{mean_val:.2f}±{std_val:.2f}"
+                else:
+                    elbo_row[f"{dist.upper()}_{metric}"] = "N/A"
+        elbo_results.append(elbo_row)
+
     if final_results:
         import pandas as pd
 
@@ -845,6 +868,20 @@ def run(args):
         print("\n" + "=" * 25 + " results (knn acc %) " + "=" * 25)
         print(df.to_string())
         df.to_csv("mnist_vae_knn_results.csv")
+
+        # save elbo metrics table
+        if elbo_results:
+            df_elbo = pd.DataFrame(elbo_results).set_index("d")
+            print("\n" + "=" * 25 + " elbo metrics (ll, L[q], re, kl) " + "=" * 25)
+            print(df_elbo.to_string())
+            df_elbo.to_csv("mnist_vae_elbo_results.csv")
+
+            # also save raw data as json for further analysis
+            # note: agg_results and agg_metrics are rebuilt each dimension loop,
+            # so we save the aggregated tables which contain all data
+            with open("mnist_vae_elbo_raw.json", "w") as f:
+                json.dump(elbo_results, f, indent=2)
+            print("raw elbo metrics saved to mnist_vae_elbo_raw.json")
     else:
         print("no results were generated.")
 

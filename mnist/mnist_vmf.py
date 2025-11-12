@@ -7,7 +7,6 @@ from torchvision import datasets, transforms
 import torchvision.utils as tu
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
-from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import sys
@@ -28,10 +27,11 @@ from utils.wandb_utils import (
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
+    test_binding_unbinding_triplets as vsa_binding_triplets,
     test_per_class_bundle_capacity_two_items,
     test_cross_class_bind_interpolation_and_memory,
 )
-from mnist.mlp_vae import MLPVAE, vae_loss
+from mnist.mlp_vae import MLPVAE, vae_loss, compute_test_metrics
 
 
 class BinarizeWithRandomThreshold:
@@ -167,40 +167,6 @@ def plot_latent_space(model, loader, device, filepath, n_plot=1000):
     return filepath
 
 
-def plot_pca_analysis(model, loader, device, filepath, n_plot=1000):
-    """generate pca analysis: scatter + explained variance."""
-    print(f"generating pca analysis for {n_plot} points...")
-    X_z, y = encode_dataset(model, loader, device)
-    X_z, y = X_z[:n_plot], y[:n_plot]
-
-    pca = PCA(n_components=min(50, X_z.shape[1]))
-    Z_pca = pca.fit_transform(X_z)
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-
-    sc = ax1.scatter(
-        Z_pca[:, 0], Z_pca[:, 1], c=y, cmap=plt.get_cmap("tab10", 10), s=10, alpha=0.8
-    )
-    ax1.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)")
-    ax1.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)")
-    ax1.set_title("pca of latent space (μ) - vmf")
-    plt.colorbar(sc, ax=ax1, ticks=np.unique(y))
-
-    # explained variance plot
-    n_components = min(20, len(pca.explained_variance_ratio_))
-    ax2.bar(range(1, n_components + 1), pca.explained_variance_ratio_[:n_components])
-    ax2.set_xlabel("principal component")
-    ax2.set_ylabel("explained variance ratio")
-    ax2.set_title(
-        f"pca explained variance\n(total: {pca.explained_variance_ratio_.sum():.1%})"
-    )
-
-    plt.tight_layout()
-    plt.savefig(filepath, dpi=200, bbox_inches="tight")
-    plt.close()
-    return filepath
-
-
 def run(args):
     script_start_time = time.time()
     timing_results = {}
@@ -229,6 +195,7 @@ def run(args):
     test_eval_loader = DataLoader(test_dataset, batch_size=1024)
 
     final_results = []
+    elbo_results = []  # for davidson-style table
     knn_samples = [100, 600, 1000]
     logger = WandbLogger(args)
 
@@ -236,6 +203,8 @@ def run(args):
         print(f"\n{'='*30}\n== vMF MANIFOLD DIMENSION d = {d_manifold} ==\n{'='*30}")
 
         agg_results = {s: [] for s in knn_samples}
+        # aggregate elbo metrics
+        agg_metrics = {"ll": [], "entropy": [], "recon": [], "kl": []}
 
         # vMF: dist on sphere S^d is embedded in R^(d+1)
         model_z_dim = d_manifold + 1
@@ -317,6 +286,14 @@ def run(args):
                 model.load_state_dict(torch.load(model_path, map_location=device))
 
                 eval_start_time = time.time()
+
+                # compute elbo metrics for results table (LL, L[q], RE, KL)
+                test_metrics = compute_test_metrics(model, test_eval_loader, device)
+                for metric_name in ["ll", "entropy", "recon", "kl"]:
+                    agg_metrics[metric_name].append(test_metrics[metric_name])
+                print(f"  LL: {test_metrics['ll']:.2f}, L[q]: {test_metrics['entropy']:.2f}, "
+                      f"RE: {test_metrics['recon']:.2f}, KL: {test_metrics['kl']:.2f}")
+
                 # knn eval
                 knn_results = perform_knn_evaluation(
                     model, train_eval_loader, test_eval_loader, device, knn_samples
@@ -402,12 +379,6 @@ def run(args):
                     device,
                     os.path.join(vis_dir, "tsne.png"),
                 )
-                pca_path = plot_pca_analysis(
-                    model,
-                    test_eval_loader,
-                    device,
-                    os.path.join(vis_dir, "pca.png"),
-                )
                 interp_path = plot_interpolations(
                     model,
                     test_eval_loader,
@@ -425,7 +396,6 @@ def run(args):
                     images_to_log = {
                         "Reconstructions": recon_path,
                         "Latent t-SNE": tsne_path,
-                        "Latent PCA": pca_path,
                         "Interpolations": interp_path,
                     }
                     for tag, fr in {
@@ -488,6 +458,11 @@ def run(args):
                             **fourier_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
                             "final_val_loss": best_val_loss,
+                            # elbo metrics
+                            "test/ll": test_metrics["ll"],
+                            "test/entropy": test_metrics["entropy"],
+                            "test/recon": test_metrics["recon"],
+                            "test/kl": test_metrics["kl"],
                             "cross_class_memory_accuracy": cross_class_memory_res.get(
                                 "memory_accuracy_mean", 0.0
                             ),
@@ -502,6 +477,11 @@ def run(args):
                         "final_val_loss": best_val_loss,
                         **fourier_metrics,
                         "mean_vector_cosine_acc": float(mean_vector_acc),
+                        # elbo metrics
+                        "test/ll": test_metrics["ll"],
+                        "test/entropy": test_metrics["entropy"],
+                        "test/recon": test_metrics["recon"],
+                        "test/kl": test_metrics["kl"],
                         "cross_class_memory_accuracy": cross_class_memory_res.get(
                             "memory_accuracy_mean", 0.0
                         ),
@@ -536,6 +516,18 @@ def run(args):
                 row_data[f"vMF_{n_samples}"] = "N/A"
         final_results.append(row_data)
 
+        # aggregate elbo metrics for davidson-style table
+        elbo_row = {"d": d_manifold}
+        for metric in ["ll", "entropy", "recon", "kl"]:
+            values = agg_metrics[metric]
+            if values:
+                mean_val = np.mean(values)
+                std_val = np.std(values)
+                elbo_row[f"vMF_{metric}"] = f"{mean_val:.2f}±{std_val:.2f}"
+            else:
+                elbo_row[f"vMF_{metric}"] = "N/A"
+        elbo_results.append(elbo_row)
+
     if final_results:
         import pandas as pd
 
@@ -543,6 +535,16 @@ def run(args):
         print("\n" + "=" * 25 + " FINAL vMF RESULTS (k-NN Accuracy %) " + "=" * 25)
         print(df.to_string())
         df.to_csv("mnist_vmf_knn_results.csv")
+
+    # save elbo results for davidson-style table
+    if elbo_results:
+        elbo_df = pd.DataFrame(elbo_results).set_index("d")
+        print("\n" + "=" * 25 + " vMF ELBO METRICS (Davidson Table) " + "=" * 25)
+        print(elbo_df.to_string())
+        elbo_df.to_csv("mnist_vmf_elbo_results.csv")
+        with open("mnist_vmf_elbo_results.json", "w") as f:
+            json.dump(elbo_results, f, indent=2)
+        print("elbo results saved to mnist_vmf_elbo_results.csv and .json")
     else:
         print("No results were generated.")
 

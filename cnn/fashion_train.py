@@ -19,7 +19,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cnn.models import VAE
+from cnn.models import VAE, compute_test_metrics
 from utils.wandb_utils import (
     WandbLogger,
     test_self_binding,
@@ -34,6 +34,7 @@ from utils.wandb_utils import (
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
+    test_binding_unbinding_triplets as vsa_binding_triplets,
     test_per_class_bundle_capacity_two_items,
     test_binding_unbinding_with_self_binding,
 )
@@ -48,7 +49,7 @@ DEVICE = (
 
 def train_epoch(model, loader, optimizer, device, beta):
     model.train()
-    sums = {"total": 0.0, "recon": 0.0, "kld": 0.0}
+    sums = {"total": 0.0, "recon": 0.0, "kld": 0.0, "entropy": 0.0}
     concentration_stats = []
     for x, _ in loader:
         x = x.to(device)
@@ -60,6 +61,7 @@ def train_epoch(model, loader, optimizer, device, beta):
         optimizer.step()
         for k in ["total", "recon", "kld"]:
             sums[k] += losses[f"{k}_loss"].item() * x.size(0)
+        sums["entropy"] += losses["entropy"].item() * x.size(0)
 
         if hasattr(model, "distribution") and model.distribution in [
             "powerspherical",
@@ -69,7 +71,8 @@ def train_epoch(model, loader, optimizer, device, beta):
                 concentration_stats.append(q_z.concentration.detach())
 
     n = len(loader.dataset)
-    result = {f"train/{k}_loss": v / n for k, v in sums.items()}
+    result = {f"train/{k}_loss": v / n for k, v in sums.items() if k != "entropy"}
+    result["train/entropy"] = sums["entropy"] / n
 
     if concentration_stats and hasattr(model, "distribution"):
         all_concentrations = torch.cat(concentration_stats, dim=0)
@@ -91,7 +94,7 @@ def train_epoch(model, loader, optimizer, device, beta):
 
 def test_epoch(model, loader, device):
     model.eval()
-    sums = {"total": 0.0, "recon": 0.0, "kld": 0.0}
+    sums = {"total": 0.0, "recon": 0.0, "kld": 0.0, "entropy": 0.0}
     concentration_stats = []
     with torch.no_grad():
         for x, _ in loader:
@@ -100,6 +103,7 @@ def test_epoch(model, loader, device):
             losses = model.compute_loss(x, x_recon, q_z, p_z, beta=1.0)
             for k in ["total", "recon", "kld"]:
                 sums[k] += losses[f"{k}_loss"].item() * x.size(0)
+            sums["entropy"] += losses["entropy"].item() * x.size(0)
 
             if hasattr(model, "distribution") and model.distribution in [
                 "powerspherical",
@@ -109,7 +113,8 @@ def test_epoch(model, loader, device):
                     concentration_stats.append(q_z.concentration.detach())
 
     n = len(loader.dataset)
-    result = {f"test/{k}_loss": v / n for k, v in sums.items()}
+    result = {f"test/{k}_loss": v / n for k, v in sums.items() if k != "entropy"}
+    result["test/entropy"] = sums["entropy"] / n
 
     if concentration_stats and hasattr(model, "distribution"):
         all_concentrations = torch.cat(concentration_stats, dim=0)
@@ -270,8 +275,8 @@ def main(args):
     print(f"Device: {DEVICE}")
     logger = WandbLogger(args)
 
-    latent_dims = args.latent_dims if args.latent_dims else [4096]
-    distributions = ["clifford", "gaussian", "powerspherical"]
+    latent_dims = args.latent_dims if args.latent_dims else [2048, 4096]
+    distributions = ["clifford", "gaussian"]
     datasets_to_test = ["fashionmnist", "cinic10"]
 
     # import cinic10 if available
@@ -309,6 +314,8 @@ def main(args):
         # handle different dataset apis
         if dataset_name == "cinic10":
             # cinic10 uses partition instead of train parameter
+            # create directory first (cinic10 download expects it to exist)
+            os.makedirs("data/cinic10", exist_ok=True)
             train_set_full = dataset_class(
                 "data/cinic10", partition="train", download=True, transform=transform
             )
@@ -404,7 +411,8 @@ def main(args):
                             model, train_loader, optimizer, DEVICE, beta
                         )
                         test_losses = test_epoch(model, test_loader, DEVICE)
-                        val = test_losses["test/total_loss"]
+                        # use recon_loss for early stopping (more stable than total_loss with beta scheduling)
+                        val = test_losses["test/recon_loss"]
                         if np.isfinite(val) and val < best:
                             best = val
                             torch.save(
@@ -419,7 +427,7 @@ def main(args):
                                 "epoch": epoch,
                                 **train_losses,
                                 **test_losses,
-                                "best_test_loss": best,
+                                "best_test_recon_loss": best,
                                 "beta": beta,
                             }
                         )
@@ -431,13 +439,24 @@ def main(args):
                             break
 
                     train_time = time.time() - train_start_time
-                    print(f"best loss: {best:.4f}, training time: {train_time:.2f}s")
+                    print(f"best recon loss: {best:.4f}, training time: {train_time:.2f}s")
 
                     if os.path.exists(f"{output_dir}/best_model.pt"):
                         model.load_state_dict(
                             torch.load(
                                 f"{output_dir}/best_model.pt", map_location=DEVICE
                             )
+                        )
+
+                        # compute elbo metrics (ll, entropy, recon, kl)
+                        test_metrics = compute_test_metrics(
+                            model, test_loader, DEVICE, n_iwae_samples=10
+                        )
+                        print(
+                            f"test metrics - LL: {test_metrics['ll']:.2f}, "
+                            f"L[q]: {test_metrics['entropy']:.2f}, "
+                            f"RE: {test_metrics['recon']:.2f}, "
+                            f"KL: {test_metrics['kl']:.2f}"
                         )
 
                         eval_start_time = time.time()
@@ -460,6 +479,7 @@ def main(args):
                         item_images = torch.cat(images_list, 0)[:1000]
 
                         # === test 1: 1-item-per-class similarity matrix (no braiding) ===
+                        t0 = time.time()
                         print(
                             f"running 1-item-per-class test ({dist_name}, no braiding)..."
                         )
@@ -468,7 +488,7 @@ def main(args):
                             n_items=1000,
                             n_classes=10,
                             items_per_class=1,
-                            n_trials=20,
+                            n_trials=1,
                             normalize=normalize_vectors,
                             device=DEVICE,
                             plot=True,
@@ -478,8 +498,10 @@ def main(args):
                             item_images=item_images,
                             use_braiding=False,
                         )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
                         # === test 2: classical bundle capacity (no braiding) ===
+                        t0 = time.time()
                         print(
                             f"running classical bundle capacity ({dist_name}, no braiding)..."
                         )
@@ -487,7 +509,7 @@ def main(args):
                             d=item_memory.shape[-1],
                             n_items=1000,
                             k_range=list(range(5, 51, 5)),
-                            n_trials=20,
+                            n_trials=1,
                             normalize=normalize_vectors,
                             device=DEVICE,
                             plot=True,
@@ -495,6 +517,7 @@ def main(args):
                             item_memory=item_memory,
                             use_braiding=False,
                         )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
                         # test 2b: classical bundle capacity (with braiding)
                         bundle_cap_raw_braid = {}
@@ -506,7 +529,7 @@ def main(args):
                                 d=item_memory.shape[-1],
                                 n_items=1000,
                                 k_range=list(range(5, 51, 5)),
-                                n_trials=20,
+                                n_trials=1,
                                 normalize=normalize_vectors,
                                 device=DEVICE,
                                 plot=True,
@@ -526,15 +549,14 @@ def main(args):
                             },
                         }
 
-                        # === test 3: bind-bundle-unbind (no braiding) ===
-                        print(
-                            f"running bind-bundle-unbind test ({dist_name}, no braiding)..."
-                        )
-                        unbind_bundled_raw = vsa_binding_unbinding(
+                        # === test 3: bundled triplet retrieval (harder than pairs) ===
+                        t0 = time.time()
+                        print(f"running bundled triplet retrieval test ({dist_name})...")
+                        triplet_raw = vsa_binding_triplets(
                             d=item_memory.shape[-1],
                             n_items=1000,
-                            k_range=list(range(5, 31, 5)),
-                            n_trials=20,
+                            k_range=list(range(2, 16, 2)),
+                            n_trials=1,
                             normalize=normalize_vectors,
                             device=DEVICE,
                             plot=True,
@@ -542,53 +564,58 @@ def main(args):
                             item_memory=item_memory,
                             use_braiding=False,
                         )
-                        unbind_bundled_res_inv = {
-                            "unbind_bundled_plot": os.path.join(
-                                output_dir, "unbind_bundled_pairs_inv.png"
+                        print(f"  completed in {time.time() - t0:.2f}s")
+                        triplet_res = {
+                            "triplet_retrieval_plot": os.path.join(
+                                output_dir, "unbind_bundled_triplets_inv.png"
                             ),
-                            "unbind_bundled_accuracies": {
+                            "triplet_retrieval_accuracies": {
                                 k: acc
-                                for k, acc in zip(
-                                    unbind_bundled_raw["k"],
-                                    unbind_bundled_raw["accuracy"],
-                                )
+                                for k, acc in zip(triplet_raw["k"], triplet_raw["accuracy"])
                             },
                         }
 
-                        # === test 3b: bind-bundle-unbind (WITH braiding) ===
+                        # keep legacy vars for compatibility
+                        unbind_bundled_raw = {"k": [], "accuracy": []}
+                        unbind_bundled_res_inv = {
+                            "unbind_bundled_plot": None,
+                            "unbind_bundled_accuracies": {},
+                        }
                         unbind_bundled_raw_braid = {}
                         unbind_bundled_res_inv_braid = {}
-                        if args.braid:
-                            print(
-                                f"running bind-bundle-unbind test ({dist_name}, WITH braiding)..."
-                            )
-                            unbind_bundled_raw_braid = vsa_binding_unbinding(
-                                d=item_memory.shape[-1],
-                                n_items=1000,
-                                k_range=list(range(5, 31, 5)),
-                                n_trials=20,
-                                normalize=normalize_vectors,
-                                device=DEVICE,
-                                plot=True,
-                                save_dir=os.path.join(output_dir, "braided"),
-                                item_memory=item_memory.clone(),
-                                use_braiding=True,
-                            )
-                            unbind_bundled_res_inv_braid = {
-                                "unbind_bundled_plot_braid": os.path.join(
-                                    output_dir,
-                                    "braided",
-                                    "unbind_bundled_pairs_inv_braided.png",
-                                ),
-                                "unbind_bundled_accuracies_braid": {
-                                    k: acc
-                                    for k, acc in zip(
-                                        unbind_bundled_raw_braid["k"],
-                                        unbind_bundled_raw_braid["accuracy"],
-                                    )
-                                },
-                            }
+                        # if args.braid:
+                        #     print(
+                        #         f"running bind-bundle-unbind test ({dist_name}, WITH braiding)..."
+                        #     )
+                        #     unbind_bundled_raw_braid = vsa_binding_unbinding(
+                        #         d=item_memory.shape[-1],
+                        #         n_items=1000,
+                        #         k_range=list(range(5, 31, 5)),
+                        #         n_trials=1,
+                        #         normalize=normalize_vectors,
+                        #         device=DEVICE,
+                        #         plot=True,
+                        #         save_dir=os.path.join(output_dir, "braided"),
+                        #         item_memory=item_memory.clone(),
+                        #         use_braiding=True,
+                        #     )
+                        #     unbind_bundled_res_inv_braid = {
+                        #         "unbind_bundled_plot_braid": os.path.join(
+                        #             output_dir,
+                        #             "braided",
+                        #             "unbind_bundled_pairs_inv_braided.png",
+                        #         ),
+                        #         "unbind_bundled_accuracies_braid": {
+                        #             k: acc
+                        #             for k, acc in zip(
+                        #                 unbind_bundled_raw_braid["k"],
+                        #                 unbind_bundled_raw_braid["accuracy"],
+                        #             )
+                        #         },
+                        #     }
 
+                        t0 = time.time()
+                        print(f"running self-binding test ({dist_name})...")
                         fourier_star = test_self_binding(
                             model,
                             test_loader,
@@ -597,15 +624,12 @@ def main(args):
                             unbind_method="*",
                             img_shape=IMG_SHAPE,
                         )
-                        fourier_perp = test_self_binding(
-                            model,
-                            test_loader,
-                            DEVICE,
-                            output_dir,
-                            unbind_method="†",
-                            img_shape=IMG_SHAPE,
-                        )
+                        print(f"  completed in {time.time() - t0:.2f}s")
+                        # skipping deconv test - using only flip inverse
+                        fourier_perp = {}
 
+                        t0 = time.time()
+                        print(f"running cross-class bind/unbind test ({dist_name})...")
                         cross_class_star = test_cross_class_bind_unbind(
                             model,
                             test_loader,
@@ -614,37 +638,44 @@ def main(args):
                             unbind_method="*",  # O(d), only shifting
                             img_shape=IMG_SHAPE,
                         )
-                        cross_class_perp = test_cross_class_bind_unbind(
-                            model,
-                            test_loader,
-                            DEVICE,
-                            output_dir,
-                            unbind_method="†",  # this is O(dlogd)
-                            img_shape=IMG_SHAPE,
-                        )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
                         # reconstructions
+                        t0 = time.time()
+                        print(f"generating reconstructions...")
                         recon_path = save_reconstructions(
                             model,
                             test_loader,
                             DEVICE,
                             f"{output_dir}/reconstructions.png",
                         )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # t-SNE
-                        tsne_path = generate_tsne_plot(
-                            model, test_loader, DEVICE, f"{output_dir}/tsne.png"
-                        )
+                        # t-SNE (DISABLED - too slow at high dimensions)
+                        # t0 = time.time()
+                        # print(f"generating t-SNE plot...")
+                        # tsne_path = generate_tsne_plot(
+                        #     model, test_loader, DEVICE, f"{output_dir}/tsne.png"
+                        # )
+                        # print(f"  completed in {time.time() - t0:.2f}s")
+                        tsne_path = None
 
-                        # PCA
-                        pca_path = generate_pca_plot(
-                            model, test_loader, DEVICE, f"{output_dir}/pca.png"
-                        )
+                        # PCA (DISABLED - slow at high dimensions)
+                        # t0 = time.time()
+                        # print(f"generating PCA plot...")
+                        # pca_path = generate_pca_plot(
+                        #     model, test_loader, DEVICE, f"{output_dir}/pca.png"
+                        # )
+                        # print(f"  completed in {time.time() - t0:.2f}s")
+                        pca_path = None
 
                         # knn eval
+                        t0 = time.time()
+                        print(f"running knn evaluation...")
                         knn_metrics = perform_knn_evaluation(
                             model, train_loader, test_loader, DEVICE, [100, 600, 1000]
                         )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
                         train_subset = torch.utils.data.Subset(
                             train_set, list(range(min(5000, len(train_set))))
@@ -720,18 +751,9 @@ def main(args):
                                 **fourier_metrics,
                                 **braiding_metrics,
                                 mean_metric_key: float(mean_vector_acc),
-                                "final_best_loss": best,
+                                "final_best_recon_loss": best,
                                 "cross_class_bind_unbind_similarity_star": cross_class_star.get(
                                     "cross_class_bind_unbind_similarity", 0.0
-                                ),
-                                "cross_class_bind_unbind_similarity_perp": cross_class_perp.get(
-                                    "cross_class_bind_unbind_similarity", 0.0
-                                ),
-                                "cross_class_memory_accuracy": cross_class_memory_res.get(
-                                    "memory_accuracy_mean", 0.0
-                                ),
-                                "cross_class_memory_accuracy_std": cross_class_memory_res.get(
-                                    "memory_accuracy_std", 0.0
                                 ),
                             }
                         )
@@ -756,10 +778,10 @@ def main(args):
                             images["bundle_capacity_BRAIDED"] = bundle_braid_plot
 
                         two_per_class_plot = os.path.join(
-                            output_dir, "bundle_two_per_class_similarity.png"
+                            output_dir, "bundle_similarity_matrix.png"
                         )
                         if os.path.exists(two_per_class_plot):
-                            images["bundle_two_per_class_similarity"] = (
+                            images["bundle_similarity_matrix"] = (
                                 two_per_class_plot
                             )
 
@@ -777,6 +799,12 @@ def main(args):
                                     "unbind_bundled_plot_braid"
                                 ]
                             )
+
+                        # add triplet retrieval plot
+                        if triplet_res.get("triplet_retrieval_plot"):
+                            images["triplet_retrieval"] = triplet_res[
+                                "triplet_retrieval_plot"
+                            ]
 
                         sp = fourier_star.get("similarity_after_k_binds_plot_path")
                         sd = fourier_perp.get("similarity_after_k_binds_plot_path")
@@ -796,15 +824,6 @@ def main(args):
                         if cross_class_star.get("cross_class_bind_unbind_plot_path"):
                             images["cross_class_binding_star"] = cross_class_star[
                                 "cross_class_bind_unbind_plot_path"
-                            ]
-                        if cross_class_perp.get("cross_class_bind_unbind_plot_path"):
-                            images["cross_class_binding_perp"] = cross_class_perp[
-                                "cross_class_bind_unbind_plot_path"
-                            ]
-
-                        if cross_class_memory_res.get("plot_path"):
-                            images["cross_class_memory_test"] = cross_class_memory_res[
-                                "plot_path"
                             ]
 
                         if dist_name == "clifford" and 2 <= model.latent_dim <= 8:
@@ -849,18 +868,18 @@ def main(args):
                                 images["gaussian_manifold_visualization"] = gauss_viz
 
                         # style exploration for d>4 (for both clifford and gaussian)
-                        if model.latent_dim > 4 and dist_name in ["clifford", "gaussian"]:
-                            style_viz = plot_latent_dimension_exploration(
-                                model,
-                                test_loader,
-                                DEVICE,
-                                output_dir,
-                                n_dims_to_explore=6,
-                                n_steps=9,
-                                img_shape=IMG_SHAPE,
-                            )
-                            if style_viz:
-                                images[f"{dist_name}_style_exploration"] = style_viz
+                        # if model.latent_dim > 4 and dist_name in ["clifford", "gaussian"]:
+                        #     style_viz = plot_latent_dimension_exploration(
+                        #         model,
+                        #         test_loader,
+                        #         DEVICE,
+                        #         output_dir,
+                        #         n_dims_to_explore=6,
+                        #         n_steps=9,
+                        #         img_shape=IMG_SHAPE,
+                        #     )
+                        #     if style_viz:
+                        #         images[f"{dist_name}_style_exploration"] = style_viz
 
                         # evaluate on excluded class if specified
                         excluded_metrics = {}
@@ -894,19 +913,23 @@ def main(args):
                                 f"excluded_class_{args.exclude_class}_reconstructions"
                             ] = excluded_recon_path
 
+                        # triplet retrieval metrics
+                        triplet_metrics = {}
+                        for k, acc in triplet_res.get("triplet_retrieval_accuracies", {}).items():
+                            triplet_metrics[f"triplet_retrieval_acc_k{k}"] = acc
+
                         summary = {
-                            "final_best_loss": best,
+                            "final_best_recon_loss": best,
+                            "test/ll": test_metrics["ll"],
+                            "test/entropy": test_metrics["entropy"],
+                            "test/recon": test_metrics["recon"],
+                            "test/kl": test_metrics["kl"],
                             **fourier_metrics,
                             **knn_metrics,
+                            **triplet_metrics,
                             **braiding_metrics,
                             **excluded_metrics,
                             mean_metric_key: float(mean_vector_acc),
-                            "cross_class_memory_accuracy": cross_class_memory_res.get(
-                                "memory_accuracy_mean", 0.0
-                            ),
-                            "cross_class_memory_accuracy_std": cross_class_memory_res.get(
-                                "memory_accuracy_std", 0.0
-                            ),
                         }
                         logger.log_summary(summary)
                         logger.log_images(images)
@@ -946,7 +969,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(
         description="clifford vae experiments on fashionmnist/cifar10"
     )
-    p.add_argument("--epochs", type=int, default=1000, help="training epochs")
+    p.add_argument("--epochs", type=int, default=500, help="training epochs")
     p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs")
     p.add_argument("--batch_size", type=int, default=256, help="batch size")
     p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
@@ -999,7 +1022,7 @@ if __name__ == "__main__":
         "--latent_dims",
         type=int,
         nargs="+",
-        default=[4096],
+        default=[2048, 4096],
         help="latent dims to test",
     )
     p.add_argument(
