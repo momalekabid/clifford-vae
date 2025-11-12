@@ -58,8 +58,7 @@ class Encoder(nn.Module):
             kappa = torch.clamp(kappa, max=1.0)
             return mu, kappa
         elif self.distribution == "clifford":
-            kappa = F.softplus(self.fc_concentration(x)) + 1
-            kappa = torch.clamp(kappa, max=1.0)
+            kappa = F.softplus(self.fc_concentration(x)) + 0.01
             return mu, kappa
 
 
