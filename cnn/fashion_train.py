@@ -11,7 +11,6 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
-from collections import defaultdict
 import time
 import json
 
@@ -282,6 +281,7 @@ def main(args):
     # import cinic10 if available
     try:
         from pytorch_cinic.dataset import CINIC10
+
         dataset_map = {
             "fashionmnist": datasets.FashionMNIST,
             "cifar10": datasets.CIFAR10,
@@ -290,7 +290,10 @@ def main(args):
     except ImportError:
         print("warning: pytorch-cinic not installed. cinic10 will be skipped.")
         print("install with: pip install pytorch-cinic")
-        dataset_map = {"fashionmnist": datasets.FashionMNIST, "cifar10": datasets.CIFAR10}
+        dataset_map = {
+            "fashionmnist": datasets.FashionMNIST,
+            "cifar10": datasets.CIFAR10,
+        }
         datasets_to_test = ["fashionmnist", "cifar10"]
 
     for dataset_name in datasets_to_test:
@@ -439,7 +442,9 @@ def main(args):
                             break
 
                     train_time = time.time() - train_start_time
-                    print(f"best recon loss: {best:.4f}, training time: {train_time:.2f}s")
+                    print(
+                        f"best recon loss: {best:.4f}, training time: {train_time:.2f}s"
+                    )
 
                     if os.path.exists(f"{output_dir}/best_model.pt"):
                         model.load_state_dict(
@@ -551,7 +556,9 @@ def main(args):
 
                         # === test 3: bundled triplet retrieval (harder than pairs) ===
                         t0 = time.time()
-                        print(f"running bundled triplet retrieval test ({dist_name})...")
+                        print(
+                            f"running bundled triplet retrieval test ({dist_name})..."
+                        )
                         triplet_raw = vsa_binding_triplets(
                             d=item_memory.shape[-1],
                             n_items=1000,
@@ -571,7 +578,9 @@ def main(args):
                             ),
                             "triplet_retrieval_accuracies": {
                                 k: acc
-                                for k, acc in zip(triplet_raw["k"], triplet_raw["accuracy"])
+                                for k, acc in zip(
+                                    triplet_raw["k"], triplet_raw["accuracy"]
+                                )
                             },
                         }
 
@@ -781,9 +790,7 @@ def main(args):
                             output_dir, "bundle_similarity_matrix.png"
                         )
                         if os.path.exists(two_per_class_plot):
-                            images["bundle_similarity_matrix"] = (
-                                two_per_class_plot
-                            )
+                            images["bundle_similarity_matrix"] = two_per_class_plot
 
                         if unbind_bundled_res_inv.get("unbind_bundled_plot"):
                             images["unbind_bundled_inv"] = unbind_bundled_res_inv[
@@ -915,7 +922,9 @@ def main(args):
 
                         # triplet retrieval metrics
                         triplet_metrics = {}
-                        for k, acc in triplet_res.get("triplet_retrieval_accuracies", {}).items():
+                        for k, acc in triplet_res.get(
+                            "triplet_retrieval_accuracies", {}
+                        ).items():
                             triplet_metrics[f"triplet_retrieval_acc_k{k}"] = acc
 
                         summary = {
@@ -1003,13 +1012,13 @@ if __name__ == "__main__":
     p.add_argument(
         "--cycle_epochs",
         type=int,
-        default=200,
+        default=0,
         help="cycle length for cyclical kl beta (0=off)",
     )
     p.add_argument(
         "--n_trials",
         type=int,
-        default=1,
+        default=5,
         help="trials per config for statistical averaging",
     )
     p.add_argument(
@@ -1022,7 +1031,7 @@ if __name__ == "__main__":
         "--latent_dims",
         type=int,
         nargs="+",
-        default=[2048, 4096],
+        default=[128, 256, 512, 1024, 2048, 4096],
         help="latent dims to test",
     )
     p.add_argument(

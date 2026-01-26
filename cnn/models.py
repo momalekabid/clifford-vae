@@ -64,7 +64,7 @@ class Encoder(nn.Module):
             kappa = torch.clamp(kappa, max=1.0)
             return mu, kappa
         elif self.distribution == "clifford":
-            kappa = F.softplus(self.fc_concentration(x)) + 0.1
+            kappa = F.softplus(self.fc_concentration(x)) + 0.07
             return mu, kappa
 
 
@@ -231,10 +231,17 @@ class VAE(nn.Module):
         except (NotImplementedError, AttributeError):
             entropy = torch.tensor(0.0, device=x.device)
 
-        return {"total_loss": total_loss, "recon_loss": recon_loss, "kld_loss": kld, "entropy": entropy}
+        return {
+            "total_loss": total_loss,
+            "recon_loss": recon_loss,
+            "kld_loss": kld,
+            "entropy": entropy,
+        }
 
 
-def compute_log_likelihood(model: VAE, x: torch.Tensor, n_samples: int = 10) -> torch.Tensor:
+def compute_log_likelihood(
+    model: VAE, x: torch.Tensor, n_samples: int = 10
+) -> torch.Tensor:
     """compute importance-weighted log-likelihood estimate (iwae bound).
 
     args:
@@ -252,10 +259,14 @@ def compute_log_likelihood(model: VAE, x: torch.Tensor, n_samples: int = 10) -> 
         p_z = torch.distributions.Normal(torch.zeros_like(mu), torch.ones_like(params))
     elif model.distribution == "powerspherical":
         q_z = PowerSpherical(mu, params.squeeze(-1))
-        p_z = HypersphericalUniform(model.latent_dim, device=model.device, validate_args=False)
+        p_z = HypersphericalUniform(
+            model.latent_dim, device=model.device, validate_args=False
+        )
     elif model.distribution == "clifford":
         q_z = CliffordPowerSphericalDistribution(mu, params.expand_as(mu))
-        p_z = CliffordTorusUniform(model.latent_dim, device=model.device, validate_args=False)
+        p_z = CliffordTorusUniform(
+            model.latent_dim, device=model.device, validate_args=False
+        )
     else:
         raise ValueError(f"Unknown distribution: {model.distribution}")
 
@@ -275,14 +286,20 @@ def compute_log_likelihood(model: VAE, x: torch.Tensor, n_samples: int = 10) -> 
 
     # log p(x|z) - reconstruction likelihood
     # for images normalized to [-1, 1], use l1 or mse as proxy
-    x_expanded = x.unsqueeze(0).expand(n_samples, -1, -1, -1, -1)  # (n_samples, batch, C, H, W)
+    x_expanded = x.unsqueeze(0).expand(
+        n_samples, -1, -1, -1, -1
+    )  # (n_samples, batch, C, H, W)
 
     if model.recon_loss_type == "mse":
         # negative mse as log likelihood proxy (gaussian decoder)
-        log_p_x_z = -F.mse_loss(x_recon, x_expanded, reduction='none').view(n, b, -1).sum(-1)
+        log_p_x_z = (
+            -F.mse_loss(x_recon, x_expanded, reduction="none").view(n, b, -1).sum(-1)
+        )
     else:
         # negative l1 as log likelihood proxy (laplace decoder)
-        log_p_x_z = -F.l1_loss(x_recon, x_expanded, reduction='none').view(n, b, -1).sum(-1)
+        log_p_x_z = (
+            -F.l1_loss(x_recon, x_expanded, reduction="none").view(n, b, -1).sum(-1)
+        )
 
     # log q(z|x) - encoder log prob
     log_q_z_x = q_z.log_prob(z)
@@ -291,7 +308,9 @@ def compute_log_likelihood(model: VAE, x: torch.Tensor, n_samples: int = 10) -> 
 
     # importance weighted estimate: log(1/n * sum_i w_i) where w_i = p(x,z)/q(z|x)
     log_weights = log_p_x_z + log_p_z - log_q_z_x  # (n_samples, batch)
-    ll = log_weights.logsumexp(dim=0) - torch.log(torch.tensor(float(n_samples), device=x.device))
+    ll = log_weights.logsumexp(dim=0) - torch.log(
+        torch.tensor(float(n_samples), device=x.device)
+    )
 
     return ll.mean()
 
