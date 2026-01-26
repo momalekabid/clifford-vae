@@ -166,7 +166,6 @@ def test_self_binding(
                         imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
                 else:
                     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
-                # reshape flat output to image dimensions
                 imgs = imgs.view(-1, *img_shape)
                 imgs = imgs.cpu()
 
@@ -191,8 +190,6 @@ def test_self_binding(
             else:
                 plt.imshow(canvas.permute(1, 2, 0))
 
-            # is this even used
-            col_labels = [f"m=0"] + [f"m={m}" for m in recon_steps]
             plt.xticks([])
             plt.yticks([])
 
@@ -214,6 +211,8 @@ def test_self_binding(
         "binding_k_self_similarity": cos_sim,
         "similarity_after_k_binds_plot_path": path_bind_curve,
         "recon_after_k_binds_plot_path": recon_paths,
+        "k_sims": sims,
+        "k_values": list(range(1, k_self_bind + 1)),
     }
 
 
@@ -302,22 +301,15 @@ def test_cross_class_bind_unbind(
         a = torch.nn.functional.normalize(a, p=2, dim=-1)
         b = torch.nn.functional.normalize(b, p=2, dim=-1)
 
-    # bind a and b
     ab = bind(a, b)
-
-    # to recover b (ab ⊛ a^-1 = b)
     recovered_b = unbind(ab, a, method=unbind_method)
-
-    #  to recover a (ab ⊛ b^-1 = a)
     recovered_a = unbind(ab, b, method=unbind_method)
 
-    # calculate similarities
     sim_b = torch.nn.functional.cosine_similarity(recovered_b, b, dim=-1).mean().item()
     sim_a = torch.nn.functional.cosine_similarity(recovered_a, a, dim=-1).mean().item()
 
     avg_sim = (sim_a + sim_b) / 2.0
 
-    # create reconstruction visualizations if we have a decoder
     plot_path = None
     try:
         os.makedirs(output_dir, exist_ok=True)
@@ -346,7 +338,6 @@ def test_cross_class_bind_unbind(
                     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
             else:
                 imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
-            # reshape flat output to image dimensions
             imgs = imgs.view(-1, *img_shape)
             imgs = imgs.cpu()
 
@@ -516,7 +507,7 @@ def compute_class_means(model, loader, device, max_per_class: int = 1000):
         if dist_type == "powerspherical":
             vec = torch.nn.functional.normalize(
                 vec, p=2, dim=-1
-            )  # should already be normalized, just in case (unit-sphere)
+            )
         means[label] = vec
     return means
 
@@ -537,7 +528,6 @@ def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
         x = x.to(device)
         mu = _extract_latent_mu(model, x)
 
-        # use cosine similarity or dot product for all distributions
         sims = torch.nn.functional.cosine_similarity(
             mu.unsqueeze(1), mean_vector.unsqueeze(0), dim=-1
         )
@@ -608,7 +598,6 @@ def plot_clifford_torus_latent_scatter(
 def _angles_to_clifford_vector(
     angles: torch.Tensor, normalize_ifft: bool = True
 ) -> torch.Tensor:
-    # angles shape (..., d), produce (..., 2d) real vector following CliffordPowerSphericalDistribution mapping
     d = angles.shape[-1]
     n = 2 * d
     device = angles.device
@@ -625,7 +614,7 @@ def _angles_to_clifford_vector(
 
 
 @torch.no_grad()
-def plot_clifford_torus_recon_grid(  # TODO fix /verify.. might only work for latend dims 2/4 otherwise pca to find best 2 dims to visualize
+def plot_clifford_torus_recon_grid(
     model, device, output_dir, dims=(0, 1), n_grid: int = 16
 ):
     if getattr(model, "distribution", None) != "clifford" or model.latent_dim < 2:
@@ -645,7 +634,6 @@ def plot_clifford_torus_recon_grid(  # TODO fix /verify.. might only work for la
     model.eval()
     imgs = model.decoder(Z).detach().cpu()
     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
-    # make grid
     H = n_grid
     W = n_grid
     C = imgs.shape[1]
@@ -729,7 +717,7 @@ def test_vsa_operations(
             plt.subplot(1, 2, 1)
             plt.hist(single_bind_sims, bins=20, alpha=0.7, edgecolor="black")
             plt.axvline(
-                np.mean(single_bind_sims),  # weird type error but still works
+                np.mean(single_bind_sims),
                 color="red",
                 linestyle="--",
                 label=f"Mean: {np.mean(single_bind_sims):.3f}",
@@ -804,7 +792,6 @@ def _plot_clifford_manifold_original(model, device, output_dir, n_grid=12, dims=
         else:
             x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
 
-        # reshape flat output to image dimensions
         x_recon = x_recon.view(-1, *img_shape)
 
     C = x_recon.shape[1]
@@ -854,9 +841,8 @@ def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=
     path = os.path.join(output_dir, "powerspherical_manifold_visualization.png")
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
 
-    # reduce to 12x12 grid to save memory (instead of 16x16)
     grid_size = 12
-    n_samples = grid_size * grid_size  # 144 samples
+    n_samples = grid_size * grid_size
 
     model.eval()
     with torch.no_grad():
@@ -864,7 +850,6 @@ def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=
         z = torch.nn.functional.normalize(z, p=2, dim=-1)
         x_recon = model.decoder(z)
         x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
-        # reshape flat output to image dimensions
         x_recon = x_recon.view(-1, *img_shape).cpu()
     x_recon_grid = x_recon[: grid_size * grid_size]
 
@@ -914,16 +899,14 @@ def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=144, i
     path = os.path.join(output_dir, "gaussian_manifold_visualization.png")
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
 
-    # reduce to 12x12 grid to save memory (instead of 16x16)
     grid_size = 12
-    n_samples = grid_size * grid_size  # 144 samples
+    n_samples = grid_size * grid_size
 
     model.eval()
     with torch.no_grad():
         z = torch.randn(n_samples, latent_dim, device=device)
         x_recon = model.decoder(z)
         x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
-        # reshape flat output to image dimensions
         x_recon = x_recon.view(-1, *img_shape)
 
     x_recon_grid = x_recon[: grid_size * grid_size]
@@ -954,6 +937,145 @@ def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=144, i
     return path
 
 
+def plot_cross_dist_comparison_dim(dim_results, latent_dim, dataset_name, output_dir):
+    """
+    3-panel comparison graph for all distributions at a single latent_dim.
+    panels: bundle capacity | self-binding | role-filler capacity.
+    dim_results: dict {dist_name: {"bundle_cap", "role_filler", "self_binding_k_sims", "self_binding_k_values"}}
+    random_hrr entry shown as dashed reference line.
+    """
+    COLORS = {
+        "clifford": "#2196F3",
+        "powerspherical": "#FF9800",
+        "gaussian": "#4CAF50",
+        "gaussian_nol2": "#9C27B0",
+        "random_hrr": "#999999",
+    }
+    LABELS = {
+        "clifford": "Clifford",
+        "powerspherical": "PowerSpherical",
+        "gaussian": "Gaussian (L2)",
+        "gaussian_nol2": "Gaussian",
+        "random_hrr": "random HRR (ref.)",
+    }
+    ORDER = ["clifford", "powerspherical", "gaussian", "gaussian_nol2", "random_hrr"]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    for dist_name in ORDER:
+        metrics = dim_results.get(dist_name)
+        if metrics is None:
+            continue
+        ls = "--" if dist_name == "random_hrr" else "-"
+        color = COLORS.get(dist_name, "black")
+        label = LABELS.get(dist_name, dist_name)
+
+        bc = metrics.get("bundle_cap")
+        if bc and bc.get("k") and bc.get("accuracy"):
+            axes[0].plot(bc["k"], bc["accuracy"], marker="o", markersize=3,
+                         color=color, linestyle=ls, label=label)
+
+        k_sims = metrics.get("self_binding_k_sims", [])
+        k_vals = metrics.get("self_binding_k_values", [])
+        if k_sims and k_vals:
+            axes[1].plot(k_vals, k_sims, marker="o", markersize=3,
+                         color=color, linestyle=ls, label=label)
+
+        rf = metrics.get("role_filler")
+        if rf and rf.get("k") and rf.get("accuracy"):
+            axes[2].plot(rf["k"], rf["accuracy"], marker="s", markersize=3,
+                         color=color, linestyle=ls, label=label)
+
+    axes[0].set_xlabel("bundled vectors k")
+    axes[0].set_ylabel("retrieval accuracy")
+    axes[0].set_title(f"bundle capacity (d={latent_dim})")
+    axes[0].legend(fontsize=8)
+    axes[0].grid(alpha=0.3)
+    axes[0].set_ylim(0, 1.05)
+
+    axes[1].set_xlabel("bind/unbind depth m")
+    axes[1].set_ylabel("cosine similarity to original")
+    axes[1].set_title(f"approx. inverse binding (d={latent_dim})")
+    axes[1].legend(fontsize=8)
+    axes[1].grid(alpha=0.3)
+    axes[1].set_ylim(-0.1, 1.05)
+
+    axes[2].set_xlabel("bundled role-filler pairs k")
+    axes[2].set_ylabel("unbinding accuracy")
+    axes[2].set_title(f"role-filler capacity (d={latent_dim})")
+    axes[2].legend(fontsize=8)
+    axes[2].grid(alpha=0.3)
+    axes[2].set_ylim(0, 1.05)
+
+    fig.suptitle(f"{dataset_name} — VSA comparison (d={latent_dim})", fontsize=13)
+    plt.tight_layout()
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, f"vsa_comparison_d{latent_dim}.png")
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
+def plot_across_dims_comparison(across_dim_results, latent_dims_used, dataset_name, output_dir):
+    """
+    two-panel plot: knn accuracy vs latent_dim, generation FID vs latent_dim.
+    one line per distribution.
+    """
+    COLORS = {
+        "clifford": "#2196F3",
+        "powerspherical": "#FF9800",
+        "gaussian": "#4CAF50",
+        "gaussian_nol2": "#9C27B0",
+    }
+    LABELS = {
+        "clifford": "Clifford",
+        "powerspherical": "PowerSpherical",
+        "gaussian": "Gaussian (L2)",
+        "gaussian_nol2": "Gaussian",
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    for dist_name, data in across_dim_results.items():
+        if dist_name == "random_hrr":
+            continue
+        dims = data.get("dims", [])
+        knns = data.get("knn", [])
+        fids = data.get("fid", [])
+        color = COLORS.get(dist_name, "black")
+        label = LABELS.get(dist_name, dist_name)
+        if dims and knns:
+            axes[0].plot(dims, knns, marker="o", color=color, label=label, linewidth=2)
+        if dims and fids:
+            valid = [(d, f) for d, f in zip(dims, fids) if np.isfinite(f)]
+            if valid:
+                vd, vf = zip(*valid)
+                axes[1].plot(list(vd), list(vf), marker="o", color=color, label=label, linewidth=2)
+
+    axes[0].set_xlabel("latent dim")
+    axes[0].set_ylabel("KNN accuracy (1000 train)")
+    axes[0].set_title(f"{dataset_name}: KNN accuracy vs latent dim")
+    axes[0].legend(fontsize=9)
+    axes[0].grid(alpha=0.3)
+    if len(latent_dims_used) > 1:
+        axes[0].set_xscale("log")
+
+    axes[1].set_xlabel("latent dim")
+    axes[1].set_ylabel("generation FID ↓")
+    axes[1].set_title(f"{dataset_name}: generation FID vs latent dim")
+    axes[1].legend(fontsize=9)
+    axes[1].grid(alpha=0.3)
+    if len(latent_dims_used) > 1:
+        axes[1].set_xscale("log")
+
+    plt.tight_layout()
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, f"{dataset_name}_across_dims_comparison.png")
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
 @torch.no_grad()
 def plot_latent_dimension_exploration(
     model, loader, device, output_dir, n_dims_to_explore=6, n_steps=9, img_shape=(1, 28, 28)
@@ -971,13 +1093,11 @@ def plot_latent_dimension_exploration(
     if latent_dim is None or latent_dim < 4:
         return None
 
-    # get a sample image to encode
     model.eval()
     for x, y in loader:
-        x_sample = x[0:1].to(device)  # take first image
+        x_sample = x[0:1].to(device)
         break
 
-    # encode to get base latent code
     out = model(x_sample)
     if isinstance(out, (tuple, list)):
         _, _, _, mu = out
@@ -986,46 +1106,33 @@ def plot_latent_dimension_exploration(
 
     base_latent = mu.detach().clone()
 
-    # determine which dimensions to explore
     dims_to_explore = min(n_dims_to_explore, latent_dim)
     if latent_dim > 10:
-        # for very high dims, sample evenly spaced dimensions
         dim_indices = [int(i * latent_dim / dims_to_explore) for i in range(dims_to_explore)]
     else:
         dim_indices = list(range(dims_to_explore))
 
-    # set up range for variation based on distribution
     if dist == "clifford":
-        # vary angles from -pi to pi
         variation_range = torch.linspace(-math.pi, math.pi, n_steps, device=device)
-    else:  # gaussian or other
-        # vary from -3 to 3 standard deviations
+    else:
         variation_range = torch.linspace(-3.0, 3.0, n_steps, device=device)
 
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, f"{dist}_style_exploration.png")
 
-    # create grid: rows = dimensions, cols = variation steps
     all_reconstructions = []
 
     for dim_idx in dim_indices:
         row_reconstructions = []
         for val in variation_range:
-            # create modified latent code
             modified_latent = base_latent.clone()
             modified_latent[:, dim_idx] = val
-
-            # decode based on distribution
             if dist == "clifford":
-                # convert angles to clifford vectors
                 z = _angles_to_clifford_vector(modified_latent, normalize_ifft=True)
             else:
                 z = modified_latent
-
-            # decode
             x_recon = model.decoder(z)
 
-            # normalize output
             if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
                 if model.decoder.output_activation == "sigmoid":
                     x_recon = torch.sigmoid(x_recon)
@@ -1039,7 +1146,6 @@ def plot_latent_dimension_exploration(
 
         all_reconstructions.append(row_reconstructions)
 
-    # create canvas
     C = img_shape[0]
     h, w = img_shape[1], img_shape[2]
     n_rows = len(dim_indices)
@@ -1050,7 +1156,6 @@ def plot_latent_dimension_exploration(
         for col_idx, img in enumerate(row_recons):
             canvas[:, row_idx * h : (row_idx + 1) * h, col_idx * w : (col_idx + 1) * w] = img.cpu()
 
-    # plot
     fig_height = max(8, n_rows * 1.5)
     fig_width = max(12, n_cols * 1.5)
     plt.figure(figsize=(fig_width, fig_height))
@@ -1060,7 +1165,6 @@ def plot_latent_dimension_exploration(
     else:
         plt.imshow(canvas.permute(1, 2, 0).cpu().numpy())
 
-    # add labels
     plt.yticks(
         [h * i + h // 2 for i in range(n_rows)],
         [f"Dim {dim_indices[i]}" for i in range(n_rows)]

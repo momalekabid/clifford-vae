@@ -15,15 +15,11 @@ from torch.distributions.kl import register_kl
 
 
 def _get_eps(x: torch.Tensor) -> torch.Tensor:
-    """Get small epsilon tensor matching device and dtype."""
     return torch.tensor(1e-7, device=x.device, dtype=x.dtype)
 
 
 def _von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
-    """Compute entropy of von Mises distribution.
-    H = log(2π I₀(κ)) - κ E[cos(x - μ)]
-    where E[cos(x - μ)] = I₁(κ)/I₀(κ)
-    """
+    # H = log(2π I₀(κ)) - κ I₁(κ)/I₀(κ)
     eps = _get_eps(kappa)
     log_i0 = torch.log(torch.special.i0e(kappa) + eps) + kappa
     log_i1 = torch.log(torch.special.i1e(kappa) + eps) + kappa
@@ -266,7 +262,6 @@ class CliffordTorusDistribution(Distribution):
             theta_collection[..., 1:], dims=(-1,)
         )
         samples_complex = torch.exp(1j * theta_s)
-        # check how close to real vectors
         assert torch.allclose(samples_complex, samples_complex.conj().flip(-1))
         return torch.fft.ifft(samples_complex, dim=-1).real
 
@@ -275,6 +270,7 @@ class CliffordTorusDistribution(Distribution):
 
 
 class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
+    # clifford torus with powerspherical concentration
     arg_constraints = {"loc": constraints.real, "concentration": constraints.positive}
     has_rsample = True
 
@@ -300,11 +296,9 @@ class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
         # if self.normalize_ifft:
         #     samples_c = samples_c / math.sqrt(n)
         #     return torch.fft.ifft(samples_c, dim=-1, norm="ortho").real
-        # standard fft gives exact unit fourier coefficients: |x̂_k| = 1
         return torch.fft.ifft(samples_c, dim=-1).real
 
     def log_prob(self, value):
-        # standard fft: forward gives back Theta_k exactly
         freq = torch.fft.fft(value, dim=-1)[..., : self.orig_dim]
         angles = torch.angle(freq)
         mean_dirs = torch.stack((torch.cos(self.loc), torch.sin(self.loc)), -1)

@@ -12,6 +12,30 @@ def hrr_init(n: int, d: int, device="cpu", dtype=torch.float32) -> torch.Tensor:
     )  # N(0, 1/sqrt(d))
 
 
+def unitary_init(
+    n: int, d: int, device="cpu", dtype=torch.float32, eps=1e-3
+) -> torch.Tensor:
+    """init n vectors of dimension d with unit fourier magnitude (|F[k]|=1 for all k).
+    based on make_good_unitary from sspspace
+    """
+    vectors = torch.zeros(n, d, device=device, dtype=dtype)
+    n_phases = (d - 1) // 2
+    for i in range(n):
+        a = torch.rand(n_phases, device=device)
+        sign = torch.sign(torch.rand(n_phases, device=device) - 0.5)
+        phi = sign * math.pi * (eps + a * (1 - 2 * eps))
+
+        fv = torch.zeros(d, device=device, dtype=torch.complex64)
+        fv[0] = 1.0
+        fv[1 : (d + 1) // 2] = torch.cos(phi) + 1j * torch.sin(phi)
+        fv[d // 2 + 1 :] = torch.flip(torch.conj(fv[1 : (d + 1) // 2]), dims=(0,))
+        if d % 2 == 0:
+            fv[d // 2] = 1.0
+
+        vectors[i] = torch.fft.ifft(fv).real
+    return vectors
+
+
 def normalize_vectors(x: torch.Tensor) -> torch.Tensor:
     return F.normalize(x, p=2, dim=-1)
 
@@ -31,7 +55,7 @@ def invert(a: torch.Tensor) -> torch.Tensor:
 
 def unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "inv") -> torch.Tensor:
     """
-    unbind operation for vsa
+    unbind operation for HRR vsa
     - inv/*: x̂ = (ab) ⊛ a^{-1}, where a^{-1} = (a_n, ..., a_2, a_1)
     - †/deconv: x̂ = IFFT( FFT(ab) / FFT(a) )
     """
@@ -76,7 +100,7 @@ def test_bundle_capacity(
     d: int = 1024,
     n_items: int = 1000,
     k_range=None,
-    n_trials: int = 1,
+    n_trials: int = 20,
     normalize: bool = True,
     device: str = "cpu",
     plot: bool = False,
@@ -86,6 +110,13 @@ def test_bundle_capacity(
     use_braiding: bool = False,
     bind_with_random: bool = False,
 ) -> Dict:
+    """
+    for each k:
+      - draw 2k items from item_memory
+      - X = first k, X' = second k
+      - C1 = bundle(X), C2 = bundle(X')
+      - accuracy = fraction of x ∈ X where cos(x, C1) > cos(x, C2)
+    """
     if k_range is None:
         k_range = list(range(2, min(51, n_items // 2), 2))
 
@@ -98,65 +129,46 @@ def test_bundle_capacity(
         if normalize:
             item_memory = normalize_vectors(item_memory)
 
-    # generate different random permutation for each vector (paper sec. "Shuffling to Store...")
-    # "if two images are shuffled differently, the shuffled versions will have only incidental similarity"
-    perm_dict = {}
-    if use_braiding:
-        print(f"  applying braiding to {n_items} vectors...")
-        braided_memory = torch.zeros_like(item_memory)
-        for i in range(n_items):
-            perm = torch.randperm(d, device=device)
-            perm_dict[i] = perm
-            braided_memory[i] = permute_vector(item_memory[i], perm)
-        item_memory = braided_memory
-
     results = {"k": [], "accuracy": [], "std": []}
-    print(f"  testing bundle capacity for k in {k_range} (d={d}, n_items={n_items})")
 
-    for k_idx, k in enumerate(k_range):
-        print(f"    k={k} ({k_idx+1}/{len(k_range)})...", end=" ", flush=True)
+    for k in k_range:
         trial_accs = []
 
         for _ in range(n_trials):
-            indices = torch.randperm(n_items, device=device)[:k]
-            selected = item_memory[indices]
+            # need 2k items: first k → X, next k → X'
+            n_needed = min(2 * k, n_items)
+            if n_needed < 2:
+                trial_accs.append(0.0)
+                continue
+            actual_k = n_needed // 2
+            indices = torch.randperm(n_items, device=device)[:n_needed]
+            X = item_memory[indices[:actual_k]]
+            Xp = item_memory[indices[actual_k : actual_k * 2]]
 
-            if bind_with_random:
-                random_keys = hrr_init(k, d, device=device)
-                if normalize:
-                    random_keys = normalize_vectors(random_keys)
-                bound_vectors = bind(selected, random_keys)
-                bundled = bundle(bound_vectors, normalize=True)
-                unbounded_from_bundle = bind(
-                    bundled.unsqueeze(0).expand(k, -1), invert(random_keys)
-                )
-                sims = torch.zeros(k, n_items, device=device)
-                for i in range(k):
-                    sims[i] = similarity(
-                        unbounded_from_bundle[i].unsqueeze(0), item_memory
-                    )
-                correct = 0
-                for i in range(k):
-                    if indices[i] in torch.topk(sims[i], k).indices:
-                        correct += 1
-                trial_accs.append(correct / k)
-            else:
-                bundled = bundle(selected, normalize=True)
-                sims = similarity(bundled, item_memory)
-                top_k_sims, top_k_indices = torch.topk(sims, k)
-                correct = torch.isin(top_k_indices, indices).sum().item()
-                trial_accs.append(correct / k)
+            C1 = bundle(X, normalize=True)
+            C2 = bundle(Xp, normalize=True)
 
-        mean_acc = np.mean(trial_accs)
-        std_acc = np.std(trial_accs)
+            # sim of each x ∈ X to both bundles
+            # C1 shape: (d,), broadcast against X: (k, d)
+            sim_to_C1 = F.cosine_similarity(
+                X, C1.unsqueeze(0).expand(actual_k, -1), dim=-1
+            )
+            sim_to_C2 = F.cosine_similarity(
+                X, C2.unsqueeze(0).expand(actual_k, -1), dim=-1
+            )
+            acc = (sim_to_C1 > sim_to_C2).float().mean().item()
+            trial_accs.append(acc)
+
+        mean_acc = float(np.mean(trial_accs))
+        std_acc = float(np.std(trial_accs))
         results["k"].append(k)
         results["accuracy"].append(mean_acc)
         results["std"].append(std_acc)
-        print(f"acc={mean_acc:.3f}")
 
     if plot:
+        import os
+
         plt.figure(figsize=(8, 5))
-        bind_label = " [BIND+BUNDLE]" if bind_with_random else ""
         plt.errorbar(
             results["k"],
             results["accuracy"],
@@ -164,20 +176,15 @@ def test_bundle_capacity(
             marker="o",
             capsize=3,
         )
-        plt.xlabel("Number of bundled vectors (k)")
-        plt.ylabel("Retrieval accuracy")
-        plt.title(f"Bundle Capacity{bind_label} (d={d}, N={n_items})")
+        plt.xlabel("bundled vectors k")
+        plt.ylabel("retrieval accuracy")
+        plt.title(f"bundle capacity (d={d}, N={n_items})")
         plt.grid(True, alpha=0.3)
         plt.ylim(0, 1.05)
         plt.tight_layout()
         if save_dir:
-            import os
-
             os.makedirs(save_dir, exist_ok=True)
-            suffix = "_bind" if bind_with_random else ""
-            filename = f"bundle_capacity{suffix}.png"
-            plt.savefig(os.path.join(save_dir, filename), dpi=500)
-            print(f"  saved plot to {save_dir}/{filename}")
+            plt.savefig(os.path.join(save_dir, "bundle_capacity.png"), dpi=200)
         plt.close()
 
     return results
@@ -187,7 +194,7 @@ def test_binding_unbinding_pairs(
     d: int = 1024,
     n_items: int = 1000,
     k_range=None,
-    n_trials: int = 1,
+    n_trials: int = 20,
     normalize: bool = True,
     device: str = "cpu",
     plot: bool = False,
@@ -233,7 +240,7 @@ def test_binding_unbinding_pairs(
             if bind_with_random:
                 indices = torch.randperm(n_items, device=device)[:k]
                 fillers = item_memory[indices]
-                roles = hrr_init(k, d, device=device)
+                roles = unitary_init(k, d, device=device)
                 if normalize:
                     roles = normalize_vectors(roles)
             else:
@@ -244,7 +251,6 @@ def test_binding_unbinding_pairs(
             pairs = bind(roles, fillers)
 
             if use_braiding:
-                # braid each pair with unique permutation before bundling
                 braided_pairs = []
                 perms = []
                 for i in range(k):
@@ -259,7 +265,6 @@ def test_binding_unbinding_pairs(
             correct = 0
             for i in range(k):
                 if use_braiding:
-                    # unbraid before unbinding
                     unbraided = unpermute_vector(bundled, perms[i])
                     recovered = unbind(
                         unbraided.unsqueeze(0),
@@ -303,8 +308,8 @@ def test_binding_unbinding_pairs(
             capsize=3,
             color="red",
         )
-        plt.xlabel("number of bundled role-filler pairs (k)")
-        plt.ylabel("unbinding accuracy")
+        plt.xlabel("# of Bundled Role-Filler Pairs (k)")
+        plt.ylabel("Unbinding Accuracy")
         plt.title(
             f"role-filler query capacity{bind_label}{braid_label} (d={d}, N={n_items}, {unbind_method})"
         )
@@ -315,625 +320,13 @@ def test_binding_unbinding_pairs(
             import os
 
             os.makedirs(save_dir, exist_ok=True)
-            braid_suffix = "_braided" if use_braiding else ""
-            plt.savefig(
-                os.path.join(
-                    save_dir, f"unbind_bundled_pairs_{unbind_method}{braid_suffix}.png"
-                ),
-                dpi=500,
-            )
+            plt.savefig(os.path.join(save_dir, "role_filler_capacity.png"), dpi=200)
         plt.close()
 
     return results
 
 
-def test_binding_unbinding_triplets(
-    d: int = 1024,
-    n_items: int = 1000,
-    k_range=None,
-    n_trials: int = 1,
-    normalize: bool = True,
-    device: str = "cpu",
-    plot: bool = False,
-    unbind_method: str = "inv",
-    save_dir: Optional[str] = None,
-    item_memory: Optional[torch.Tensor] = None,
-    use_braiding: bool = False,
-) -> Dict:
-    """
-    test binding/unbinding with bundled triplets (harder than pairs).
-
-    for each triplet:
-        - select a filler from item_memory
-        - bind with two random role vectors: triplet = role1 ⊛ role2 ⊛ filler
-        - bundle k such triplets
-        - test recovery by unbinding with both roles and checking similarity
-
-    this is harder than pairs because:
-        1. two unbind operations required
-        2. more interference from bundling
-    """
-    if k_range is None:
-        k_range = list(range(2, min(21, n_items // 4), 2))
-
-    if item_memory is None:
-        item_memory = hrr_init(n_items, d, device=device)
-        if normalize:
-            item_memory = normalize_vectors(item_memory)
-    else:
-        item_memory = item_memory[:n_items].to(device)
-        if normalize:
-            item_memory = normalize_vectors(item_memory)
-
-    results = {"k": [], "accuracy": [], "std": []}
-
-    for k in k_range:
-        trial_accs = []
-
-        for _ in range(n_trials):
-            # select k fillers from item memory
-            indices = torch.randperm(n_items, device=device)[:k]
-            fillers = item_memory[indices]
-
-            # create two random role vectors per triplet
-            roles1 = hrr_init(k, d, device=device)
-            roles2 = hrr_init(k, d, device=device)
-            if normalize:
-                roles1 = normalize_vectors(roles1)
-                roles2 = normalize_vectors(roles2)
-
-            # bind: triplet = role1 ⊛ role2 ⊛ filler
-            triplets = bind(bind(roles1, roles2), fillers)
-
-            if use_braiding:
-                braided_triplets = []
-                perms = []
-                for i in range(k):
-                    perm = torch.randperm(d, device=device)
-                    perms.append(perm)
-                    braided = permute_vector(triplets[i], perm)
-                    braided_triplets.append(braided)
-                bundled = bundle(torch.stack(braided_triplets), normalize=True)
-            else:
-                bundled = bundle(triplets, normalize=True)
-
-            correct = 0
-            for i in range(k):
-                if use_braiding:
-                    unbraided = unpermute_vector(bundled, perms[i])
-                    # unbind twice: first with role1, then with role2
-                    partial = unbind(
-                        unbraided.unsqueeze(0),
-                        roles1[i].unsqueeze(0),
-                        method=unbind_method,
-                    ).squeeze()
-                    recovered = unbind(
-                        partial.unsqueeze(0),
-                        roles2[i].unsqueeze(0),
-                        method=unbind_method,
-                    ).squeeze()
-                else:
-                    # unbind twice: first with role1, then with role2
-                    partial = unbind(
-                        bundled.unsqueeze(0),
-                        roles1[i].unsqueeze(0),
-                        method=unbind_method,
-                    ).squeeze()
-                    recovered = unbind(
-                        partial.unsqueeze(0),
-                        roles2[i].unsqueeze(0),
-                        method=unbind_method,
-                    ).squeeze()
-
-                sims = similarity(recovered, item_memory)
-                best_idx = torch.argmax(sims).item()
-                target_idx = indices[i].item()
-
-                if best_idx == target_idx:
-                    correct += 1
-
-            trial_accs.append(correct / k)
-
-        results["k"].append(k)
-        results["accuracy"].append(np.mean(trial_accs))
-        results["std"].append(np.std(trial_accs))
-
-    if plot and save_dir is not None:
-        import os
-
-        os.makedirs(save_dir, exist_ok=True)
-        braid_suffix = "_braided" if use_braiding else ""
-        plt.figure(figsize=(8, 6))
-        plt.errorbar(
-            results["k"], results["accuracy"], yerr=results["std"], capsize=3, marker="o"
-        )
-        plt.xlabel("k (bundled triplets)")
-        plt.ylabel("retrieval accuracy")
-        plt.title(f"bundled triplet retrieval (d={d}, unbind={unbind_method})")
-        plt.ylim([0, 1.05])
-        plt.grid(True, alpha=0.3)
-        plt.savefig(
-            os.path.join(
-                save_dir, f"unbind_bundled_triplets_{unbind_method}{braid_suffix}.png"
-            ),
-            dpi=500,
-        )
-        plt.close()
-
-    return results
-
-
-def test_binding_unbinding_with_self_binding(
-    d: int = 1024,
-    n_items: int = 1000,
-    k_range=None,
-    n_trials: int = 1,
-    normalize: bool = True,
-    device: str = "cpu",
-    plot: bool = False,
-    unbind_method: str = "inv",
-    save_dir: Optional[str] = None,
-    item_memory: Optional[torch.Tensor] = None,
-    use_braiding: bool = False,
-) -> Dict:
-    """
-    test binding/unbinding with nested self-binding structures:
-    - role ⊛ (filler ⊛ filler)  - self-bound filler
-    - (role ⊛ role) ⊛ filler     - self-bound role
-    - role ⊛ (filler ⊛ role)     - circular binding
-
-    bundle k such pairs and test recovery of the filler
-    """
-    if k_range is None:
-        k_range = list(range(2, min(31, n_items // 4), 2))
-
-    if item_memory is None:
-        item_memory = hrr_init(n_items, d, device=device)
-        if normalize:
-            item_memory = normalize_vectors(item_memory)
-    else:
-        item_memory = item_memory[:n_items].to(device)
-        if normalize:
-            item_memory = normalize_vectors(item_memory)
-
-    results = {
-        "k": [],
-        "accuracy_self_filler": [],
-        "accuracy_self_role": [],
-        "accuracy_circular": [],
-        "std_self_filler": [],
-        "std_self_role": [],
-        "std_circular": [],
-    }
-
-    for k in k_range:
-        trial_accs_self_filler = []
-        trial_accs_self_role = []
-        trial_accs_circular = []
-
-        for _ in range(n_trials):
-            indices = torch.randperm(n_items, device=device)[: 2 * k]
-            roles = item_memory[indices[:k]]
-            fillers = item_memory[indices[k : 2 * k]]
-
-            # pattern 1: role ⊛ (filler ⊛ filler)
-            self_bound_fillers = bind(fillers, fillers)
-            pairs_self_filler = bind(roles, self_bound_fillers)
-
-            # pattern 2: (role ⊛ role) ⊛ filler
-            self_bound_roles = bind(roles, roles)
-            pairs_self_role = bind(self_bound_roles, fillers)
-
-            # pattern 3: role ⊛ (filler ⊛ role)
-            filler_role_bound = bind(fillers, roles)
-            pairs_circular = bind(roles, filler_role_bound)
-
-            # bundle with optional braiding
-            if use_braiding:
-                # braid each pattern's pairs
-                braided_pairs_1, perms_1 = [], []
-                braided_pairs_2, perms_2 = [], []
-                braided_pairs_3, perms_3 = [], []
-
-                for i in range(k):
-                    perm = torch.randperm(d, device=device)
-                    perms_1.append(perm)
-                    braided_pairs_1.append(permute_vector(pairs_self_filler[i], perm))
-
-                    perm = torch.randperm(d, device=device)
-                    perms_2.append(perm)
-                    braided_pairs_2.append(permute_vector(pairs_self_role[i], perm))
-
-                    perm = torch.randperm(d, device=device)
-                    perms_3.append(perm)
-                    braided_pairs_3.append(permute_vector(pairs_circular[i], perm))
-
-                bundled_1 = bundle(torch.stack(braided_pairs_1), normalize=True)
-                bundled_2 = bundle(torch.stack(braided_pairs_2), normalize=True)
-                bundled_3 = bundle(torch.stack(braided_pairs_3), normalize=True)
-            else:
-                bundled_1 = bundle(pairs_self_filler, normalize=True)
-                bundled_2 = bundle(pairs_self_role, normalize=True)
-                bundled_3 = bundle(pairs_circular, normalize=True)
-
-            # test recovery for pattern 1: role ⊛ (filler ⊛ filler)
-            # to recover filler: unbind role, then unbind filler from result
-            correct_1 = 0
-            for i in range(k):
-                if use_braiding:
-                    unbraided = unpermute_vector(bundled_1, perms_1[i])
-                    filler_filler = unbind(
-                        unbraided.unsqueeze(0),
-                        roles[i].unsqueeze(0),
-                        method=unbind_method,
-                    ).squeeze()
-                else:
-                    filler_filler = unbind(
-                        bundled_1.unsqueeze(0),
-                        roles[i].unsqueeze(0),
-                        method=unbind_method,
-                    ).squeeze()
-
-                # now unbind filler from (filler ⊛ filler)
-                recovered = unbind(
-                    filler_filler.unsqueeze(0),
-                    fillers[i].unsqueeze(0),
-                    method=unbind_method,
-                ).squeeze()
-
-                sims = similarity(recovered, item_memory)
-                best_idx = torch.argmax(sims).item()
-                if best_idx == indices[k + i].item():
-                    correct_1 += 1
-
-            # test recovery for pattern 2: (role ⊛ role) ⊛ filler
-            # to recover filler: first unbind to get filler, then unbind role from (role ⊛ role)
-            correct_2 = 0
-            for i in range(k):
-                if use_braiding:
-                    unbraided = unpermute_vector(bundled_2, perms_2[i])
-                    # unbind (role ⊛ role) to get filler
-                    recovered = unbind(
-                        unbraided.unsqueeze(0),
-                        self_bound_roles[i].unsqueeze(0),
-                        method=unbind_method,
-                    ).squeeze()
-                else:
-                    recovered = unbind(
-                        bundled_2.unsqueeze(0),
-                        self_bound_roles[i].unsqueeze(0),
-                        method=unbind_method,
-                    ).squeeze()
-
-                sims = similarity(recovered, item_memory)
-                best_idx = torch.argmax(sims).item()
-                if best_idx == indices[k + i].item():
-                    correct_2 += 1
-
-            # test recovery for pattern 3: role ⊛ (filler ⊛ role)
-            # to recover filler: unbind role, then unbind role again
-            correct_3 = 0
-            for i in range(k):
-                if use_braiding:
-                    unbraided = unpermute_vector(bundled_3, perms_3[i])
-                    filler_role = unbind(
-                        unbraided.unsqueeze(0),
-                        roles[i].unsqueeze(0),
-                        method=unbind_method,
-                    ).squeeze()
-                else:
-                    filler_role = unbind(
-                        bundled_3.unsqueeze(0),
-                        roles[i].unsqueeze(0),
-                        method=unbind_method,
-                    ).squeeze()
-
-                # unbind role from (filler ⊛ role)
-                recovered = unbind(
-                    filler_role.unsqueeze(0),
-                    roles[i].unsqueeze(0),
-                    method=unbind_method,
-                ).squeeze()
-
-                sims = similarity(recovered, item_memory)
-                best_idx = torch.argmax(sims).item()
-                if best_idx == indices[k + i].item():
-                    correct_3 += 1
-
-            trial_accs_self_filler.append(correct_1 / k)
-            trial_accs_self_role.append(correct_2 / k)
-            trial_accs_circular.append(correct_3 / k)
-
-        results["k"].append(k)
-        results["accuracy_self_filler"].append(np.mean(trial_accs_self_filler))
-        results["accuracy_self_role"].append(np.mean(trial_accs_self_role))
-        results["accuracy_circular"].append(np.mean(trial_accs_circular))
-        results["std_self_filler"].append(np.std(trial_accs_self_filler))
-        results["std_self_role"].append(np.std(trial_accs_self_role))
-        results["std_circular"].append(np.std(trial_accs_circular))
-
-    if plot:
-        plt.figure(figsize=(10, 6))
-        braid_label = " [BRAIDED]" if use_braiding else ""
-
-        plt.errorbar(
-            results["k"],
-            results["accuracy_self_filler"],
-            yerr=results["std_self_filler"],
-            marker="o",
-            capsize=3,
-            label="role ⊛ (filler ⊛ filler)",
-        )
-        plt.errorbar(
-            results["k"],
-            results["accuracy_self_role"],
-            yerr=results["std_self_role"],
-            marker="s",
-            capsize=3,
-            label="(role ⊛ role) ⊛ filler",
-        )
-        plt.errorbar(
-            results["k"],
-            results["accuracy_circular"],
-            yerr=results["std_circular"],
-            marker="^",
-            capsize=3,
-            label="role ⊛ (filler ⊛ role)",
-        )
-
-        plt.xlabel("number of bundled pairs (k)")
-        plt.ylabel("unbinding accuracy")
-        plt.title(
-            f"self-binding patterns{braid_label} (d={d}, N={n_items}, {unbind_method})"
-        )
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.ylim(0, 1.05)
-        plt.tight_layout()
-
-        if save_dir:
-            import os
-
-            os.makedirs(save_dir, exist_ok=True)
-            braid_suffix = "_braided" if use_braiding else ""
-            plt.savefig(
-                os.path.join(
-                    save_dir, f"self_binding_patterns_{unbind_method}{braid_suffix}.png"
-                ),
-                dpi=500,
-            )
-        plt.close()
-
-    return results
-
-
-def run_all_tests(
-    d: int = 1024,
-    n_items: int = 1000,
-    normalize: bool = True,
-    device: str = "cpu",
-    save_dir: Optional[str] = None,
-    item_memory: Optional[torch.Tensor] = None,
-) -> Dict:
-    print(f"Running VSA tests with d={d}, N={n_items}, normalize={normalize}")
-    if item_memory is not None:
-        print("Using provided latent representations for VSA tests")
-
-    results = {}
-
-    print("Testing bundle capacity...")
-    results["bundle_capacity"] = test_bundle_capacity(
-        d=d,
-        n_items=n_items,
-        normalize=normalize,
-        device=device,
-        plot=True,
-        item_memory=item_memory,
-        save_dir=save_dir,
-    )
-
-    print("Testing binding/unbinding of bundled pairs...")
-    results["binding_unbinding"] = test_binding_unbinding_pairs(
-        d=d,
-        n_items=n_items,
-        normalize=normalize,
-        device=device,
-        plot=True,
-        item_memory=item_memory,
-        save_dir=save_dir,
-    )
-
-    print("\n=== Summary ===")
-    bc = results["bundle_capacity"]
-    max_k_99 = max(
-        [k for k, acc in zip(bc["k"], bc["accuracy"]) if acc >= 0.99], default=0
-    )
-    print(f"Bundle capacity: max k with >99% accuracy = {max_k_99}")
-
-    bu = results["binding_unbinding"]
-    max_k_90 = max(
-        [k for k, acc in zip(bu["k"], bu["accuracy"]) if acc >= 0.90], default=0
-    )
-    print(f"Binding/unbinding: max k with >90% accuracy = {max_k_90}")
-
-    return results
-
-
-def test_bundle_capacity_confusion_matrix(
-    d: int = 1024,
-    n_items: int = 2500,  # 50 classes x 50 items each
-    n_classes: int = 50,
-    n_trials: int = 1,
-    normalize: bool = True,
-    device: str = "cpu",
-    plot: bool = False,
-    save_dir: Optional[str] = None,
-    item_memory: Optional[torch.Tensor] = None,
-    labels: Optional[torch.Tensor] = None,
-) -> Dict:
-    """
-    test bundle capacity with 50x50 confusion matrix to analyze
-    how duplicate class member similarities are distributed differently
-    in clifford vs gaussian latent spaces
-    """
-    if item_memory is None:
-        item_memory = hrr_init(n_items, d, device=device)
-        if normalize:
-            item_memory = normalize_vectors(item_memory)
-        labels = torch.randint(0, n_classes, (n_items,), device=device)
-    else:
-        item_memory = item_memory[:n_items].to(device)
-        if normalize:
-            item_memory = normalize_vectors(item_memory)
-        if labels is None:
-            labels = torch.randint(0, n_classes, (n_items,), device=device)
-        else:
-            labels = labels[:n_items].to(device)
-
-    unique_classes = torch.unique(labels).cpu().numpy()
-    if len(unique_classes) < n_classes:
-        print(f"warning: only {len(unique_classes)} classes found, need {n_classes}")
-        n_classes = len(unique_classes)
-
-    # build class-to-items mapping
-    class_to_items = {}
-    for class_id in unique_classes[:n_classes]:
-        class_indices = torch.where(labels == class_id)[0]
-        if len(class_indices) > 0:
-            class_to_items[class_id] = class_indices
-
-    confusion_matrices = []
-    similarity_distributions = []
-
-    for trial in range(n_trials):
-        # select one item from each class for bundling
-        selected_indices = []
-        selected_classes = []
-
-        for class_id in unique_classes[:n_classes]:
-            if class_id in class_to_items and len(class_to_items[class_id]) > 1:
-                # randomly select one item for bundling
-                selected_idx = class_to_items[class_id][
-                    torch.randint(0, len(class_to_items[class_id]), (1,))
-                ]
-                selected_indices.append(selected_idx.item())
-                selected_classes.append(class_id)
-
-        if len(selected_indices) < 10:
-            continue
-
-        selected_vectors = item_memory[selected_indices]
-        bundled = bundle(selected_vectors, normalize=True)
-
-        confusion_matrix = np.zeros((len(selected_classes), len(selected_classes)))
-        all_similarities = []
-
-        for i, class_id in enumerate(selected_classes):
-            class_indices = class_to_items[class_id]
-            class_vectors = item_memory[class_indices]
-            sims = similarity(bundled.unsqueeze(0), class_vectors).cpu().numpy()
-            all_similarities.extend(sims)
-
-            # average similarity to this class
-            mean_sim = np.mean(sims)
-            confusion_matrix[i, i] = mean_sim
-
-            # cross-class similarities
-            for j, other_class_id in enumerate(selected_classes):
-                if i != j:
-                    other_indices = class_to_items[other_class_id]
-                    other_vectors = item_memory[other_indices]
-                    cross_sims = (
-                        similarity(bundled.unsqueeze(0), other_vectors).cpu().numpy()
-                    )
-                    confusion_matrix[i, j] = np.mean(cross_sims)
-
-        confusion_matrices.append(confusion_matrix)
-        similarity_distributions.append(all_similarities)
-
-    if confusion_matrices:
-        avg_confusion = np.mean(confusion_matrices, axis=0)
-        std_confusion = np.std(confusion_matrices, axis=0)
-
-        results = {
-            "avg_confusion_matrix": avg_confusion,
-            "std_confusion_matrix": std_confusion,
-            "similarity_distributions": similarity_distributions,
-            "diagonal_similarities": [np.diag(cm) for cm in confusion_matrices],
-            "off_diagonal_similarities": [
-                cm[~np.eye(cm.shape[0], dtype=bool)] for cm in confusion_matrices
-            ],
-        }
-
-        if plot and save_dir:
-            import os
-
-            os.makedirs(save_dir, exist_ok=True)
-
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-
-            # plot average confusion matrix
-            im1 = axes[0, 0].imshow(avg_confusion, cmap="viridis", aspect="auto")
-            axes[0, 0].set_title("average bundle-to-class similarity matrix")
-            axes[0, 0].set_xlabel("class index")
-            axes[0, 0].set_ylabel("class index")
-            plt.colorbar(im1, ax=axes[0, 0])
-
-            # plot diagonal vs off-diagonal distributions
-            all_diag = np.concatenate([np.diag(cm) for cm in confusion_matrices])
-            all_off_diag = np.concatenate(
-                [cm[~np.eye(cm.shape[0], dtype=bool)] for cm in confusion_matrices]
-            )
-
-            axes[0, 1].hist(
-                all_diag, bins=30, alpha=0.7, label="same class", density=True
-            )
-            axes[0, 1].hist(
-                all_off_diag, bins=30, alpha=0.7, label="different class", density=True
-            )
-            axes[0, 1].set_xlabel("cosine similarity")
-            axes[0, 1].set_ylabel("density")
-            axes[0, 1].set_title("similarity distributions")
-            axes[0, 1].legend()
-
-            # plot similarity distribution over all trials
-            all_sims = np.concatenate(similarity_distributions)
-            axes[1, 0].hist(all_sims, bins=50, alpha=0.7, edgecolor="black")
-            axes[1, 0].set_xlabel("cosine similarity")
-            axes[1, 0].set_ylabel("count")
-            axes[1, 0].set_title(
-                f"overall similarity distribution (μ={np.mean(all_sims):.3f})"
-            )
-
-            # plot separation metric
-            separation_scores = []
-            for cm in confusion_matrices:
-                diag_mean = np.mean(np.diag(cm))
-                off_diag_mean = np.mean(cm[~np.eye(cm.shape[0], dtype=bool)])
-                separation_scores.append(diag_mean - off_diag_mean)
-
-            axes[1, 1].boxplot(separation_scores)
-            axes[1, 1].set_ylabel("separation score")
-            axes[1, 1].set_title(
-                f"class separation (μ={np.mean(separation_scores):.3f})"
-            )
-
-            plt.tight_layout()
-            plt.savefig(
-                os.path.join(save_dir, "bundle_capacity_confusion_50x50.png"), dpi=500
-            )
-            plt.close()
-
-            results["confusion_plot_path"] = os.path.join(
-                save_dir, "bundle_capacity_confusion_50x50.png"
-            )
-
-        return results
-
-    return {"avg_confusion_matrix": None}
-
-
-def test_per_class_bundle_capacity_two_items(
+def test_per_class_bundle_capacity_k_items(
     d: int = 1024,
     n_items: int = 1000,
     n_classes: int = 10,
@@ -948,11 +341,11 @@ def test_per_class_bundle_capacity_two_items(
     item_images: Optional[torch.Tensor] = None,
     use_braiding: bool = False,
     per_class_braid: bool = False,
+    class_names: Optional[list] = None,
 ) -> Dict:
     """
-    bundle 2 items from each of the n_classes classes
-    compute similarity matrix between all individual bundles (a1, a2, b1, b2, ...)
-    resulting matrix is 2*n_classes x 2*n_classes showing similarities between all pairs
+    bundle k items from each of the first n_classes from available classes...
+    then, computes similarity matrix showing similarities between all pairs
 
     per_class_braid: if true, all items from same class use same permutation (class-level braiding)
     """
@@ -970,13 +363,11 @@ def test_per_class_bundle_capacity_two_items(
         else:
             labels = labels[:n_items].to(device)
 
-    # apply permutation based on braiding mode
     perm_dict = {}
     if use_braiding:
         print(f"  applying braiding to item memory...")
         braided_memory = torch.zeros_like(item_memory)
         if per_class_braid:
-            # per-class braiding: same permutation for all items in same class
             unique_classes = torch.unique(labels).cpu().numpy()
             class_to_perm = {}
             for class_id in unique_classes:
@@ -988,7 +379,6 @@ def test_per_class_bundle_capacity_two_items(
                 perm_dict[i] = perm
                 braided_memory[i] = permute_vector(item_memory[i], perm)
         else:
-            # random braiding: unique permutation for each item
             for i in range(n_items):
                 perm = torch.randperm(d, device=device)
                 perm_dict[i] = perm
@@ -1000,14 +390,12 @@ def test_per_class_bundle_capacity_two_items(
         print(f"warning: only {len(unique_classes)} classes found, need {n_classes}")
         n_classes = len(unique_classes)
 
-    # build class-to-items mapping
     class_to_items = {}
     for class_id in unique_classes[:n_classes]:
         class_indices = torch.where(labels == class_id)[0]
         if len(class_indices) >= items_per_class:
             class_to_items[class_id] = class_indices
 
-    # filter to only use classes with enough items
     valid_classes = [c for c in unique_classes[:n_classes] if c in class_to_items]
     if len(valid_classes) < n_classes:
         print(f"warning: only {len(valid_classes)} classes have enough items")
@@ -1016,21 +404,20 @@ def test_per_class_bundle_capacity_two_items(
     similarity_matrices = []
     last_bundle_img_indices = []
 
-    print(f"  computing similarity matrix for {items_per_class} items/class across {n_classes} classes...")
+    print(
+        f"Computing similarity matrix for {items_per_class} across {n_classes} classes..."
+    )
     for trial in range(n_trials):
         if n_trials > 1:
-            print(f"    trial {trial+1}/{n_trials}...", end=" ", flush=True)
-        # select items_per_class items from each class
+            print(f"    trial {trial + 1}/{n_trials}...", end=" ", flush=True)
         selected_bundles = []
         bundle_labels = []
         bundle_img_indices = []
 
         for class_id in valid_classes:
             class_indices = class_to_items[class_id]
-            # randomly select items_per_class items
             perm = torch.randperm(len(class_indices))[:items_per_class]
 
-            # create a bundle for each selected item
             for idx in perm:
                 item_vector = item_memory[class_indices[idx]]
                 selected_bundles.append(item_vector)
@@ -1040,7 +427,6 @@ def test_per_class_bundle_capacity_two_items(
         if len(selected_bundles) < n_classes * items_per_class:
             continue
 
-        # compute pairwise similarities between all bundles
         n_bundles = len(selected_bundles)
         similarity_matrix = np.zeros((n_bundles, n_bundles))
 
@@ -1052,10 +438,8 @@ def test_per_class_bundle_capacity_two_items(
 
         similarity_matrices.append(similarity_matrix)
         if n_trials > 1:
-            print(f"done")  # complete the line started above
-        last_bundle_img_indices = (
-            bundle_img_indices  # keep last trial for visualization
-        )
+            print(f"***")
+        last_bundle_img_indices = bundle_img_indices
 
     if similarity_matrices:
         avg_similarity = np.mean(similarity_matrices, axis=0)
@@ -1075,11 +459,9 @@ def test_per_class_bundle_capacity_two_items(
 
             os.makedirs(save_dir, exist_ok=True)
 
-            # create figure with 2 rows
-            fig = plt.figure(figsize=(20, 16))
-            gs = GridSpec(2, 1, height_ratios=[1, 0.6], hspace=0.3)
+            fig = plt.figure(figsize=(16, 8))
+            gs = GridSpec(1, 2, width_ratios=[1, 0.5], wspace=0.3)
 
-            # top: similarity matrix
             ax_sim = fig.add_subplot(gs[0])
             im = ax_sim.imshow(avg_similarity, cmap="viridis", aspect="auto")
             if per_class_braid:
@@ -1094,11 +476,14 @@ def test_per_class_bundle_capacity_two_items(
                 fontweight="bold",
             )
 
-            # create labels: a1, a2, b1, b2, c1, c2, ...
             tick_labels = []
-            for i in range(n_classes):
-                for j in range(items_per_class):
-                    tick_labels.append(f"{chr(97+i)}{j+1}")
+            for i, cls_id in enumerate(valid_classes):
+                name = class_names[int(cls_id)] if class_names and int(cls_id) < len(class_names) else str(int(cls_id))
+                if items_per_class == 1:
+                    tick_labels.append(name)
+                else:
+                    for j in range(items_per_class):
+                        tick_labels.append(f"{name}.{j + 1}")
 
             ax_sim.set_xticks(range(len(tick_labels)))
             ax_sim.set_yticks(range(len(tick_labels)))
@@ -1108,16 +493,14 @@ def test_per_class_bundle_capacity_two_items(
             ax_sim.set_ylabel("bundle", fontsize=12)
             plt.colorbar(im, ax=ax_sim, label="cosine similarity")
 
-            # bottom: simple grid of bundled images
             ax_images = fig.add_subplot(gs[1])
             ax_images.axis("off")
 
             if item_images is not None and len(last_bundle_img_indices) > 0:
-                # create a grid of images: n_classes rows × items_per_class columns
                 is_grayscale = item_images[0].shape[0] == 1
                 img_h, img_w = item_images[0].shape[-2], item_images[0].shape[-1]
 
-                # create canvas
+                # layout: items_per_class columns, n_classes rows
                 canvas_h = n_classes * img_h
                 canvas_w = items_per_class * img_w
 
@@ -1126,23 +509,15 @@ def test_per_class_bundle_capacity_two_items(
                 else:
                     canvas = np.ones((canvas_h, canvas_w, 3)) * 0.5
 
-                # place images in grid
                 for idx, img_idx in enumerate(last_bundle_img_indices):
                     row = idx // items_per_class
                     col = idx % items_per_class
-
                     img = item_images[img_idx]
-
-                    # denormalize
                     img = (img * 0.5 + 0.5).clamp(0, 1)
-
-                    # convert to numpy
                     if img.shape[0] == 1:
                         img_np = img.squeeze(0).cpu().numpy()
                     else:
                         img_np = img.permute(1, 2, 0).cpu().numpy()
-
-                    # place in canvas
                     y_start = row * img_h
                     x_start = col * img_w
 
@@ -1161,12 +536,11 @@ def test_per_class_bundle_capacity_two_items(
                     ax_images.imshow(canvas)
 
                 ax_images.set_title(
-                    f"bundled images ({n_classes} classes × {items_per_class} items)",
-                    fontsize=14,
+                    f"images ({n_classes} classes × {items_per_class} items)",
+                    fontsize=12,
                     fontweight="bold",
                 )
 
-            # gridspec handles layout with hspace, no need for tight_layout
             if per_class_braid:
                 filename = "bundle_similarity_matrix_per_class_braid.png"
             elif use_braiding:
@@ -1175,390 +549,8 @@ def test_per_class_bundle_capacity_two_items(
                 filename = "bundle_similarity_matrix.png"
             plt.savefig(os.path.join(save_dir, filename), dpi=200)
             plt.close()
-            print(f"  saved plot to {save_dir}/{filename}")
+            print(f" Saved plots for bundle conf matrix to {save_dir}/{filename}")
 
         return results
 
     return {"avg_similarity_matrix": None}
-
-
-def test_cross_class_bind_interpolation_and_memory(
-    d: int = 1024,
-    n_items: int = 1000,
-    n_classes: int = 10,
-    n_trials: int = 1,
-    normalize: bool = True,
-    device: str = "cpu",
-    plot: bool = False,
-    save_dir: Optional[str] = None,
-    item_memory: Optional[torch.Tensor] = None,
-    labels: Optional[torch.Tensor] = None,
-    item_images: Optional[torch.Tensor] = None,
-    unbind_method: str = "inv",
-    n_interp_steps: int = 5,
-) -> Dict:
-    """
-    simplified memory test: create 5 bound pairs (A,B,C,D,E), bundle them,
-    and test retrieval accuracy for each individual item.
-
-    for each pair v1*v2 in the bundle, test:
-    - retrieval of v1: apply v2^-1 to bundle -> measure similarity with v1
-    - retrieval of v2: apply v1^-1 to bundle -> measure similarity with v2
-
-    visualize the pairs and show per-item retrieval accuracy.
-    """
-    if item_memory is None:
-        item_memory = hrr_init(n_items, d, device=device)
-        if normalize:
-            item_memory = normalize_vectors(item_memory)
-        labels = torch.randint(0, n_classes, (n_items,), device=device)
-    else:
-        item_memory = item_memory[:n_items].to(device)
-        if normalize:
-            item_memory = normalize_vectors(item_memory)
-        if labels is None:
-            labels = torch.randint(0, n_classes, (n_items,), device=device)
-        else:
-            labels = labels[:n_items].to(device)
-
-    unique_classes = torch.unique(labels).cpu().numpy()
-    if len(unique_classes) < n_classes:
-        print(f"warning: only {len(unique_classes)} classes found, need {n_classes}")
-        n_classes = len(unique_classes)
-
-    # build class-to-items mapping
-    class_to_items = {}
-    for class_id in unique_classes[:n_classes]:
-        class_indices = torch.where(labels == class_id)[0]
-        if len(class_indices) > 0:
-            class_to_items[class_id] = class_indices
-
-    # create 5 pairs from 10 different classes
-    available_classes = list(class_to_items.keys())[: min(10, len(class_to_items))]
-    if len(available_classes) < 10:
-        # pad with available classes if needed
-        while len(available_classes) < 10:
-            available_classes.append(
-                available_classes[len(available_classes) % len(class_to_items)]
-            )
-
-    # collect accuracy per item across trials
-    item_accuracies = {i: [] for i in range(10)}  # 10 items total (5 pairs × 2)
-    pair_letters = ['A', 'B', 'C', 'D', 'E']
-
-    # store one example for visualization
-    example_pairs = None
-    example_pair_images = None
-
-    for trial in range(n_trials):
-        pairs = []
-
-        # create 5 pairs from classes 0-9
-        for i in range(0, min(10, len(available_classes)), 2):
-            if i + 1 < len(available_classes):
-                class_a = available_classes[i]
-                class_b = available_classes[i + 1]
-
-                # randomly select one item from each class
-                idx_a = class_to_items[class_a][
-                    torch.randint(0, len(class_to_items[class_a]), (1,))
-                ].item()
-                idx_b = class_to_items[class_b][
-                    torch.randint(0, len(class_to_items[class_b]), (1,))
-                ].item()
-
-                vec_a = item_memory[idx_a]
-                vec_b = item_memory[idx_b]
-
-                # bind a and b to create pair
-                bound = bind(vec_a.unsqueeze(0), vec_b.unsqueeze(0)).squeeze(0)
-
-                pairs.append({
-                    "bound": bound,
-                    "vec_a": vec_a,
-                    "vec_b": vec_b,
-                    "idx_a": idx_a,
-                    "idx_b": idx_b,
-                })
-
-        if len(pairs) < 5:
-            continue
-
-        # save first trial for visualization
-        if example_pairs is None:
-            example_pairs = pairs
-            if item_images is not None:
-                example_pair_images = [(p["idx_a"], p["idx_b"]) for p in pairs]
-
-        # bundle all 5 bound pairs
-        all_bounds = torch.stack([p["bound"] for p in pairs])
-        bundled = bundle(all_bounds, normalize=True)
-
-        # test retrieval for each item in each pair
-        for pair_idx, pair in enumerate(pairs):
-            item_base_idx = pair_idx * 2
-
-            # retrieve v1 by applying v2^-1 to bundle
-            recovered_v1 = unbind(
-                bundled.unsqueeze(0), pair["vec_b"].unsqueeze(0), method=unbind_method
-            ).squeeze(0)
-
-            sim_v1 = similarity(recovered_v1.unsqueeze(0), pair["vec_a"].unsqueeze(0)).item()
-            item_accuracies[item_base_idx].append(sim_v1)
-
-            # retrieve v2 by applying v1^-1 to bundle
-            recovered_v2 = unbind(
-                bundled.unsqueeze(0), pair["vec_a"].unsqueeze(0), method=unbind_method
-            ).squeeze(0)
-
-            sim_v2 = similarity(recovered_v2.unsqueeze(0), pair["vec_b"].unsqueeze(0)).item()
-            item_accuracies[item_base_idx + 1].append(sim_v2)
-
-    # compute mean accuracies
-    mean_accuracies = [np.mean(item_accuracies[i]) if item_accuracies[i] else 0.0
-                       for i in range(10)]
-    std_accuracies = [np.std(item_accuracies[i]) if item_accuracies[i] else 0.0
-                      for i in range(10)]
-
-    results = {
-        "memory_accuracy_mean": float(np.mean(mean_accuracies)),
-        "memory_accuracy_std": float(np.mean(std_accuracies)),
-        "per_item_accuracies": mean_accuracies,
-        "per_item_stds": std_accuracies,
-        "n_pairs_bundled": 5,
-    }
-
-    # plotting
-    if plot and save_dir:
-        import os
-        from matplotlib.gridspec import GridSpec
-
-        os.makedirs(save_dir, exist_ok=True)
-
-        fig = plt.figure(figsize=(16, 6))
-        gs = GridSpec(1, 2, width_ratios=[1, 1.2], wspace=0.3)
-
-        # left: show the 5 pairs with their images
-        ax_pairs = fig.add_subplot(gs[0])
-        ax_pairs.axis('off')
-
-        if item_images is not None and example_pair_images is not None:
-            is_grayscale = item_images[0].shape[0] == 1
-            img_h, img_w = item_images[0].shape[-2], item_images[0].shape[-1]
-
-            # create canvas for 5 rows (pairs) × 2 columns (items)
-            canvas_h = 5 * img_h
-            canvas_w = 2 * img_w
-
-            if is_grayscale:
-                canvas = np.ones((canvas_h, canvas_w)) * 0.5
-            else:
-                canvas = np.ones((canvas_h, canvas_w, 3)) * 0.5
-
-            # place pair images
-            for pair_idx, (idx_a, idx_b) in enumerate(example_pair_images):
-                # check bounds
-                if idx_a >= len(item_images) or idx_b >= len(item_images):
-                    continue
-
-                img_a = item_images[idx_a]
-                img_b = item_images[idx_b]
-
-                # denormalize
-                img_a = (img_a * 0.5 + 0.5).clamp(0, 1)
-                img_b = (img_b * 0.5 + 0.5).clamp(0, 1)
-
-                # convert to numpy
-                if is_grayscale:
-                    img_a_np = img_a.squeeze(0).cpu().numpy()
-                    img_b_np = img_b.squeeze(0).cpu().numpy()
-                else:
-                    img_a_np = img_a.permute(1, 2, 0).cpu().numpy()
-                    img_b_np = img_b.permute(1, 2, 0).cpu().numpy()
-
-                y_start = pair_idx * img_h
-
-                # place v1 (left column)
-                if is_grayscale:
-                    canvas[y_start:y_start + img_h, 0:img_w] = img_a_np
-                    canvas[y_start:y_start + img_h, img_w:2*img_w] = img_b_np
-                else:
-                    canvas[y_start:y_start + img_h, 0:img_w, :] = img_a_np
-                    canvas[y_start:y_start + img_h, img_w:2*img_w, :] = img_b_np
-
-            if is_grayscale:
-                ax_pairs.imshow(canvas, cmap='gray')
-            else:
-                ax_pairs.imshow(canvas)
-
-            ax_pairs.set_title(f'5 bound pairs (A-E)\nv1 ⊛ v2 for each pair',
-                             fontsize=12, fontweight='bold')
-
-            # add pair labels on the left
-            for i, letter in enumerate(pair_letters):
-                y_pos = (i + 0.5) * img_h
-                ax_pairs.text(-5, y_pos, letter, fontsize=14, fontweight='bold',
-                            ha='right', va='center')
-
-        # right: bar plot showing retrieval accuracy for each item
-        ax_acc = fig.add_subplot(gs[1])
-
-        item_labels = []
-        for i, letter in enumerate(pair_letters):
-            item_labels.append(f'{letter}₁')
-            item_labels.append(f'{letter}₂')
-
-        x_pos = np.arange(10)
-        colors = []
-        for i in range(5):
-            colors.extend(['#3498db', '#e74c3c'])  # alternating blue/red for v1/v2
-
-        bars = ax_acc.bar(x_pos, mean_accuracies, yerr=std_accuracies,
-                         color=colors, alpha=0.7, capsize=4, edgecolor='black', linewidth=1.2)
-
-        ax_acc.axhline(np.mean(mean_accuracies), color='green', linestyle='--',
-                      linewidth=2, label=f'mean: {np.mean(mean_accuracies):.3f}')
-        ax_acc.set_xlabel('item', fontsize=12, fontweight='bold')
-        ax_acc.set_ylabel('retrieval accuracy (cosine similarity)', fontsize=12, fontweight='bold')
-        # map unbind method to readable name
-        method_label = '†' if unbind_method in ['†', 'deconv'] else '*'
-        ax_acc.set_title(f'per-item retrieval from bundled pairs\n(method: {method_label})',
-                        fontsize=12, fontweight='bold')
-        ax_acc.set_xticks(x_pos)
-        ax_acc.set_xticklabels(item_labels, rotation=0)
-        ax_acc.set_ylim(0, 1.05)
-        ax_acc.legend()
-        ax_acc.grid(alpha=0.3, axis='y')
-
-        plt.savefig(os.path.join(save_dir, "cross_class_bind_memory_test.png"), dpi=200, bbox_inches='tight')
-        plt.close()
-
-        results["plot_path"] = os.path.join(save_dir, "cross_class_bind_memory_test.png")
-
-    return results
-
-
-def test_per_class_bundle_capacity(
-    d: int = 1024,
-    n_items: int = 1000,
-    n_trials: int = 1,
-    normalize: bool = True,
-    device: str = "cpu",
-    plot: bool = False,
-    save_dir: Optional[str] = None,
-    item_memory: Optional[torch.Tensor] = None,
-    labels: Optional[torch.Tensor] = None,
-) -> Dict:
-    """
-    bundle 1 item from each of the 10 classes (10 total items)
-    then query that bundle against each class to see retrieval matrix
-    """
-    if item_memory is None:
-        item_memory = hrr_init(n_items, d, device=device)
-        if normalize:
-            item_memory = normalize_vectors(item_memory)
-        labels = torch.randint(0, 10, (n_items,), device=device)
-    else:
-        item_memory = item_memory[:n_items].to(device)
-        if normalize:
-            item_memory = normalize_vectors(item_memory)
-        if labels is None:
-            labels = torch.randint(0, 10, (n_items,), device=device)
-        else:
-            labels = labels[:n_items].to(device)
-
-    unique_classes = torch.unique(labels).cpu().numpy()
-    if len(unique_classes) < 10:
-        print(f"warning: only {len(unique_classes)} classes found, need 10")
-        return {"retrieval_matrix": None, "class_names": []}
-
-    results = {
-        "retrieval_matrices": [],
-        "class_names": [f"class_{int(c)}" for c in unique_classes[:10]],
-    }
-
-    for _ in range(n_trials):
-        # select one item from each of the first 10 classes
-        selected_indices = []
-        for class_id in unique_classes[:10]:
-            class_indices = torch.where(labels == class_id)[0]
-            if len(class_indices) == 0:
-                continue
-            # randomly select one item from this class
-            selected_idx = class_indices[torch.randint(0, len(class_indices), (1,))]
-            selected_indices.append(selected_idx.item())
-
-        if len(selected_indices) < 10:
-            continue
-
-        # bundle the 10 items (1 from each class)
-        selected_vectors = item_memory[selected_indices]
-        bundled = bundle(selected_vectors, normalize=True)
-
-        # compute similarity matrix: for each class, get top similarities
-        retrieval_matrix = np.zeros((10, 10))  # 10 classes x top 10 retrieved
-
-        for class_idx, class_id in enumerate(unique_classes[:10]):
-            class_indices = torch.where(labels == class_id)[0]
-            if len(class_indices) == 0:
-                continue
-
-            # get similarities to all items in this class
-            class_vectors = item_memory[class_indices]
-            sims = similarity(bundled.unsqueeze(0), class_vectors)
-
-            # get top 10 similarities (or all if fewer than 10)
-            top_k = min(10, len(class_indices))
-            top_sims, _ = torch.topk(sims, top_k)
-
-            retrieval_matrix[class_idx, :top_k] = top_sims.cpu().numpy()
-
-        results["retrieval_matrices"].append(retrieval_matrix)
-
-    if results["retrieval_matrices"]:
-        avg_retrieval_matrix = np.mean(results["retrieval_matrices"], axis=0)
-        results["avg_retrieval_matrix"] = avg_retrieval_matrix
-
-        if plot and save_dir:
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-
-            # plot average retrieval matrix
-            im1 = ax1.imshow(avg_retrieval_matrix, cmap="viridis", aspect="auto")
-            ax1.set_title(
-                "average retrieval similarities\n(bundle of 1 from each class)"
-            )
-            ax1.set_xlabel("top-k retrieved items")
-            ax1.set_ylabel("query class")
-            ax1.set_yticks(range(10))
-            ax1.set_yticklabels([f"class {i}" for i in range(10)])
-            plt.colorbar(im1, ax=ax1)
-
-            diagonal_sims = avg_retrieval_matrix[
-                :, 0
-            ]  # top-1 similarity for each class
-            ax2.bar(range(10), diagonal_sims)
-            ax2.set_title("top-1 retrieval similarity per class")
-            ax2.set_xlabel("class")
-            ax2.set_ylabel("similarity")
-            ax2.set_xticks(range(10))
-            ax2.set_xticklabels([f"{i}" for i in range(10)])
-            ax2.grid(True, alpha=0.3)
-
-            plt.tight_layout()
-            import os
-
-            os.makedirs(save_dir, exist_ok=True)
-            plt.savefig(
-                os.path.join(save_dir, "per_class_bundle_analysis.png"), dpi=500
-            )
-            plt.close()
-
-    return results
-
-
-if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    results = run_all_tests(
-        d=1024, n_items=1000, normalize=True, device=str(device), save_dir="vsa_results"
-    )
-    plt.show()

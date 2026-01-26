@@ -21,11 +21,15 @@ class Encoder(nn.Module):
         in_channels: int,
         distribution: str,
         l2_normalize: bool = False,
+        concentration_floor: float = 0.03,
+        img_size: int = 32,
     ):
         super().__init__()
         self.distribution = distribution
         self.l2_normalize = l2_normalize
-        self.main = nn.Sequential(
+        self.concentration_floor = concentration_floor
+
+        layers = [
             nn.Conv2d(in_channels, 64, 4, 2, 1),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(64, 128, 4, 2, 1),
@@ -34,7 +38,22 @@ class Encoder(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(256, 512, 4, 2, 1),
             nn.LeakyReLU(0.2, inplace=True),
-        )
+        ]
+        # extra layer for 64x64 input: 64->32->16->8->4->2
+        if img_size == 64:
+            layers = [
+                nn.Conv2d(in_channels, 64, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(64, 128, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(128, 256, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(256, 512, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(512, 512, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+            ]
+        self.main = nn.Sequential(*layers)
         self.flat_dim = 512 * 2 * 2
         self.fc_mu = nn.Linear(self.flat_dim, latent_dim)
         if distribution == "gaussian":
@@ -42,7 +61,6 @@ class Encoder(nn.Module):
         else:
             self.fc_concentration = nn.Linear(self.flat_dim, 1)
 
-        # xavier initialization
         def init_weights(m):
             if isinstance(m, (nn.Conv2d, nn.Linear)):
                 nn.init.xavier_uniform_(m.weight)
@@ -64,26 +82,42 @@ class Encoder(nn.Module):
             kappa = torch.clamp(kappa, max=1.0)
             return mu, kappa
         elif self.distribution == "clifford":
-            kappa = F.softplus(self.fc_concentration(x)) + 0.1
+            kappa = F.softplus(self.fc_concentration(x)) + self.concentration_floor
             return mu, kappa
 
 
 class Decoder(nn.Module):
-    def __init__(self, latent_dim: int, out_channels: int):
+    def __init__(self, latent_dim: int, out_channels: int, img_size: int = 32):
         super().__init__()
         self.fc = nn.Linear(latent_dim, 512 * 2 * 2)
-        self.main = nn.Sequential(
-            nn.ConvTranspose2d(512, 256, 4, 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose2d(256, 128, 4, 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose2d(128, 64, 4, 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose2d(64, out_channels, 4, 2, 1),
-            nn.Tanh(),
-        )
 
-        # xavier initialization
+        if img_size == 64:
+            # 2->4->8->16->32->64
+            self.main = nn.Sequential(
+                nn.ConvTranspose2d(512, 512, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(512, 256, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(256, 128, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(128, 64, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(64, out_channels, 4, 2, 1),
+                nn.Tanh(),
+            )
+        else:
+            # 2->4->8->16->32
+            self.main = nn.Sequential(
+                nn.ConvTranspose2d(512, 256, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(256, 128, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(128, 64, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(64, out_channels, 4, 2, 1),
+                nn.Tanh(),
+            )
+
         def init_weights(m):
             if isinstance(m, (nn.ConvTranspose2d, nn.Linear)):
                 nn.init.xavier_uniform_(m.weight)
@@ -109,26 +143,38 @@ class VAE(nn.Module):
         l1_weight: float = 1.0,
         freq_weight: float = 1.0,
         l2_normalize: bool = False,
+        concentration_floor: float = 0.05, # empirically determined/safe: this is 1 for vmf/pws
+        img_size: int = 32,
+        use_learnable_beta: bool = False,
     ):
         super().__init__()
         self.latent_dim = latent_dim
         self.distribution = distribution
         self.device = device
         self.l2_normalize = l2_normalize
+        self.concentration_floor = concentration_floor
+        self.use_learnable_beta = use_learnable_beta
 
         self.recon_loss_type = recon_loss_type
         self.l1_weight = l1_weight
         self.freq_weight = freq_weight
         self.use_perceptual_loss = use_perceptual_loss
 
+        # learnable beta uses log weights; σ₀ for reconstruction, σ₁ for kld
+        if use_learnable_beta:
+            self.log_sigma_0 = nn.Parameter(torch.zeros(1))
+            self.log_sigma_1 = nn.Parameter(torch.zeros(1))
+
         self.encoder = Encoder(
             latent_dim,
             in_channels=in_channels,
             distribution=distribution,
             l2_normalize=l2_normalize,
+            concentration_floor=concentration_floor,
+            img_size=img_size,
         )
         dec_in_dim = 2 * latent_dim if distribution == "clifford" else latent_dim
-        self.decoder = Decoder(dec_in_dim, out_channels=in_channels)
+        self.decoder = Decoder(dec_in_dim, out_channels=in_channels, img_size=img_size)
 
         self.to(device)
 
@@ -191,17 +237,15 @@ class VAE(nn.Module):
         recon_loss = 0.0
 
         if self.recon_loss_type == "mse":
-            # sum over pixels, average over batch
             recon_loss = F.mse_loss(x_recon, x, reduction="sum") / B
 
         elif self.recon_loss_type == "l1":
-            # pixel l1: sum over pixels, average over batch
             if self.l1_weight > 0:
                 recon_loss += self.l1_weight * (
                     F.l1_loss(x_recon, x, reduction="sum") / B
                 )
 
-            # frequency l1 disabled - too computationally expensive for simple datasets
+            # frequency l1 to penalize  
             # if self.freq_weight > 0:
             #     h, w = x.shape[-2:]
             #     freq_mask = self._create_radial_freq_mask(h, w)
@@ -223,116 +267,32 @@ class VAE(nn.Module):
                 f"Unknown reconstruction loss type: {self.recon_loss_type}"
             )
 
-        total_loss = recon_loss + beta * kld
+        # learnable beta: L = (1/σ₀²)*recon + (1/σ₁²)*kld + σ₀² + σ₁²
+        if self.use_learnable_beta:
+            sigma_0 = torch.exp(self.log_sigma_0)
+            sigma_1 = torch.exp(self.log_sigma_1)
+            total_loss = (1.0 / (sigma_0 ** 2)) * recon_loss + (1.0 / (sigma_1 ** 2)) * kld + sigma_0 ** 2 + sigma_1 ** 2
+            effective_beta = (sigma_0 / sigma_1) ** 2
+        else:
+            total_loss = recon_loss + beta * kld
+            effective_beta = beta
 
-        # compute entropy of approximate posterior
         try:
             entropy = q_z.entropy().mean()
         except (NotImplementedError, AttributeError):
             entropy = torch.tensor(0.0, device=x.device)
 
-        return {"total_loss": total_loss, "recon_loss": recon_loss, "kld_loss": kld, "entropy": entropy}
+        result = {
+            "total_loss": total_loss,
+            "recon_loss": recon_loss,
+            "kld_loss": kld,
+            "entropy": entropy,
+            "effective_beta": effective_beta,
+        }
 
+        if self.use_learnable_beta:
+            result["sigma_0"] = sigma_0.item()
+            result["sigma_1"] = sigma_1.item()
 
-def compute_log_likelihood(model: VAE, x: torch.Tensor, n_samples: int = 10) -> torch.Tensor:
-    """compute importance-weighted log-likelihood estimate (iwae bound).
+        return result
 
-    args:
-        model: the vae model
-        x: input batch (B, C, H, W)
-        n_samples: number of mc samples for importance weighting
-
-    returns:
-        mc estimate of log p(x) averaged over batch
-    """
-    mu, params = model.encoder(x)
-
-    if model.distribution == "gaussian":
-        q_z = torch.distributions.Normal(mu, torch.exp(0.5 * params) + 1e-6)
-        p_z = torch.distributions.Normal(torch.zeros_like(mu), torch.ones_like(params))
-    elif model.distribution == "powerspherical":
-        q_z = PowerSpherical(mu, params.squeeze(-1))
-        p_z = HypersphericalUniform(model.latent_dim, device=model.device, validate_args=False)
-    elif model.distribution == "clifford":
-        q_z = CliffordPowerSphericalDistribution(mu, params.expand_as(mu))
-        p_z = CliffordTorusUniform(model.latent_dim, device=model.device, validate_args=False)
-    else:
-        raise ValueError(f"Unknown distribution: {model.distribution}")
-
-    # sample n times: shape (n_samples, batch, z_dim or 2*z_dim for clifford)
-    z = q_z.rsample(torch.Size([n_samples]))
-
-    # decode each sample: flatten batch dim for decoder
-    n, b = z.shape[:2]
-    z_flat = z.view(n * b, -1)
-    x_recon_flat = model.decoder(z_flat)
-    x_recon = x_recon_flat.view(n, b, *x.shape[1:])
-
-    # log p(z) - prior log prob
-    log_p_z = p_z.log_prob(z)
-    if model.distribution == "gaussian":
-        log_p_z = log_p_z.sum(-1)  # (n_samples, batch)
-
-    # log p(x|z) - reconstruction likelihood
-    # for images normalized to [-1, 1], use l1 or mse as proxy
-    x_expanded = x.unsqueeze(0).expand(n_samples, -1, -1, -1, -1)  # (n_samples, batch, C, H, W)
-
-    if model.recon_loss_type == "mse":
-        # negative mse as log likelihood proxy (gaussian decoder)
-        log_p_x_z = -F.mse_loss(x_recon, x_expanded, reduction='none').view(n, b, -1).sum(-1)
-    else:
-        # negative l1 as log likelihood proxy (laplace decoder)
-        log_p_x_z = -F.l1_loss(x_recon, x_expanded, reduction='none').view(n, b, -1).sum(-1)
-
-    # log q(z|x) - encoder log prob
-    log_q_z_x = q_z.log_prob(z)
-    if model.distribution == "gaussian":
-        log_q_z_x = log_q_z_x.sum(-1)  # (n_samples, batch)
-
-    # importance weighted estimate: log(1/n * sum_i w_i) where w_i = p(x,z)/q(z|x)
-    log_weights = log_p_x_z + log_p_z - log_q_z_x  # (n_samples, batch)
-    ll = log_weights.logsumexp(dim=0) - torch.log(torch.tensor(float(n_samples), device=x.device))
-
-    return ll.mean()
-
-
-def compute_test_metrics(model: VAE, loader, device, n_iwae_samples: int = 10) -> dict:
-    """compute evaluation metrics on a dataset.
-
-    uses importance-weighted bound for ll estimate like davidson et al.
-
-    returns dict with:
-        - ll: log-likelihood estimate (iwae bound)
-        - entropy: entropy of approximate posterior L[q]
-        - recon: reconstruction error (negative, i.e. log p(x|z))
-        - kl: kl divergence
-    """
-    model.eval()
-    metrics = {"ll": 0.0, "entropy": 0.0, "recon": 0.0, "kl": 0.0}
-    n_total = 0
-
-    with torch.no_grad():
-        for x, _ in loader:
-            x = x.to(device)
-            batch_size = x.size(0)
-
-            # forward pass to get distributions
-            x_recon, q_z, p_z, _ = model(x)
-            losses = model.compute_loss(x, x_recon, q_z, p_z, beta=1.0)
-
-            # accumulate (recon is positive, so negate for log p(x|z))
-            metrics["recon"] += -losses["recon_loss"].item() * batch_size
-            metrics["kl"] += losses["kld_loss"].item() * batch_size
-            metrics["entropy"] += losses["entropy"].item() * batch_size
-
-            # importance-weighted ll estimate
-            ll = compute_log_likelihood(model, x, n_samples=n_iwae_samples)
-            metrics["ll"] += ll.item() * batch_size
-
-            n_total += batch_size
-
-    # average over dataset
-    for k in metrics:
-        metrics[k] /= n_total
-
-    return metrics

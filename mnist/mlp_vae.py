@@ -23,7 +23,6 @@ class MLPVAE(nn.Module):
         self.distribution = distribution
         self.l2_normalize = l2_normalize
 
-        # encoder: 784 -> 256 -> 128
         self.encoder = nn.Sequential(
             nn.Linear(784, 256),
             nn.ReLU(),
@@ -38,7 +37,6 @@ class MLPVAE(nn.Module):
             self.fc_mean = nn.Linear(128, z_dim)
             self.fc_scale = nn.Linear(128, 1)
 
-        # decoder: (z or 2z) -> 128 -> 256 -> 784
         decoder_in_dim = 2 * z_dim if self.distribution == "clifford" else z_dim
         self.decoder = nn.Sequential(
             nn.Linear(decoder_in_dim, 128),
@@ -48,7 +46,6 @@ class MLPVAE(nn.Module):
             nn.Linear(256, 784),
         )
 
-        # xavier/glorot initialization
         def init_weights(m: nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
@@ -124,19 +121,15 @@ def vae_loss(model: MLPVAE, x: torch.Tensor, beta: float = 1.0, return_dict: boo
     """
     _, (q_z, p_z), _, x_recon = model(x)
 
-    # reconstruction loss (negative log likelihood)
     recon = F.binary_cross_entropy_with_logits(
         x_recon, x.view(-1, 784), reduction="sum"
     ) / x.size(0)
 
-    # kl divergence
     kl = torch.distributions.kl.kl_divergence(q_z, p_z).mean()
 
-    # entropy of approximate posterior
     try:
         entropy = q_z.entropy().mean()
     except (NotImplementedError, AttributeError):
-        # fallback for distributions without entropy
         entropy = torch.tensor(0.0, device=x.device)
 
     total = recon + beta * kl
@@ -167,34 +160,31 @@ def compute_log_likelihood(model: MLPVAE, x: torch.Tensor, n_samples: int = 10) 
     z_mean, z_param2 = model.encode(x_flat)
     q_z, p_z = model.reparameterize(z_mean, z_param2)
 
-    # sample n times: shape (n_samples, batch, z_dim)
     z = q_z.rsample(torch.Size([n_samples]))
 
-    # decode each sample
     if model.distribution == "clifford":
         # clifford samples are already 2*z_dim
         x_recon = model.decoder(z)
     else:
         x_recon = model.decoder(z)
 
-    # log p(z) - prior log prob
+    # log p(z) 
     log_p_z = p_z.log_prob(z)
     if model.distribution == "normal":
         log_p_z = log_p_z.sum(-1)  # (n_samples, batch)
-    # for other distributions, log_prob already returns scalar per sample
 
-    # log p(x|z) - reconstruction likelihood
+    # log p(x|z)
     x_expanded = x_flat.unsqueeze(0).expand(n_samples, -1, -1)  # (n_samples, batch, 784)
     log_p_x_z = -F.binary_cross_entropy_with_logits(
         x_recon, x_expanded, reduction='none'
     ).sum(-1)  # (n_samples, batch)
 
-    # log q(z|x) - encoder log prob
+    # log q(z|x)
     log_q_z_x = q_z.log_prob(z)
     if model.distribution == "normal":
         log_q_z_x = log_q_z_x.sum(-1)  # (n_samples, batch)
 
-    # importance weighted estimate: log(1/n * sum_i w_i) where w_i = p(x,z)/q(z|x)
+    # iwae: log(1/n * sum_i w_i) where w_i = p(x,z)/q(z|x)
     # = logsumexp(log_p_x_z + log_p_z - log_q_z_x) - log(n)
     log_weights = log_p_x_z + log_p_z - log_q_z_x  # (n_samples, batch)
     ll = log_weights.logsumexp(dim=0) - torch.log(torch.tensor(float(n_samples), device=x.device))
@@ -203,14 +193,10 @@ def compute_log_likelihood(model: MLPVAE, x: torch.Tensor, n_samples: int = 10) 
 
 
 def compute_test_metrics(model: MLPVAE, loader, device, n_iwae_samples: int = 10) -> dict:
-    """compute evaluation metrics on a dataset for results table.
-
-    uses importance-weighted bound for LL estimate like davidson et al.
-
-    returns dict with:
+    """ returns dict with:
         - ll: log-likelihood estimate (iwae bound)
         - entropy: entropy of approximate posterior L[q]
-        - recon: reconstruction error (negative, i.e. log p(x|z))
+        - recon: reconstruction error (NLL in this case, log p(x|z))
         - kl: kl divergence
     """
     model.eval()
@@ -222,21 +208,16 @@ def compute_test_metrics(model: MLPVAE, loader, device, n_iwae_samples: int = 10
             x = x.to(device)
             batch_size = x.size(0)
 
-            # get elbo components
             result = vae_loss(model, x, beta=1.0, return_dict=True)
-
-            # accumulate (recon is positive bce, so negate for log p(x|z))
             metrics["recon"] += -result["recon"].item() * batch_size
             metrics["kl"] += result["kl"].item() * batch_size
             metrics["entropy"] += result["entropy"].item() * batch_size
 
-            # importance-weighted ll estimate
             ll = compute_log_likelihood(model, x, n_samples=n_iwae_samples)
             metrics["ll"] += ll.item() * batch_size
 
             n_total += batch_size
 
-    # average over dataset
     for k in metrics:
         metrics[k] /= n_total
 
