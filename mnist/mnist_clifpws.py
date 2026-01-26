@@ -281,7 +281,7 @@ def run(args):
                         optimizer.zero_grad()
                         loss = vae_loss(model, x_mb.to(device), beta=beta)
                         loss.backward()
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                         optimizer.step()
                         total_train_loss += loss.item()
 
@@ -563,7 +563,7 @@ def run(args):
                         device,
                         os.path.join(vis_dir, "tsne.png"),
                     )
-                    interp_path = plot_interpolations(
+                    # interp_path = plot_interpolations(
                         model,
                         test_eval_loader,
                         device,
