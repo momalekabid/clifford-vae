@@ -21,10 +21,12 @@ class Encoder(nn.Module):
         in_channels: int,
         distribution: str,
         l2_normalize: bool = False,
+        concentration_floor: float = 0.07,
     ):
         super().__init__()
         self.distribution = distribution
         self.l2_normalize = l2_normalize
+        self.concentration_floor = concentration_floor
         self.main = nn.Sequential(
             nn.Conv2d(in_channels, 64, 4, 2, 1),
             nn.LeakyReLU(0.2, inplace=True),
@@ -64,7 +66,7 @@ class Encoder(nn.Module):
             kappa = torch.clamp(kappa, max=1.0)
             return mu, kappa
         elif self.distribution == "clifford":
-            kappa = F.softplus(self.fc_concentration(x)) + 0.07
+            kappa = F.softplus(self.fc_concentration(x)) + self.concentration_floor
             return mu, kappa
 
 
@@ -109,12 +111,14 @@ class VAE(nn.Module):
         l1_weight: float = 1.0,
         freq_weight: float = 1.0,
         l2_normalize: bool = False,
+        concentration_floor: float = 0.07,
     ):
         super().__init__()
         self.latent_dim = latent_dim
         self.distribution = distribution
         self.device = device
         self.l2_normalize = l2_normalize
+        self.concentration_floor = concentration_floor
 
         self.recon_loss_type = recon_loss_type
         self.l1_weight = l1_weight
@@ -126,6 +130,7 @@ class VAE(nn.Module):
             in_channels=in_channels,
             distribution=distribution,
             l2_normalize=l2_normalize,
+            concentration_floor=concentration_floor,
         )
         dec_in_dim = 2 * latent_dim if distribution == "clifford" else latent_dim
         self.decoder = Decoder(dec_in_dim, out_channels=in_channels)

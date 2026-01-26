@@ -71,6 +71,7 @@ def run_single_config(
     latent_dim,
     lr,
     max_beta,
+    concentration_floor,
     epochs,
     batch_size,
     warmup_epochs,
@@ -81,7 +82,7 @@ def run_single_config(
     wandb_project,
 ):
     """run single hyperparameter configuration and return results."""
-    config_name = f"sweep-{dataset_name}-{dist_name}-d{latent_dim}-lr{lr}-beta{max_beta}"
+    config_name = f"sweep-{dataset_name}-{dist_name}-d{latent_dim}-lr{lr}-beta{max_beta}-cf{concentration_floor}"
 
     # initialize wandb run
     if use_wandb and WANDB_AVAILABLE:
@@ -94,6 +95,7 @@ def run_single_config(
                 "latent_dim": latent_dim,
                 "lr": lr,
                 "max_beta": max_beta,
+                "concentration_floor": concentration_floor,
                 "epochs": epochs,
                 "batch_size": batch_size,
                 "warmup_epochs": warmup_epochs,
@@ -110,6 +112,7 @@ def run_single_config(
         l1_weight=1.0,
         freq_weight=0.0,
         l2_normalize=False,
+        concentration_floor=concentration_floor,
     )
     optimizer = optim.AdamW(model.parameters(), lr=lr)
 
@@ -162,6 +165,7 @@ def run_single_config(
         "latent_dim": latent_dim,
         "lr": lr,
         "max_beta": max_beta,
+        "concentration_floor": concentration_floor,
         "final_kl": final_kl,
         "final_recon": recon_history[-1] if recon_history else float("inf"),
         "best_recon": best_recon,
@@ -187,7 +191,7 @@ def run_single_config(
 def run_sweep(args):
     """run hyperparameter sweep."""
     print(f"device: {DEVICE}")
-    print(f"running sweep with {len(args.latent_dims)} dims x {len(args.lrs)} lrs x {len(args.betas)} betas")
+    print(f"running sweep with {len(args.latent_dims)} dims x {len(args.lrs)} lrs x {len(args.betas)} betas x {len(args.concentration_floors)} concentration_floors")
 
     # dataset setup
     all_results = []
@@ -236,43 +240,45 @@ def run_sweep(args):
 
                 for lr in args.lrs:
                     for max_beta in args.betas:
-                        config_start = time.time()
-                        print(f"    lr={lr}, beta={max_beta} ...", end=" ", flush=True)
+                        for concentration_floor in args.concentration_floors:
+                            config_start = time.time()
+                            print(f"    lr={lr}, beta={max_beta}, cf={concentration_floor} ...", end=" ", flush=True)
 
-                        try:
-                            result = run_single_config(
-                                dataset_name=dataset_name,
-                                dist_name=dist_name,
-                                latent_dim=latent_dim,
-                                lr=lr,
-                                max_beta=max_beta,
-                                epochs=args.epochs,
-                                batch_size=args.batch_size,
-                                warmup_epochs=args.warmup_epochs,
-                                train_loader=train_loader,
-                                test_loader=test_loader,
-                                in_channels=in_channels,
-                                use_wandb=not args.no_wandb,
-                                wandb_project=args.wandb_project,
-                            )
-                            all_results.append(result)
+                            try:
+                                result = run_single_config(
+                                    dataset_name=dataset_name,
+                                    dist_name=dist_name,
+                                    latent_dim=latent_dim,
+                                    lr=lr,
+                                    max_beta=max_beta,
+                                    concentration_floor=concentration_floor,
+                                    epochs=args.epochs,
+                                    batch_size=args.batch_size,
+                                    warmup_epochs=args.warmup_epochs,
+                                    train_loader=train_loader,
+                                    test_loader=test_loader,
+                                    in_channels=in_channels,
+                                    use_wandb=not args.no_wandb,
+                                    wandb_project=args.wandb_project,
+                                )
+                                all_results.append(result)
 
-                            status = "COLLAPSED" if result["collapsed"] else "OK"
-                            config_time = time.time() - config_start
-                            print(
-                                f"{status}, kl={result['final_kl']:.3f}, recon={result['best_recon']:.3f} ({config_time:.1f}s)"
-                            )
+                                status = "COLLAPSED" if result["collapsed"] else "OK"
+                                config_time = time.time() - config_start
+                                print(
+                                    f"{status}, kl={result['final_kl']:.3f}, recon={result['best_recon']:.3f} ({config_time:.1f}s)"
+                                )
 
-                            timing_results[result["config_name"]] = config_time
+                                timing_results[result["config_name"]] = config_time
 
-                        except Exception as e:
-                            print(f"ERROR: {e}")
-                            all_results.append(
-                                {
-                                    "config_name": f"sweep-{dataset_name}-{dist_name}-d{latent_dim}-lr{lr}-beta{max_beta}",
-                                    "error": str(e),
-                                }
-                            )
+                            except Exception as e:
+                                print(f"ERROR: {e}")
+                                all_results.append(
+                                    {
+                                        "config_name": f"sweep-{dataset_name}-{dist_name}-d{latent_dim}-lr{lr}-beta{max_beta}-cf{concentration_floor}",
+                                        "error": str(e),
+                                    }
+                                )
 
     # save all results
     output_dir = "sweep_results"
@@ -310,7 +316,7 @@ def run_sweep(args):
                     best = min(matching, key=lambda x: x["best_recon"])
                     print(
                         f"{dataset_name}/{dist_name}/d{latent_dim}: lr={best['lr']}, beta={best['max_beta']}, "
-                        f"kl={best['final_kl']:.3f}, recon={best['best_recon']:.3f}"
+                        f"cf={best.get('concentration_floor', 0.07)}, kl={best['final_kl']:.3f}, recon={best['best_recon']:.3f}"
                     )
                 else:
                     print(
@@ -357,6 +363,13 @@ if __name__ == "__main__":
         nargs="+",
         default=[0.1, 0.5, 1.0, 2.0],
         help="max beta values to sweep",
+    )
+    parser.add_argument(
+        "--concentration_floors",
+        type=float,
+        nargs="+",
+        default=[0.01, 0.05, 0.07, 0.1, 0.2],
+        help="concentration floor values to sweep (for clifford distribution)",
     )
     parser.add_argument(
         "--epochs",

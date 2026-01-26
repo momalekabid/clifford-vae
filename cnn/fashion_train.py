@@ -9,8 +9,6 @@ import torchvision.utils as tu
 import matplotlib.pyplot as plt
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
-from sklearn.manifold import TSNE
-from sklearn.decomposition import PCA
 import time
 import json
 
@@ -144,57 +142,6 @@ def save_reconstructions(model, loader, device, path, n_images=10):
     grid = torch.cat([x.cpu(), x_recon.cpu()], dim=0)
     grid = (grid * 0.5 + 0.5).clamp(0, 1)
     tu.save_image(grid, path, nrow=n_images)
-    return path
-
-
-def generate_tsne_plot(model, loader, device, path, n_samples=2000):
-    model.eval()
-    latents, labels = [], []
-    with torch.no_grad():
-        for x, y in loader:
-            _, _, _, mu = model(x.to(device))
-            latents.append(mu.cpu().numpy())
-            labels.append(y.numpy())
-            if len(np.concatenate(labels)) >= n_samples:
-                break
-    Z = np.concatenate(latents)[:n_samples]
-    Y = np.concatenate(labels)[:n_samples]
-    tsne = TSNE(n_components=2, perplexity=30, max_iter=1000, random_state=42)
-    pts = tsne.fit_transform(Z)
-    plt.figure(figsize=(10, 8))
-    sc = plt.scatter(pts[:, 0], pts[:, 1], c=Y, cmap="tab10", s=8, alpha=0.8)
-    plt.colorbar(sc, ticks=np.unique(Y))
-    plt.title("t-SNE of Latent Means (μ)")
-    plt.savefig(path, dpi=500)
-    plt.close()
-    return path
-
-
-def generate_pca_plot(model, loader, device, path, n_samples=2000):
-    model.eval()
-    latents, labels = [], []
-    with torch.no_grad():
-        for x, y in loader:
-            _, _, _, mu = model(x.to(device))
-            latents.append(mu.cpu().numpy())
-            labels.append(y.numpy())
-            if len(np.concatenate(labels)) >= n_samples:
-                break
-    Z = np.concatenate(latents)[:n_samples]
-    Y = np.concatenate(labels)[:n_samples]
-
-    pca = PCA(n_components=min(50, Z.shape[1]))
-    Z_pca = pca.fit_transform(Z)
-
-    plt.figure(figsize=(8, 6))
-    sc = plt.scatter(Z_pca[:, 0], Z_pca[:, 1], c=Y, cmap="tab10", s=8, alpha=0.8)
-    plt.xlabel("PC1")
-    plt.ylabel("PC2")
-    plt.title("PCA of Latent Means (μ)")
-    plt.colorbar(sc, ticks=np.unique(Y))
-    plt.tight_layout()
-    plt.savefig(path, dpi=200, bbox_inches="tight")
-    plt.close()
     return path
 
 
@@ -414,8 +361,8 @@ def main(args):
                             model, train_loader, optimizer, DEVICE, beta
                         )
                         test_losses = test_epoch(model, test_loader, DEVICE)
-                        # use recon_loss for early stopping (more stable than total_loss with beta scheduling)
-                        val = test_losses["test/recon_loss"]
+                        # use total_loss (recon + kld) for early stopping since we're not cycling anymore
+                        val = test_losses["test/recon_loss"] + test_losses["test/kld_loss"]
                         if np.isfinite(val) and val < best:
                             best = val
                             torch.save(
@@ -430,7 +377,7 @@ def main(args):
                                 "epoch": epoch,
                                 **train_losses,
                                 **test_losses,
-                                "best_test_recon_loss": best,
+                                "best_test_total_loss": best,
                                 "beta": beta,
                             }
                         )
@@ -443,7 +390,7 @@ def main(args):
 
                     train_time = time.time() - train_start_time
                     print(
-                        f"best recon loss: {best:.4f}, training time: {train_time:.2f}s"
+                        f"best total loss (recon+kld): {best:.4f}, training time: {train_time:.2f}s"
                     )
 
                     if os.path.exists(f"{output_dir}/best_model.pt"):
@@ -660,24 +607,6 @@ def main(args):
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # t-SNE (DISABLED - too slow at high dimensions)
-                        # t0 = time.time()
-                        # print(f"generating t-SNE plot...")
-                        # tsne_path = generate_tsne_plot(
-                        #     model, test_loader, DEVICE, f"{output_dir}/tsne.png"
-                        # )
-                        # print(f"  completed in {time.time() - t0:.2f}s")
-                        tsne_path = None
-
-                        # PCA (DISABLED - slow at high dimensions)
-                        # t0 = time.time()
-                        # print(f"generating PCA plot...")
-                        # pca_path = generate_pca_plot(
-                        #     model, test_loader, DEVICE, f"{output_dir}/pca.png"
-                        # )
-                        # print(f"  completed in {time.time() - t0:.2f}s")
-                        pca_path = None
-
                         # knn eval
                         t0 = time.time()
                         print(f"running knn evaluation...")
@@ -760,7 +689,7 @@ def main(args):
                                 **fourier_metrics,
                                 **braiding_metrics,
                                 mean_metric_key: float(mean_vector_acc),
-                                "final_best_recon_loss": best,
+                                "final_best_total_loss": best,
                                 "cross_class_bind_unbind_similarity_star": cross_class_star.get(
                                     "cross_class_bind_unbind_similarity", 0.0
                                 ),
@@ -770,8 +699,6 @@ def main(args):
                         images.update(
                             {
                                 "reconstructions": recon_path,
-                                "tsne": tsne_path,
-                                "pca": pca_path,
                             }
                         )
                         if bundle_cap_res.get("bundle_capacity_plot"):
@@ -928,7 +855,7 @@ def main(args):
                             triplet_metrics[f"triplet_retrieval_acc_k{k}"] = acc
 
                         summary = {
-                            "final_best_recon_loss": best,
+                            "final_best_total_loss": best,
                             "test/ll": test_metrics["ll"],
                             "test/entropy": test_metrics["entropy"],
                             "test/recon": test_metrics["recon"],
@@ -1018,7 +945,7 @@ if __name__ == "__main__":
     p.add_argument(
         "--n_trials",
         type=int,
-        default=5,
+        default=2,
         help="trials per config for statistical averaging",
     )
     p.add_argument(

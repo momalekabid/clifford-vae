@@ -350,7 +350,7 @@ def run(args):
                     d=item_memory.shape[-1],
                     n_items=500,
                     n_classes=10,
-                    n_trials=10,
+                    n_trials=2,
                     normalize=True,
                     device=device,
                     plot=True,
