@@ -170,19 +170,21 @@ def plot_latent_interpolations(model, loader, device, save_dir, n_steps=10, n_pa
     model.eval()
 
     # collect samples by class
+    # use z (not mu) for interpolation since decoder input dim may differ (e.g. clifford uses 2*latent_dim)
     class_samples = {}
     class_images = {}
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device)
-            _, _, _, mu = model(x)
+            mu, params = model.encoder(x)
+            z, _, _ = model.reparameterize(mu, params)
             for i in range(len(y)):
                 label = y[i].item()
                 if label not in class_samples:
                     class_samples[label] = []
                     class_images[label] = []
                 if len(class_samples[label]) < 10:
-                    class_samples[label].append(mu[i])
+                    class_samples[label].append(z[i])
                     class_images[label].append(x[i].cpu())
             if all(len(v) >= 10 for v in class_samples.values()) and len(class_samples) >= 10:
                 break
