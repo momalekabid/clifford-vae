@@ -21,7 +21,7 @@ class Encoder(nn.Module):
         in_channels: int,
         distribution: str,
         l2_normalize: bool = False,
-        concentration_floor: float = 0.07,
+        concentration_floor: float = 0.03,
     ):
         super().__init__()
         self.distribution = distribution
@@ -111,7 +111,7 @@ class VAE(nn.Module):
         l1_weight: float = 1.0,
         freq_weight: float = 1.0,
         l2_normalize: bool = False,
-        concentration_floor: float = 0.07,
+        concentration_floor: float = 0.03,
     ):
         super().__init__()
         self.latent_dim = latent_dim

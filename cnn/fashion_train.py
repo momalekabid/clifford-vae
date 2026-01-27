@@ -228,7 +228,7 @@ def plot_latent_interpolations(model, loader, device, save_dir, n_steps=10, n_pa
             # interpolated images
             for i, t in enumerate(ts):
                 z_interp = interp_fn(z1, z2, t.item())
-                x_recon = model.decode(z_interp)
+                x_recon = model.decoder(z_interp)
                 img = (x_recon[0].cpu() * 0.5 + 0.5).clamp(0, 1)
                 if img.shape[0] == 1:
                     axes[row, i + 1].imshow(img.squeeze(0), cmap="gray")
