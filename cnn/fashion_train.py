@@ -29,11 +29,11 @@ from utils.wandb_utils import (
     plot_latent_dimension_exploration,
 )
 from utils.vsa import (
-    test_bundle_capacity as vsa_bundle_capacity,
-    test_binding_unbinding_pairs as vsa_binding_unbinding,
-    test_binding_unbinding_triplets as vsa_binding_triplets,
+    # test_bundle_capacity as vsa_bundle_capacity,
+    # test_binding_unbinding_pairs as vsa_binding_unbinding,
+    # test_binding_unbinding_triplets as vsa_binding_triplets,
     test_per_class_bundle_capacity_two_items,
-    test_binding_unbinding_with_self_binding,
+    # test_binding_unbinding_with_self_binding,
 )
 
 
@@ -145,6 +145,162 @@ def save_reconstructions(model, loader, device, path, n_images=10):
     return path
 
 
+def slerp(z1, z2, t):
+    """spherical linear interpolation between two vectors"""
+    z1_norm = z1 / z1.norm(dim=-1, keepdim=True)
+    z2_norm = z2 / z2.norm(dim=-1, keepdim=True)
+    dot = (z1_norm * z2_norm).sum(dim=-1, keepdim=True).clamp(-1, 1)
+    omega = torch.acos(dot)
+    sin_omega = torch.sin(omega)
+    # handle edge case where vectors are nearly parallel
+    if sin_omega.abs().min() < 1e-6:
+        return (1 - t) * z1_norm + t * z2_norm
+    s1 = torch.sin((1 - t) * omega) / sin_omega
+    s2 = torch.sin(t * omega) / sin_omega
+    return s1 * z1_norm + s2 * z2_norm
+
+
+def lerp(z1, z2, t):
+    """linear interpolation between two vectors"""
+    return (1 - t) * z1 + t * z2
+
+
+def plot_latent_interpolations(model, loader, device, save_dir, n_steps=10, n_pairs=5):
+    """plot interpolations between pairs of samples from different classes"""
+    model.eval()
+
+    # collect samples by class
+    class_samples = {}
+    class_images = {}
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device)
+            _, _, _, mu = model(x)
+            for i in range(len(y)):
+                label = y[i].item()
+                if label not in class_samples:
+                    class_samples[label] = []
+                    class_images[label] = []
+                if len(class_samples[label]) < 10:
+                    class_samples[label].append(mu[i])
+                    class_images[label].append(x[i].cpu())
+            if all(len(v) >= 10 for v in class_samples.values()) and len(class_samples) >= 10:
+                break
+
+    # pick random pairs from different classes
+    classes = list(class_samples.keys())
+    pairs = []
+    for _ in range(n_pairs):
+        c1, c2 = np.random.choice(classes, 2, replace=False)
+        idx1 = np.random.randint(len(class_samples[c1]))
+        idx2 = np.random.randint(len(class_samples[c2]))
+        pairs.append((c1, idx1, c2, idx2))
+
+    # determine interpolation method based on distribution
+    dist = getattr(model, "distribution", "gaussian")
+    use_slerp = dist in ["clifford", "powerspherical"]
+    interp_fn = slerp if use_slerp else lerp
+    interp_name = "slerp" if use_slerp else "lerp"
+
+    # create interpolation grid
+    fig, axes = plt.subplots(n_pairs, n_steps + 2, figsize=(2 * (n_steps + 2), 2 * n_pairs))
+    if n_pairs == 1:
+        axes = axes.reshape(1, -1)
+
+    ts = torch.linspace(0, 1, n_steps).to(device)
+
+    with torch.no_grad():
+        for row, (c1, idx1, c2, idx2) in enumerate(pairs):
+            z1 = class_samples[c1][idx1].unsqueeze(0)
+            z2 = class_samples[c2][idx2].unsqueeze(0)
+            img1 = class_images[c1][idx1]
+            img2 = class_images[c2][idx2]
+
+            # show source image
+            img1_show = (img1 * 0.5 + 0.5).clamp(0, 1)
+            if img1_show.shape[0] == 1:
+                axes[row, 0].imshow(img1_show.squeeze(0), cmap="gray")
+            else:
+                axes[row, 0].imshow(img1_show.permute(1, 2, 0))
+            axes[row, 0].set_title(f"class {c1}")
+            axes[row, 0].axis("off")
+
+            # interpolated images
+            for i, t in enumerate(ts):
+                z_interp = interp_fn(z1, z2, t.item())
+                x_recon = model.decode(z_interp)
+                img = (x_recon[0].cpu() * 0.5 + 0.5).clamp(0, 1)
+                if img.shape[0] == 1:
+                    axes[row, i + 1].imshow(img.squeeze(0), cmap="gray")
+                else:
+                    axes[row, i + 1].imshow(img.permute(1, 2, 0))
+                axes[row, i + 1].set_title(f"t={t.item():.1f}")
+                axes[row, i + 1].axis("off")
+
+            # show target image
+            img2_show = (img2 * 0.5 + 0.5).clamp(0, 1)
+            if img2_show.shape[0] == 1:
+                axes[row, -1].imshow(img2_show.squeeze(0), cmap="gray")
+            else:
+                axes[row, -1].imshow(img2_show.permute(1, 2, 0))
+            axes[row, -1].set_title(f"class {c2}")
+            axes[row, -1].axis("off")
+
+    plt.suptitle(f"latent interpolation ({interp_name})", fontsize=14)
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, f"interpolation_{interp_name}.png")
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
+def plot_fourier_coefficients(model, loader, device, save_path, n_samples=5):
+    """plot fourier coefficient magnitudes for randomly sampled latent vectors"""
+    model.eval()
+    x, _ = next(iter(loader))
+    x = x[:n_samples].to(device)
+
+    with torch.no_grad():
+        _, _, _, mu = model(x)
+
+    # compute fft of latent vectors
+    latents = mu.cpu().numpy()
+
+    fig, axes = plt.subplots(n_samples, 2, figsize=(12, 3 * n_samples))
+    if n_samples == 1:
+        axes = axes.reshape(1, -1)
+
+    for i in range(n_samples):
+        z = latents[i]
+        fft_coeffs = np.fft.fft(z)
+        magnitudes = np.abs(fft_coeffs)
+        phases = np.angle(fft_coeffs)
+
+        # only show first half (symmetric for real input)
+        n_coeffs = len(magnitudes) // 2
+        freqs = np.arange(n_coeffs)
+
+        # magnitude plot
+        axes[i, 0].bar(freqs, magnitudes[:n_coeffs], width=1.0, alpha=0.7)
+        axes[i, 0].set_xlabel("frequency bin")
+        axes[i, 0].set_ylabel("magnitude")
+        axes[i, 0].set_title(f"sample {i+1} - fourier magnitudes")
+        axes[i, 0].set_xlim(0, n_coeffs)
+
+        # phase plot
+        axes[i, 1].bar(freqs, phases[:n_coeffs], width=1.0, alpha=0.7, color="orange")
+        axes[i, 1].set_xlabel("frequency bin")
+        axes[i, 1].set_ylabel("phase (rad)")
+        axes[i, 1].set_title(f"sample {i+1} - fourier phases")
+        axes[i, 1].set_xlim(0, n_coeffs)
+        axes[i, 1].set_ylim(-np.pi, np.pi)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
 def filter_dataset_by_class(dataset, exclude_class):
     """filter dataset to exclude a specific class"""
     if exclude_class < 0:
@@ -223,32 +379,17 @@ def main(args):
 
     latent_dims = args.latent_dims if args.latent_dims else [2048, 4096]
     distributions = ["clifford", "gaussian"]
-    datasets_to_test = ["fashionmnist", "cinic10"]
+    datasets_to_test = ["fashionmnist", "cifar10"]
 
-    # import cinic10 if available
-    try:
-        from pytorch_cinic.dataset import CINIC10
-
-        dataset_map = {
-            "fashionmnist": datasets.FashionMNIST,
-            "cifar10": datasets.CIFAR10,
-            "cinic10": CINIC10,
-        }
-    except ImportError:
-        print("warning: pytorch-cinic not installed. cinic10 will be skipped.")
-        print("install with: pip install pytorch-cinic")
-        dataset_map = {
-            "fashionmnist": datasets.FashionMNIST,
-            "cifar10": datasets.CIFAR10,
-        }
-        datasets_to_test = ["fashionmnist", "cifar10"]
+    dataset_map = {
+        "fashionmnist": datasets.FashionMNIST,
+        "cifar10": datasets.CIFAR10,
+    }
 
     for dataset_name in datasets_to_test:
-        is_color = dataset_name in ["cifar10", "cinic10"]
+        is_color = dataset_name == "cifar10"
         in_channels = 3 if is_color else 1
-        IMG_SHAPE = (
-            (3, 32, 32) if is_color else (1, 32, 32)
-        )  # cifar/cinic: 3x32x32, fashion: 1x32x32
+        IMG_SHAPE = (3, 32, 32) if is_color else (1, 32, 32)
         dataset_class = dataset_map[dataset_name]
         norm_mean, norm_std = (
             ((0.5,), (0.5,)) if not is_color else ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
@@ -261,24 +402,12 @@ def main(args):
             ]
         )
 
-        # handle different dataset apis
-        if dataset_name == "cinic10":
-            # cinic10 uses partition instead of train parameter
-            # create directory first (cinic10 download expects it to exist)
-            os.makedirs("data/cinic10", exist_ok=True)
-            train_set_full = dataset_class(
-                "data/cinic10", partition="train", download=True, transform=transform
-            )
-            test_set_full = dataset_class(
-                "data/cinic10", partition="test", download=True, transform=transform
-            )
-        else:
-            train_set_full = dataset_class(
-                "data", train=True, download=True, transform=transform
-            )
-            test_set_full = dataset_class(
-                "data", train=False, download=True, transform=transform
-            )
+        train_set_full = dataset_class(
+            "data", train=True, download=True, transform=transform
+        )
+        test_set_full = dataset_class(
+            "data", train=False, download=True, transform=transform
+        )
 
         # filter out excluded class if specified
         train_set = filter_dataset_by_class(train_set_full, args.exclude_class)
@@ -453,100 +582,35 @@ def main(args):
                         print(f"  completed in {time.time() - t0:.2f}s")
 
                         # === test 2: classical bundle capacity (no braiding) ===
-                        t0 = time.time()
-                        print(
-                            f"running classical bundle capacity ({dist_name}, no braiding)..."
-                        )
-                        bundle_cap_raw = vsa_bundle_capacity(
-                            d=item_memory.shape[-1],
-                            n_items=1000,
-                            k_range=list(range(5, 51, 5)),
-                            n_trials=1,
-                            normalize=normalize_vectors,
-                            device=DEVICE,
-                            plot=True,
-                            save_dir=output_dir,
-                            item_memory=item_memory,
-                            use_braiding=False,
-                        )
-                        print(f"  completed in {time.time() - t0:.2f}s")
+                        # commented out - without braiding results are meh on fashionmnist
+                        # t0 = time.time()
+                        # print(
+                        #     f"running classical bundle capacity ({dist_name}, no braiding)..."
+                        # )
+                        # bundle_cap_raw = vsa_bundle_capacity(
+                        #     d=item_memory.shape[-1],
+                        #     n_items=1000,
+                        #     k_range=list(range(5, 51, 5)),
+                        #     n_trials=1,
+                        #     normalize=normalize_vectors,
+                        #     device=DEVICE,
+                        #     plot=True,
+                        #     save_dir=output_dir,
+                        #     item_memory=item_memory,
+                        #     use_braiding=False,
+                        # )
+                        # print(f"  completed in {time.time() - t0:.2f}s")
 
                         # test 2b: classical bundle capacity (with braiding)
-                        bundle_cap_raw_braid = {}
-                        if args.braid:
-                            print(
-                                f"running classical bundle capacity ({dist_name}, WITH braiding)..."
-                            )
-                            bundle_cap_raw_braid = vsa_bundle_capacity(
-                                d=item_memory.shape[-1],
-                                n_items=1000,
-                                k_range=list(range(5, 51, 5)),
-                                n_trials=1,
-                                normalize=normalize_vectors,
-                                device=DEVICE,
-                                plot=True,
-                                save_dir=os.path.join(output_dir, "braided"),
-                                item_memory=item_memory.clone(),
-                                use_braiding=True,
-                            )
-                        bundle_cap_res = {
-                            "bundle_capacity_plot": os.path.join(
-                                output_dir, "bundle_capacity.png"
-                            ),
-                            "bundle_capacity_accuracies": {
-                                k: acc
-                                for k, acc in zip(
-                                    bundle_cap_raw["k"], bundle_cap_raw["accuracy"]
-                                )
-                            },
-                        }
-
-                        # === test 3: bundled triplet retrieval (harder than pairs) ===
-                        t0 = time.time()
-                        print(
-                            f"running bundled triplet retrieval test ({dist_name})..."
-                        )
-                        triplet_raw = vsa_binding_triplets(
-                            d=item_memory.shape[-1],
-                            n_items=1000,
-                            k_range=list(range(2, 16, 2)),
-                            n_trials=1,
-                            normalize=normalize_vectors,
-                            device=DEVICE,
-                            plot=True,
-                            save_dir=output_dir,
-                            item_memory=item_memory,
-                            use_braiding=False,
-                        )
-                        print(f"  completed in {time.time() - t0:.2f}s")
-                        triplet_res = {
-                            "triplet_retrieval_plot": os.path.join(
-                                output_dir, "unbind_bundled_triplets_inv.png"
-                            ),
-                            "triplet_retrieval_accuracies": {
-                                k: acc
-                                for k, acc in zip(
-                                    triplet_raw["k"], triplet_raw["accuracy"]
-                                )
-                            },
-                        }
-
-                        # keep legacy vars for compatibility
-                        unbind_bundled_raw = {"k": [], "accuracy": []}
-                        unbind_bundled_res_inv = {
-                            "unbind_bundled_plot": None,
-                            "unbind_bundled_accuracies": {},
-                        }
-                        unbind_bundled_raw_braid = {}
-                        unbind_bundled_res_inv_braid = {}
+                        # bundle_cap_raw_braid = {}
                         # if args.braid:
                         #     print(
-                        #         f"running bind-bundle-unbind test ({dist_name}, WITH braiding)..."
+                        #         f"running classical bundle capacity ({dist_name}, WITH braiding)..."
                         #     )
-                        #     unbind_bundled_raw_braid = vsa_binding_unbinding(
+                        #     bundle_cap_raw_braid = vsa_bundle_capacity(
                         #         d=item_memory.shape[-1],
                         #         n_items=1000,
-                        #         k_range=list(range(5, 31, 5)),
+                        #         k_range=list(range(5, 51, 5)),
                         #         n_trials=1,
                         #         normalize=normalize_vectors,
                         #         device=DEVICE,
@@ -555,20 +619,48 @@ def main(args):
                         #         item_memory=item_memory.clone(),
                         #         use_braiding=True,
                         #     )
-                        #     unbind_bundled_res_inv_braid = {
-                        #         "unbind_bundled_plot_braid": os.path.join(
-                        #             output_dir,
-                        #             "braided",
-                        #             "unbind_bundled_pairs_inv_braided.png",
-                        #         ),
-                        #         "unbind_bundled_accuracies_braid": {
-                        #             k: acc
-                        #             for k, acc in zip(
-                        #                 unbind_bundled_raw_braid["k"],
-                        #                 unbind_bundled_raw_braid["accuracy"],
-                        #             )
-                        #         },
-                        #     }
+                        # bundle_cap_res = {
+                        #     "bundle_capacity_plot": os.path.join(
+                        #         output_dir, "bundle_capacity.png"
+                        #     ),
+                        #     "bundle_capacity_accuracies": {
+                        #         k: acc
+                        #         for k, acc in zip(
+                        #             bundle_cap_raw["k"], bundle_cap_raw["accuracy"]
+                        #         )
+                        #     },
+                        # }
+
+                        # === test 3: bundled triplet retrieval (harder than pairs) ===
+                        # commented out for now
+                        # t0 = time.time()
+                        # print(
+                        #     f"running bundled triplet retrieval test ({dist_name})..."
+                        # )
+                        # triplet_raw = vsa_binding_triplets(
+                        #     d=item_memory.shape[-1],
+                        #     n_items=1000,
+                        #     k_range=list(range(2, 16, 2)),
+                        #     n_trials=1,
+                        #     normalize=normalize_vectors,
+                        #     device=DEVICE,
+                        #     plot=True,
+                        #     save_dir=output_dir,
+                        #     item_memory=item_memory,
+                        #     use_braiding=False,
+                        # )
+                        # print(f"  completed in {time.time() - t0:.2f}s")
+                        # triplet_res = {
+                        #     "triplet_retrieval_plot": os.path.join(
+                        #         output_dir, "unbind_bundled_triplets_inv.png"
+                        #     ),
+                        #     "triplet_retrieval_accuracies": {
+                        #         k: acc
+                        #         for k, acc in zip(
+                        #             triplet_raw["k"], triplet_raw["accuracy"]
+                        #         )
+                        #     },
+                        # }
 
                         t0 = time.time()
                         print(f"running self-binding test ({dist_name})...")
@@ -604,6 +696,31 @@ def main(args):
                             test_loader,
                             DEVICE,
                             f"{output_dir}/reconstructions.png",
+                        )
+                        print(f"  completed in {time.time() - t0:.2f}s")
+
+                        # fourier coefficient visualization
+                        t0 = time.time()
+                        print(f"generating fourier coefficient visualization...")
+                        fourier_viz_path = plot_fourier_coefficients(
+                            model,
+                            test_loader,
+                            DEVICE,
+                            f"{output_dir}/fourier_coefficients.png",
+                            n_samples=5,
+                        )
+                        print(f"  completed in {time.time() - t0:.2f}s")
+
+                        # latent interpolation visualization
+                        t0 = time.time()
+                        print(f"generating latent interpolations...")
+                        interp_path = plot_latent_interpolations(
+                            model,
+                            test_loader,
+                            DEVICE,
+                            output_dir,
+                            n_steps=10,
+                            n_pairs=5,
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
@@ -646,48 +763,10 @@ def main(args):
                             }
                         )
 
-                        # compute braiding metrics
-                        braiding_metrics = {}
-
-                        # model latents metrics (no braiding vs braiding)
-                        if bundle_cap_raw and bundle_cap_raw_braid:
-                            for k_val, acc_no, acc_yes in zip(
-                                bundle_cap_raw["k"],
-                                bundle_cap_raw["accuracy"],
-                                bundle_cap_raw_braid["accuracy"],
-                            ):
-                                braiding_metrics[
-                                    f"{dist_name}/bundle_acc_k{k_val}_no_braid"
-                                ] = acc_no
-                                braiding_metrics[
-                                    f"{dist_name}/bundle_acc_k{k_val}_braid"
-                                ] = acc_yes
-                                braiding_metrics[
-                                    f"{dist_name}/bundle_acc_k{k_val}_braid_delta"
-                                ] = (acc_yes - acc_no)
-
-                        # bind-bundle-unbind (no braiding vs braiding)
-                        if unbind_bundled_raw and unbind_bundled_raw_braid:
-                            for k_val, acc_no, acc_yes in zip(
-                                unbind_bundled_raw["k"],
-                                unbind_bundled_raw["accuracy"],
-                                unbind_bundled_raw_braid["accuracy"],
-                            ):
-                                braiding_metrics[
-                                    f"{dist_name}/unbind_bundled_acc_k{k_val}_no_braid"
-                                ] = acc_no
-                                braiding_metrics[
-                                    f"{dist_name}/unbind_bundled_acc_k{k_val}_braid"
-                                ] = acc_yes
-                                braiding_metrics[
-                                    f"{dist_name}/unbind_bundled_acc_k{k_val}_braid_delta"
-                                ] = (acc_yes - acc_no)
-
                         logger.log_metrics(
                             {
                                 **knn_metrics,
                                 **fourier_metrics,
-                                **braiding_metrics,
                                 mean_metric_key: float(mean_vector_acc),
                                 "final_best_total_loss": best,
                                 "cross_class_bind_unbind_similarity_star": cross_class_star.get(
@@ -699,46 +778,16 @@ def main(args):
                         images.update(
                             {
                                 "reconstructions": recon_path,
+                                "fourier_coefficients": fourier_viz_path,
+                                "latent_interpolation": interp_path,
                             }
                         )
-                        if bundle_cap_res.get("bundle_capacity_plot"):
-                            images["bundle_capacity"] = bundle_cap_res[
-                                "bundle_capacity_plot"
-                            ]
-
-                        # add braided bundle capacity plots
-                        bundle_braid_plot = os.path.join(
-                            output_dir, "braided", "bundle_capacity.png"
-                        )
-                        if os.path.exists(bundle_braid_plot):
-                            images["bundle_capacity_BRAIDED"] = bundle_braid_plot
 
                         two_per_class_plot = os.path.join(
                             output_dir, "bundle_similarity_matrix.png"
                         )
                         if os.path.exists(two_per_class_plot):
                             images["bundle_similarity_matrix"] = two_per_class_plot
-
-                        if unbind_bundled_res_inv.get("unbind_bundled_plot"):
-                            images["unbind_bundled_inv"] = unbind_bundled_res_inv[
-                                "unbind_bundled_plot"
-                            ]
-
-                        # add braided unbind_bundled plot
-                        if unbind_bundled_res_inv_braid.get(
-                            "unbind_bundled_plot_braid"
-                        ):
-                            images["unbind_bundled_inv_BRAIDED"] = (
-                                unbind_bundled_res_inv_braid[
-                                    "unbind_bundled_plot_braid"
-                                ]
-                            )
-
-                        # add triplet retrieval plot
-                        if triplet_res.get("triplet_retrieval_plot"):
-                            images["triplet_retrieval"] = triplet_res[
-                                "triplet_retrieval_plot"
-                            ]
 
                         sp = fourier_star.get("similarity_after_k_binds_plot_path")
                         sd = fourier_perp.get("similarity_after_k_binds_plot_path")
@@ -847,13 +896,6 @@ def main(args):
                                 f"excluded_class_{args.exclude_class}_reconstructions"
                             ] = excluded_recon_path
 
-                        # triplet retrieval metrics
-                        triplet_metrics = {}
-                        for k, acc in triplet_res.get(
-                            "triplet_retrieval_accuracies", {}
-                        ).items():
-                            triplet_metrics[f"triplet_retrieval_acc_k{k}"] = acc
-
                         summary = {
                             "final_best_total_loss": best,
                             "test/ll": test_metrics["ll"],
@@ -862,8 +904,6 @@ def main(args):
                             "test/kl": test_metrics["kl"],
                             **fourier_metrics,
                             **knn_metrics,
-                            **triplet_metrics,
-                            **braiding_metrics,
                             **excluded_metrics,
                             mean_metric_key: float(mean_vector_acc),
                         }
