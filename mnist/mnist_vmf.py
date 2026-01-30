@@ -25,10 +25,6 @@ from utils.wandb_utils import (
     plot_powerspherical_manifold_visualization,
 )
 from utils.vsa import (
-    test_bundle_capacity as vsa_bundle_capacity,
-    test_binding_unbinding_pairs as vsa_binding_unbinding,
-    test_binding_unbinding_triplets as vsa_binding_triplets,
-    test_per_class_bundle_capacity_two_items,
     test_cross_class_bind_interpolation_and_memory,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss, compute_test_metrics
@@ -598,11 +594,6 @@ if __name__ == "__main__":
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument(
         "--wandb_project", type=str, default="aug-19-mnistvmf", help="W&B project name"
-    )
-    parser.add_argument(
-        "--no_braid",
-        action="store_true",
-        help="skip braiding tests",
     )
 
     args = parser.parse_args()

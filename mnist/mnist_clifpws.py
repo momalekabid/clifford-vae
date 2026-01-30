@@ -28,11 +28,8 @@ from utils.wandb_utils import (
     plot_gaussian_manifold_visualization,
 )
 from utils.vsa import (
-    test_bundle_capacity as vsa_bundle_capacity,
-    test_binding_unbinding_pairs as vsa_binding_unbinding,
     test_binding_unbinding_triplets as vsa_binding_triplets,
     test_per_class_bundle_capacity_two_items,
-    test_binding_unbinding_with_self_binding,
     test_cross_class_bind_interpolation_and_memory,
 )
 from mnist.mlp_vae import MLPVAE, vae_loss, compute_test_metrics
@@ -405,108 +402,7 @@ def run(args):
                         use_braiding=False,
                     )
 
-                    # test 2: classical bundle capacity (no braiding)
-                    print(f"running classical bundle capacity ({dist}, no braiding)...")
-                    bundle_cap_raw = vsa_bundle_capacity(
-                        d=item_memory.shape[-1],
-                        n_items=500,
-                        k_range=list(range(5, 31, 5)),
-                        n_trials=2,
-                        normalize=normalize_vectors,
-                        device=device,
-                        plot=True,
-                        save_dir=vis_dir,
-                        item_memory=item_memory,
-                        use_braiding=False,
-                    )
-
-                    # test 2b: classical bundle capacity (with braiding)
-                    bundle_cap_raw_braid = {}
-                    if args.braid:
-                        print(
-                            f"running classical bundle capacity ({dist}, WITH braiding)..."
-                        )
-                        bundle_cap_raw_braid = vsa_bundle_capacity(
-                            d=item_memory.shape[-1],
-                            n_items=500,
-                            k_range=list(range(5, 31, 5)),
-                            n_trials=2,
-                            normalize=normalize_vectors,
-                            device=device,
-                            plot=True,
-                            save_dir=os.path.join(vis_dir, "braided"),
-                            item_memory=item_memory.clone(),
-                            use_braiding=True,
-                        )
-                    bundle_cap_res = {
-                        "bundle_capacity_plot": os.path.join(
-                            vis_dir, "bundle_capacity.png"
-                        ),
-                        "bundle_capacity_accuracies": {
-                            k: acc
-                            for k, acc in zip(
-                                bundle_cap_raw["k"], bundle_cap_raw["accuracy"]
-                            )
-                        },
-                    }
-
-                    # test 3: bind-bundle-unbind (no braiding)
-                    print(f"running bind-bundle-unbind test ({dist}, no braiding)...")
-                    unbind_bundled_raw = vsa_binding_unbinding(
-                        d=item_memory.shape[-1],
-                        n_items=500,
-                        k_range=list(range(5, 21, 5)),
-                        n_trials=2,
-                        normalize=normalize_vectors,
-                        device=device,
-                        plot=True,
-                        save_dir=vis_dir,
-                        item_memory=item_memory,
-                        use_braiding=False,
-                    )
-                    unbind_bundled_res_inv = {
-                        "unbind_bundled_plot": os.path.join(
-                            vis_dir, "unbind_bundled_pairs_inv.png"
-                        ),
-                        "unbind_bundled_accuracies": {
-                            k: acc
-                            for k, acc in zip(
-                                unbind_bundled_raw["k"], unbind_bundled_raw["accuracy"]
-                            )
-                        },
-                    }
-
-                    # test 3b: bind-bundle-unbind (WITH braiding)
-                    unbind_bundled_raw_braid = {}
-                    unbind_bundled_res_inv_braid = {}
-                    if args.braid:
-                        print(f"running bind-bundle-unbind test ({dist}, WITH braiding)...")
-                        unbind_bundled_raw_braid = vsa_binding_unbinding(
-                            d=item_memory.shape[-1],
-                            n_items=500,
-                            k_range=list(range(5, 21, 5)),
-                            n_trials=2,
-                            normalize=normalize_vectors,
-                            device=device,
-                            plot=True,
-                            save_dir=os.path.join(vis_dir, "braided"),
-                            item_memory=item_memory.clone(),
-                            use_braiding=True,
-                        )
-                        unbind_bundled_res_inv_braid = {
-                            "unbind_bundled_plot_braid": os.path.join(
-                                vis_dir, "braided", "unbind_bundled_pairs_inv_braided.png"
-                            ),
-                            "unbind_bundled_accuracies_braid": {
-                                k: acc
-                                for k, acc in zip(
-                                    unbind_bundled_raw_braid["k"],
-                                    unbind_bundled_raw_braid["accuracy"],
-                                )
-                            },
-                        }
-
-                    # test 3c: bundled triplet retrieval (harder than pairs)
+                    # test 2: bundled triplet retrieval
                     print(f"running bundled triplet retrieval test ({dist})...")
                     triplet_raw = vsa_binding_triplets(
                         d=item_memory.shape[-1],
@@ -563,7 +459,7 @@ def run(args):
                         device,
                         os.path.join(vis_dir, "tsne.png"),
                     )
-                    # interp_path = plot_interpolations(
+                    interp_path = plot_interpolations(
                         model,
                         test_eval_loader,
                         device,
@@ -605,21 +501,6 @@ def run(args):
                                     "recon_after_k_binds_plot_path"
                                 ]
 
-                        # add vsa bundle capacity tests
-                        if bundle_cap_res.get("bundle_capacity_plot"):
-                            images_to_log["Bundle_Capacity"] = bundle_cap_res[
-                                "bundle_capacity_plot"
-                            ]
-
-                        # add braided bundle capacity plot
-                        bundle_braid_plot = os.path.join(
-                            vis_dir, "braided", "bundle_capacity.png"
-                        )
-                        if os.path.exists(bundle_braid_plot):
-                            images_to_log["Bundle_Capacity_BRAIDED"] = (
-                                bundle_braid_plot
-                            )
-
                         # add two-per-class test
                         two_per_class_plot = os.path.join(
                             vis_dir, "bundle_similarity_matrix.png"
@@ -627,20 +508,6 @@ def run(args):
                         if os.path.exists(two_per_class_plot):
                             images_to_log["Bundle_Similarity_Matrix"] = (
                                 two_per_class_plot
-                            )
-
-                        # add unbind bundled tests
-                        if unbind_bundled_res_inv.get("unbind_bundled_plot"):
-                            images_to_log["Unbind_Bundled_Inv"] = (
-                                unbind_bundled_res_inv["unbind_bundled_plot"]
-                            )
-                        if unbind_bundled_res_inv_braid.get(
-                            "unbind_bundled_plot_braid"
-                        ):
-                            images_to_log["Unbind_Bundled_Inv_BRAIDED"] = (
-                                unbind_bundled_res_inv_braid[
-                                    "unbind_bundled_plot_braid"
-                                ]
                             )
 
                         # add triplet retrieval test
@@ -705,43 +572,6 @@ def run(args):
                             }
                         )
 
-                        # compute braiding metrics
-                        braiding_metrics = {}
-
-                        # model latents metrics (no braiding vs braiding)
-                        if bundle_cap_raw and bundle_cap_raw_braid:
-                            for k_val, acc_no, acc_yes in zip(
-                                bundle_cap_raw["k"],
-                                bundle_cap_raw["accuracy"],
-                                bundle_cap_raw_braid["accuracy"],
-                            ):
-                                braiding_metrics[
-                                    f"{dist}/bundle_acc_k{k_val}_no_braid"
-                                ] = acc_no
-                                braiding_metrics[
-                                    f"{dist}/bundle_acc_k{k_val}_braid"
-                                ] = acc_yes
-                                braiding_metrics[
-                                    f"{dist}/bundle_acc_k{k_val}_braid_delta"
-                                ] = (acc_yes - acc_no)
-
-                        # bind-bundle-unbind (no braiding vs braiding)
-                        if unbind_bundled_raw and unbind_bundled_raw_braid:
-                            for k_val, acc_no, acc_yes in zip(
-                                unbind_bundled_raw["k"],
-                                unbind_bundled_raw["accuracy"],
-                                unbind_bundled_raw_braid["accuracy"],
-                            ):
-                                braiding_metrics[
-                                    f"{dist}/unbind_bundled_acc_k{k_val}_no_braid"
-                                ] = acc_no
-                                braiding_metrics[
-                                    f"{dist}/unbind_bundled_acc_k{k_val}_braid"
-                                ] = acc_yes
-                                braiding_metrics[
-                                    f"{dist}/unbind_bundled_acc_k{k_val}_braid_delta"
-                                ] = (acc_yes - acc_no)
-
                         train_subset = torch.utils.data.Subset(
                             train_dataset, list(range(min(5000, len(train_dataset))))
                         )
@@ -757,7 +587,6 @@ def run(args):
                             {
                                 **knn_metrics,
                                 **fourier_metrics,
-                                **braiding_metrics,
                                 "mean_vector_cosine_acc": float(mean_vector_acc),
                                 "final_val_loss": best_val_loss,
                                 # elbo metrics for results table
@@ -790,7 +619,6 @@ def run(args):
                             "final_val_loss": best_val_loss,
                             **fourier_metrics,
                             **triplet_metrics,
-                            **braiding_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
                             # elbo metrics for results table
                             "test/ll": test_metrics["ll"],
@@ -938,11 +766,6 @@ if __name__ == "__main__":
         type=str,
         default="mnist-svae-experiments",
         help="W&B project name",
-    )
-    parser.add_argument(
-        "--braid",
-        action="store_true",
-        help="run braiding tests",
     )
 
     args = parser.parse_args()
