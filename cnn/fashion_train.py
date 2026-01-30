@@ -165,12 +165,45 @@ def lerp(z1, z2, t):
     return (1 - t) * z1 + t * z2
 
 
+def clifford_manifold_interp(z1, z2, t, latent_dim):
+    """
+    interpolation on the clifford torus manifold.
+    converts to angle space, interpolates angles (with wraparound), converts back.
+    this keeps the interpolation on the torus rather than cutting through ambient space.
+    """
+    # extract angles from clifford vectors via fft
+    freq1 = torch.fft.fft(z1, dim=-1)
+    freq2 = torch.fft.fft(z2, dim=-1)
+    angles1 = torch.angle(freq1[..., :latent_dim])
+    angles2 = torch.angle(freq2[..., :latent_dim])
+
+    # interpolate angles with proper wraparound (shortest path on circle)
+    diff = angles2 - angles1
+    # wrap to [-pi, pi]
+    diff = torch.atan2(torch.sin(diff), torch.cos(diff))
+    angles_interp = angles1 + t * diff
+
+    # convert back to clifford vector
+    n = 2 * latent_dim
+    theta_s = torch.zeros((*angles_interp.shape[:-1], n), device=z1.device, dtype=z1.dtype)
+    theta_s[..., 1:latent_dim] = angles_interp[..., 1:]
+    theta_s[..., -latent_dim+1:] = -torch.flip(angles_interp[..., 1:], dims=(-1,))
+    samples_c = torch.exp(1j * theta_s)
+    return torch.fft.ifft(samples_c, dim=-1).real
+
+
 def plot_latent_interpolations(model, loader, device, save_dir, n_steps=10, n_pairs=5):
-    """plot interpolations between pairs of samples from different classes"""
+    """
+    plot interpolations between pairs of samples from different classes.
+    for clifford: generates both slerp (ambient space) and manifold (torus) interpolations.
+    for powerspherical: uses slerp (on the sphere).
+    for gaussian: uses lerp (euclidean).
+    """
     model.eval()
+    dist = getattr(model, "distribution", "gaussian")
+    latent_dim = getattr(model, "latent_dim", None)
 
     # collect samples by class
-    # use z (not mu) for interpolation since decoder input dim may differ (e.g. clifford uses 2*latent_dim)
     class_samples = {}
     class_images = {}
     with torch.no_grad():
@@ -198,104 +231,153 @@ def plot_latent_interpolations(model, loader, device, save_dir, n_steps=10, n_pa
         idx2 = np.random.randint(len(class_samples[c2]))
         pairs.append((c1, idx1, c2, idx2))
 
-    # determine interpolation method based on distribution
-    dist = getattr(model, "distribution", "gaussian")
-    use_slerp = dist in ["clifford", "powerspherical"]
-    interp_fn = slerp if use_slerp else lerp
-    interp_name = "slerp" if use_slerp else "lerp"
+    # determine interpolation methods
+    if dist == "clifford":
+        # for clifford, generate both slerp and manifold interpolations
+        interp_configs = [
+            ("slerp", slerp, None),
+            ("manifold", lambda z1, z2, t: clifford_manifold_interp(z1, z2, t, latent_dim), None),
+        ]
+    elif dist == "powerspherical":
+        interp_configs = [("slerp", slerp, None)]
+    else:
+        interp_configs = [("lerp", lerp, None)]
 
-    # create interpolation grid
-    fig, axes = plt.subplots(n_pairs, n_steps + 2, figsize=(2 * (n_steps + 2), 2 * n_pairs))
-    if n_pairs == 1:
-        axes = axes.reshape(1, -1)
-
+    saved_paths = []
     ts = torch.linspace(0, 1, n_steps).to(device)
 
-    with torch.no_grad():
-        for row, (c1, idx1, c2, idx2) in enumerate(pairs):
-            z1 = class_samples[c1][idx1].unsqueeze(0)
-            z2 = class_samples[c2][idx2].unsqueeze(0)
-            img1 = class_images[c1][idx1]
-            img2 = class_images[c2][idx2]
+    for interp_name, interp_fn, _ in interp_configs:
+        fig, axes = plt.subplots(n_pairs, n_steps + 2, figsize=(2 * (n_steps + 2), 2 * n_pairs))
+        if n_pairs == 1:
+            axes = axes.reshape(1, -1)
 
-            # show source image
-            img1_show = (img1 * 0.5 + 0.5).clamp(0, 1)
-            if img1_show.shape[0] == 1:
-                axes[row, 0].imshow(img1_show.squeeze(0), cmap="gray")
-            else:
-                axes[row, 0].imshow(img1_show.permute(1, 2, 0))
-            axes[row, 0].set_title(f"class {c1}")
-            axes[row, 0].axis("off")
+        with torch.no_grad():
+            for row, (c1, idx1, c2, idx2) in enumerate(pairs):
+                z1 = class_samples[c1][idx1].unsqueeze(0)
+                z2 = class_samples[c2][idx2].unsqueeze(0)
+                img1 = class_images[c1][idx1]
+                img2 = class_images[c2][idx2]
 
-            # interpolated images
-            for i, t in enumerate(ts):
-                z_interp = interp_fn(z1, z2, t.item())
-                x_recon = model.decoder(z_interp)
-                img = (x_recon[0].cpu() * 0.5 + 0.5).clamp(0, 1)
-                if img.shape[0] == 1:
-                    axes[row, i + 1].imshow(img.squeeze(0), cmap="gray")
+                # show source image
+                img1_show = (img1 * 0.5 + 0.5).clamp(0, 1)
+                if img1_show.shape[0] == 1:
+                    axes[row, 0].imshow(img1_show.squeeze(0), cmap="gray")
                 else:
-                    axes[row, i + 1].imshow(img.permute(1, 2, 0))
-                axes[row, i + 1].set_title(f"t={t.item():.1f}")
-                axes[row, i + 1].axis("off")
+                    axes[row, 0].imshow(img1_show.permute(1, 2, 0))
+                axes[row, 0].set_title(f"class {c1}")
+                axes[row, 0].axis("off")
 
-            # show target image
-            img2_show = (img2 * 0.5 + 0.5).clamp(0, 1)
-            if img2_show.shape[0] == 1:
-                axes[row, -1].imshow(img2_show.squeeze(0), cmap="gray")
-            else:
-                axes[row, -1].imshow(img2_show.permute(1, 2, 0))
-            axes[row, -1].set_title(f"class {c2}")
-            axes[row, -1].axis("off")
+                # interpolated images
+                for i, t in enumerate(ts):
+                    z_interp = interp_fn(z1, z2, t.item())
+                    x_recon = model.decoder(z_interp)
+                    img = (x_recon[0].cpu() * 0.5 + 0.5).clamp(0, 1)
+                    if img.shape[0] == 1:
+                        axes[row, i + 1].imshow(img.squeeze(0), cmap="gray")
+                    else:
+                        axes[row, i + 1].imshow(img.permute(1, 2, 0))
+                    axes[row, i + 1].set_title(f"t={t.item():.1f}")
+                    axes[row, i + 1].axis("off")
 
-    plt.suptitle(f"latent interpolation ({interp_name})", fontsize=14)
-    plt.tight_layout()
-    save_path = os.path.join(save_dir, f"interpolation_{interp_name}.png")
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    return save_path
+                # show target image
+                img2_show = (img2 * 0.5 + 0.5).clamp(0, 1)
+                if img2_show.shape[0] == 1:
+                    axes[row, -1].imshow(img2_show.squeeze(0), cmap="gray")
+                else:
+                    axes[row, -1].imshow(img2_show.permute(1, 2, 0))
+                axes[row, -1].set_title(f"class {c2}")
+                axes[row, -1].axis("off")
+
+        plt.suptitle(f"latent interpolation ({interp_name})", fontsize=14)
+        plt.tight_layout()
+        save_path = os.path.join(save_dir, f"interpolation_{interp_name}.png")
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+        saved_paths.append(save_path)
+
+    # return first path for backwards compat, but all are saved
+    return saved_paths[0] if saved_paths else None
 
 
 def plot_fourier_coefficients(model, loader, device, save_path, n_samples=5):
-    """plot fourier coefficient magnitudes for randomly sampled latent vectors"""
+    """
+    plot fourier coefficient magnitudes of the actual decoder input z (not encoder output mu).
+
+    for clifford: z = IFFT(exp(i*θ)) by construction, so FFT(z) should have unit magnitude.
+    for gaussian/powerspherical: z is sampled directly, FFT(z) has no special structure.
+
+    the key insight from kelly et al. (2013) hrr paper:
+    - unit magnitude FFT coefficients enable lossless circular convolution (binding)
+    - standard hrrs with varying magnitudes have ~0.71 cosine similarity after bind/unbind
+    """
     model.eval()
-    x, _ = next(iter(loader))
-    x = x[:n_samples].to(device)
+    dist = getattr(model, "distribution", "gaussian")
 
+    # collect the actual decoder input z (not encoder output mu!)
+    all_latents = []
+    n_collected = 0
     with torch.no_grad():
-        _, _, _, mu = model(x)
+        for x, _ in loader:
+            x = x.to(device)
+            mu, params = model.encoder(x)
+            z, _, _ = model.reparameterize(mu, params)  # this is the actual latent
+            all_latents.append(z.cpu())
+            n_collected += len(x)
+            if n_collected >= 500:
+                break
 
-    # compute fft of latent vectors
-    latents = mu.cpu().numpy()
+    latents = torch.cat(all_latents, dim=0).numpy()
 
-    fig, axes = plt.subplots(n_samples, 2, figsize=(12, 3 * n_samples))
-    if n_samples == 1:
-        axes = axes.reshape(1, -1)
+    # compute fft magnitudes for all samples
+    all_magnitudes = []
+    for z in latents:
+        fft_coeffs = np.fft.fft(z)
+        magnitudes = np.abs(fft_coeffs)
+        all_magnitudes.extend(magnitudes[1:len(magnitudes)//2])  # skip dc, take positive freqs
 
-    for i in range(n_samples):
+    all_magnitudes = np.array(all_magnitudes)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # histogram of magnitudes
+    axes[0].hist(all_magnitudes, bins=50, density=True, alpha=0.7, edgecolor='black')
+    axes[0].axvline(x=1.0, color='red', linestyle='--', linewidth=2, label='unit magnitude')
+    axes[0].set_xlabel("fourier coefficient magnitude |ẑ_k|")
+    axes[0].set_ylabel("density")
+    axes[0].set_title(f"{dist}: FFT magnitude of decoder input z")
+    axes[0].legend()
+
+    # compute stats
+    mean_mag = np.mean(all_magnitudes)
+    std_mag = np.std(all_magnitudes)
+    near_unit = np.mean(np.abs(all_magnitudes - 1.0) < 0.1) * 100
+
+    # text annotation with stats
+    stats_text = f"mean: {mean_mag:.3f}\nstd: {std_mag:.3f}\n% near unit (±0.1): {near_unit:.1f}%"
+    axes[0].text(0.95, 0.95, stats_text, transform=axes[0].transAxes,
+                 verticalalignment='top', horizontalalignment='right',
+                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # show a few individual sample magnitude spectra
+    axes[1].set_title("sample magnitude spectra (5 samples)")
+    for i in range(min(5, len(latents))):
         z = latents[i]
         fft_coeffs = np.fft.fft(z)
         magnitudes = np.abs(fft_coeffs)
-        phases = np.angle(fft_coeffs)
-
-        # only show first half (symmetric for real input)
         n_coeffs = len(magnitudes) // 2
-        freqs = np.arange(n_coeffs)
+        axes[1].plot(range(n_coeffs), magnitudes[:n_coeffs], alpha=0.5, linewidth=1)
 
-        # magnitude plot
-        axes[i, 0].bar(freqs, magnitudes[:n_coeffs], width=1.0, alpha=0.7)
-        axes[i, 0].set_xlabel("frequency bin")
-        axes[i, 0].set_ylabel("magnitude")
-        axes[i, 0].set_title(f"sample {i+1} - fourier magnitudes")
-        axes[i, 0].set_xlim(0, n_coeffs)
+    axes[1].axhline(y=1.0, color='red', linestyle='--', linewidth=2, label='unit magnitude')
+    axes[1].set_xlabel("frequency bin k")
+    axes[1].set_ylabel("magnitude |ẑ_k|")
+    axes[1].legend()
 
-        # phase plot
-        axes[i, 1].bar(freqs, phases[:n_coeffs], width=1.0, alpha=0.7, color="orange")
-        axes[i, 1].set_xlabel("frequency bin")
-        axes[i, 1].set_ylabel("phase (rad)")
-        axes[i, 1].set_title(f"sample {i+1} - fourier phases")
-        axes[i, 1].set_xlim(0, n_coeffs)
-        axes[i, 1].set_ylim(-np.pi, np.pi)
+    # add explanation
+    fig.suptitle(
+        f"{dist} latents: FFT structure of decoder input\n"
+        "(clifford should have unit magnitudes; gaussian/powerspherical vary)",
+        fontsize=11
+    )
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
@@ -380,7 +462,7 @@ def main(args):
     logger = WandbLogger(args)
 
     latent_dims = args.latent_dims if args.latent_dims else [2048, 4096]
-    distributions = ["clifford", "gaussian"]
+    distributions = ["clifford", "powerspherical", "gaussian"]
     datasets_to_test = ["fashionmnist", "cifar10"]
 
     dataset_map = {
@@ -701,7 +783,7 @@ def main(args):
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # fourier coefficient visualization
+                        # fourier coefficient visualization (shows unit magnitude property for clifford)
                         t0 = time.time()
                         print(f"generating fourier coefficient visualization...")
                         fourier_viz_path = plot_fourier_coefficients(

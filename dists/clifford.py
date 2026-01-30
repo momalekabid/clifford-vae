@@ -275,6 +275,32 @@ class CliffordTorusDistribution(Distribution):
 
 
 class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
+    """
+    clifford latent distribution with powerspherical concentration on the torus.
+
+    theoretical connection to holographic reduced representations (hrrs):
+    ---------------------------------------------------------------------
+    from kelly et al. (2013) "encoding structure in holographic reduced representations":
+
+    clifford latents are constructed as z = IFFT(exp(i*θ)), which means:
+    - FFT(z)_k = exp(i*θ_k), so |FFT(z)_k| = 1 for all k
+
+    this is the key property for vector symbolic architectures (vsas):
+    - circular convolution (binding) is element-wise multiplication in freq domain
+    - for unit-magnitude coefficients, this is lossless: no noise accumulation
+    - standard hrrs with gaussian vectors have ~0.71 cosine similarity after bind/unbind
+    - frequency-domain hrrs (unit circle) have 1.0 similarity (lossless)
+
+    clifford latents satisfy the frequency-domain hrr property, enabling:
+    1. lossless binding/unbinding operations via circular convolution
+    2. invertible associative memory without noise accumulation
+    3. structured compositional representations (bind concepts, recover via unbind)
+
+    the torus geometry (d-dimensional torus T^d) provides:
+    - natural manifold structure for interpolation
+    - uniform prior over angles (maxent on torus)
+    - conjugate symmetry constraint ensures real-valued vectors
+    """
     arg_constraints = {"loc": constraints.real, "concentration": constraints.positive}
     has_rsample = True
 
