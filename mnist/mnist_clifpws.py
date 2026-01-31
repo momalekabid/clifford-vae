@@ -28,9 +28,8 @@ from utils.wandb_utils import (
     plot_gaussian_manifold_visualization,
 )
 from utils.vsa import (
-    test_binding_unbinding_triplets as vsa_binding_triplets,
     test_per_class_bundle_capacity_two_items,
-    test_cross_class_bind_interpolation_and_memory,
+    # test_cross_class_bind_interpolation_and_memory,  # commented out
 )
 from mnist.mlp_vae import MLPVAE, vae_loss, compute_test_metrics
 
@@ -402,47 +401,7 @@ def run(args):
                         use_braiding=False,
                     )
 
-                    # test 2: bundled triplet retrieval
-                    print(f"running bundled triplet retrieval test ({dist})...")
-                    triplet_raw = vsa_binding_triplets(
-                        d=item_memory.shape[-1],
-                        n_items=500,
-                        k_range=list(range(2, 12, 2)),
-                        n_trials=2,
-                        normalize=normalize_vectors,
-                        device=device,
-                        plot=True,
-                        save_dir=vis_dir,
-                        item_memory=item_memory,
-                        use_braiding=False,
-                    )
-                    triplet_res = {
-                        "triplet_retrieval_plot": os.path.join(
-                            vis_dir, "unbind_bundled_triplets_inv.png"
-                        ),
-                        "triplet_retrieval_accuracies": {
-                            k: acc
-                            for k, acc in zip(triplet_raw["k"], triplet_raw["accuracy"])
-                        },
-                    }
-
-                    # test 4: cross-class bind interpolation and memory test
-                    print(f"running cross-class bind interpolation and memory test ({dist})...")
-                    cross_class_memory_res = test_cross_class_bind_interpolation_and_memory(
-                        d=item_memory.shape[-1],
-                        n_items=500,
-                        n_classes=10,
-                        n_trials=2,
-                        normalize=normalize_vectors,
-                        device=device,
-                        plot=True,
-                        save_dir=vis_dir,
-                        item_memory=item_memory,
-                        labels=item_labels,
-                        item_images=item_images,
-                        unbind_method="inv",
-                        n_interp_steps=5,
-                    )
+                    # triplet retrieval and cross-class memory tests removed
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
@@ -510,12 +469,6 @@ def run(args):
                                 two_per_class_plot
                             )
 
-                        # add triplet retrieval test
-                        if triplet_res.get("triplet_retrieval_plot"):
-                            images_to_log["Triplet_Retrieval"] = triplet_res[
-                                "triplet_retrieval_plot"
-                            ]
-
                         # add cross-class binding tests
                         if cross_class_pseudo.get(
                             "cross_class_bind_unbind_plot_path"
@@ -532,12 +485,6 @@ def run(args):
                                 cross_class_deconv[
                                     "cross_class_bind_unbind_plot_path"
                                 ]
-                            )
-
-                        # add cross-class memory test
-                        if cross_class_memory_res.get("plot_path"):
-                            images_to_log["Cross_Class_Memory_Test"] = (
-                                cross_class_memory_res["plot_path"]
                             )
 
                         # add manifold-specific visualizations to wandb
@@ -600,25 +547,13 @@ def run(args):
                                 "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
                                     "cross_class_bind_unbind_similarity", 0.0
                                 ),
-                                "cross_class_memory_accuracy": cross_class_memory_res.get(
-                                    "memory_accuracy_mean", 0.0
-                                ),
-                                "cross_class_memory_accuracy_std": cross_class_memory_res.get(
-                                    "memory_accuracy_std", 0.0
-                                ),
                             }
                         )
-
-                        # triplet retrieval metrics
-                        triplet_metrics = {}
-                        for k, acc in triplet_res.get("triplet_retrieval_accuracies", {}).items():
-                            triplet_metrics[f"triplet_retrieval_acc_k{k}"] = acc
 
                         summary_metrics = {
                             **knn_metrics,
                             "final_val_loss": best_val_loss,
                             **fourier_metrics,
-                            **triplet_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
                             # elbo metrics for results table
                             "test/ll": test_metrics["ll"],
@@ -630,12 +565,6 @@ def run(args):
                             ),
                             "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
                                 "cross_class_bind_unbind_similarity", 0.0
-                            ),
-                            "cross_class_memory_accuracy": cross_class_memory_res.get(
-                                "memory_accuracy_mean", 0.0
-                            ),
-                            "cross_class_memory_accuracy_std": cross_class_memory_res.get(
-                                "memory_accuracy_std", 0.0
                             ),
                         }
                         logger.log_summary(summary_metrics)

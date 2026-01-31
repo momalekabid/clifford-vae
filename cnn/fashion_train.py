@@ -299,16 +299,12 @@ def plot_latent_interpolations(model, loader, device, save_dir, n_steps=10, n_pa
     return saved_paths[0] if saved_paths else None
 
 
-def plot_fourier_coefficients(model, loader, device, save_path, n_samples=5):
+def plot_fourier_coefficients(model, loader, device, save_path, n_samples=10):
     """
     plot fourier coefficient magnitudes of the actual decoder input z (not encoder output mu).
 
     for clifford: z = IFFT(exp(i*θ)) by construction, so FFT(z) should have unit magnitude.
     for gaussian/powerspherical: z is sampled directly, FFT(z) has no special structure.
-
-    the key insight from kelly et al. (2013) hrr paper:
-    - unit magnitude FFT coefficients enable lossless circular convolution (binding)
-    - standard hrrs with varying magnitudes have ~0.71 cosine similarity after bind/unbind
     """
     model.eval()
     dist = getattr(model, "distribution", "gaussian")
@@ -323,67 +319,58 @@ def plot_fourier_coefficients(model, loader, device, save_path, n_samples=5):
             z, _, _ = model.reparameterize(mu, params)  # this is the actual latent
             all_latents.append(z.cpu())
             n_collected += len(x)
-            if n_collected >= 500:
+            if n_collected >= 200:
                 break
 
     latents = torch.cat(all_latents, dim=0).numpy()
 
-    # compute fft magnitudes for all samples
-    all_magnitudes = []
-    for z in latents:
-        fft_coeffs = np.fft.fft(z)
-        magnitudes = np.abs(fft_coeffs)
-        all_magnitudes.extend(magnitudes[1:len(magnitudes)//2])  # skip dc, take positive freqs
-
-    all_magnitudes = np.array(all_magnitudes)
-
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # histogram of magnitudes with fallback for edge cases
-    try:
-        axes[0].hist(all_magnitudes, bins=50, density=True, alpha=0.7, edgecolor='black')
-    except ValueError:
-        # fallback: use fewer bins or let numpy decide with constraints
-        try:
-            axes[0].hist(all_magnitudes, bins='auto', density=True, alpha=0.7, edgecolor='black')
-        except ValueError:
-            # last resort: use just 10 bins
-            axes[0].hist(all_magnitudes, bins=10, density=True, alpha=0.7, edgecolor='black')
-    axes[0].axvline(x=1.0, color='red', linestyle='--', linewidth=2, label='unit magnitude')
-    axes[0].set_xlabel("fourier coefficient magnitude |ẑ_k|")
-    axes[0].set_ylabel("density")
-    axes[0].set_title(f"{dist}: FFT magnitude of decoder input z")
-    axes[0].legend()
-
-    # compute stats
-    mean_mag = np.mean(all_magnitudes)
-    std_mag = np.std(all_magnitudes)
-    near_unit = np.mean(np.abs(all_magnitudes - 1.0) < 0.1) * 100
-
-    # text annotation with stats
-    stats_text = f"mean: {mean_mag:.3f}\nstd: {std_mag:.3f}\n% near unit (±0.1): {near_unit:.1f}%"
-    axes[0].text(0.95, 0.95, stats_text, transform=axes[0].transAxes,
-                 verticalalignment='top', horizontalalignment='right',
-                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
-    # show a few individual sample magnitude spectra
-    axes[1].set_title("sample magnitude spectra (5 samples)")
-    for i in range(min(5, len(latents))):
+    # left: show individual sample magnitude spectra
+    colors = plt.cm.tab10(np.linspace(0, 1, min(n_samples, len(latents))))
+    for i in range(min(n_samples, len(latents))):
         z = latents[i]
         fft_coeffs = np.fft.fft(z)
         magnitudes = np.abs(fft_coeffs)
         n_coeffs = len(magnitudes) // 2
-        axes[1].plot(range(n_coeffs), magnitudes[:n_coeffs], alpha=0.5, linewidth=1)
+        axes[0].plot(range(n_coeffs), magnitudes[:n_coeffs], alpha=0.6, linewidth=1, color=colors[i])
 
+    axes[0].axhline(y=1.0, color='red', linestyle='--', linewidth=2, label='unit magnitude')
+    axes[0].set_xlabel("frequency bin k")
+    axes[0].set_ylabel("magnitude |ẑ_k|")
+    axes[0].set_title(f"{dist}: FFT magnitudes of decoder input z ({n_samples} samples)")
+    axes[0].legend()
+
+    # right: mean magnitude per frequency bin with std shading
+    all_mag_per_bin = []
+    for z in latents:
+        fft_coeffs = np.fft.fft(z)
+        magnitudes = np.abs(fft_coeffs)
+        all_mag_per_bin.append(magnitudes[:len(magnitudes)//2])
+
+    all_mag_per_bin = np.array(all_mag_per_bin)
+    mean_per_bin = np.mean(all_mag_per_bin, axis=0)
+    std_per_bin = np.std(all_mag_per_bin, axis=0)
+    freq_bins = np.arange(len(mean_per_bin))
+
+    axes[1].plot(freq_bins, mean_per_bin, color='blue', linewidth=2, label='mean')
+    axes[1].fill_between(freq_bins, mean_per_bin - std_per_bin, mean_per_bin + std_per_bin,
+                         alpha=0.3, color='blue', label='±1 std')
     axes[1].axhline(y=1.0, color='red', linestyle='--', linewidth=2, label='unit magnitude')
     axes[1].set_xlabel("frequency bin k")
     axes[1].set_ylabel("magnitude |ẑ_k|")
+    axes[1].set_title(f"{dist}: mean FFT magnitude across {len(latents)} samples")
     axes[1].legend()
 
-    # add explanation
+    # compute overall stats for annotation
+    all_magnitudes = all_mag_per_bin[:, 1:].flatten()  # skip dc
+    mean_mag = np.mean(all_magnitudes)
+    std_mag = np.std(all_magnitudes)
+    near_unit = np.mean(np.abs(all_magnitudes - 1.0) < 0.1) * 100
+
+    stats_text = f"mean: {mean_mag:.3f}, std: {std_mag:.3f}, % near unit (±0.1): {near_unit:.1f}%"
     fig.suptitle(
-        f"{dist} latents: FFT structure of decoder input\n"
-        "(clifford should have unit magnitudes; gaussian/powerspherical vary)",
+        f"{dist} latents: FFT structure of decoder input z\n{stats_text}",
         fontsize=11
     )
 

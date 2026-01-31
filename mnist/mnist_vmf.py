@@ -24,9 +24,9 @@ from utils.wandb_utils import (
     evaluate_mean_vector_cosine,
     plot_powerspherical_manifold_visualization,
 )
-from utils.vsa import (
-    test_cross_class_bind_interpolation_and_memory,
-)
+# from utils.vsa import (
+#     test_cross_class_bind_interpolation_and_memory,
+# )
 from mnist.mlp_vae import MLPVAE, vae_loss, compute_test_metrics
 
 
@@ -324,39 +324,7 @@ def run(args):
                     unbind_method="†",
                 )
 
-                # collect item memory for vsa tests
-                latents = []
-                labels_list = []
-                images_list = []
-                for x, y in test_subset_loader:
-                    x = x.to(device)
-                    z_mean, _ = model.encode(x.view(-1, 784))
-                    latents.append(z_mean.detach())
-                    labels_list.append(y)
-                    images_list.append(x.cpu())
-                    if len(torch.cat(latents, 0)) >= 500:
-                        break
-                item_memory = torch.cat(latents, 0)[:500]
-                item_labels = torch.cat(labels_list, 0)[:500].to(device)
-                item_images = torch.cat(images_list, 0)[:500]
-
-                # cross-class bind interpolation and memory test
-                print(f"running cross-class bind interpolation and memory test (vmf)...")
-                cross_class_memory_res = test_cross_class_bind_interpolation_and_memory(
-                    d=item_memory.shape[-1],
-                    n_items=500,
-                    n_classes=10,
-                    n_trials=2,
-                    normalize=True,
-                    device=device,
-                    plot=True,
-                    save_dir=f"visualizations/d_{d_manifold}/vmf",
-                    item_memory=item_memory,
-                    labels=item_labels,
-                    item_images=item_images,
-                    unbind_method="inv",
-                    n_interp_steps=5,
-                )
+                # cross-class memory test removed
 
                 # visualizations
                 vis_dir = f"visualizations/d_{d_manifold}/vmf"
@@ -407,12 +375,6 @@ def run(args):
                     if d_manifold >= 2 and vmf_viz:
                         images_to_log["vMF_Manifold"] = vmf_viz
 
-                    # add cross-class memory test
-                    if cross_class_memory_res.get("plot_path"):
-                        images_to_log["Cross_Class_Memory_Test"] = (
-                            cross_class_memory_res["plot_path"]
-                        )
-
                     logger.log_images(images_to_log)
 
                 if logger.use:
@@ -459,12 +421,6 @@ def run(args):
                             "test/entropy": test_metrics["entropy"],
                             "test/recon": test_metrics["recon"],
                             "test/kl": test_metrics["kl"],
-                            "cross_class_memory_accuracy": cross_class_memory_res.get(
-                                "memory_accuracy_mean", 0.0
-                            ),
-                            "cross_class_memory_accuracy_std": cross_class_memory_res.get(
-                                "memory_accuracy_std", 0.0
-                            ),
                         }
                     )
 
@@ -478,12 +434,6 @@ def run(args):
                         "test/entropy": test_metrics["entropy"],
                         "test/recon": test_metrics["recon"],
                         "test/kl": test_metrics["kl"],
-                        "cross_class_memory_accuracy": cross_class_memory_res.get(
-                            "memory_accuracy_mean", 0.0
-                        ),
-                        "cross_class_memory_accuracy_std": cross_class_memory_res.get(
-                            "memory_accuracy_std", 0.0
-                        ),
                     }
                     logger.log_summary(summary_metrics)
                     logger.finish_run()
