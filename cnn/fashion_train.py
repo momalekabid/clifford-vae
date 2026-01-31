@@ -339,10 +339,16 @@ def plot_fourier_coefficients(model, loader, device, save_path, n_samples=5):
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # histogram of magnitudes (use 'auto' if data range is too small for 50 bins)
-    data_range = np.ptp(all_magnitudes)
-    n_bins = 50 if data_range > 0.01 else 'auto'
-    axes[0].hist(all_magnitudes, bins=n_bins, density=True, alpha=0.7, edgecolor='black')
+    # histogram of magnitudes with fallback for edge cases
+    try:
+        axes[0].hist(all_magnitudes, bins=50, density=True, alpha=0.7, edgecolor='black')
+    except ValueError:
+        # fallback: use fewer bins or let numpy decide with constraints
+        try:
+            axes[0].hist(all_magnitudes, bins='auto', density=True, alpha=0.7, edgecolor='black')
+        except ValueError:
+            # last resort: use just 10 bins
+            axes[0].hist(all_magnitudes, bins=10, density=True, alpha=0.7, edgecolor='black')
     axes[0].axvline(x=1.0, color='red', linestyle='--', linewidth=2, label='unit magnitude')
     axes[0].set_xlabel("fourier coefficient magnitude |ẑ_k|")
     axes[0].set_ylabel("density")

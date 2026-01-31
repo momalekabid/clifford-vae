@@ -690,23 +690,29 @@ def run(args):
         elbo_results.append(elbo_row)
 
     if final_results:
-        import pandas as pd
+        try:
+            import pandas as pd
+            df = pd.DataFrame(final_results).set_index("d")
+            print("\n" + "=" * 25 + " results (knn acc %) " + "=" * 25)
+            print(df.to_string())
+            df.to_csv("mnist_vae_knn_results.csv")
 
-        df = pd.DataFrame(final_results).set_index("d")
-        print("\n" + "=" * 25 + " results (knn acc %) " + "=" * 25)
-        print(df.to_string())
-        df.to_csv("mnist_vae_knn_results.csv")
+            if elbo_results:
+                df_elbo = pd.DataFrame(elbo_results).set_index("d")
+                print("\n" + "=" * 25 + " elbo metrics (ll, L[q], re, kl) " + "=" * 25)
+                print(df_elbo.to_string())
+                df_elbo.to_csv("mnist_vae_elbo_results.csv")
+        except ImportError:
+            # fallback: save as json if pandas not available
+            print("\n" + "=" * 25 + " results (knn acc %) " + "=" * 25)
+            for row in final_results:
+                print(row)
+            with open("mnist_vae_knn_results.json", "w") as f:
+                json.dump(final_results, f, indent=2)
+            print("results saved to mnist_vae_knn_results.json")
 
-        # save elbo metrics table
+        # save raw elbo data as json regardless
         if elbo_results:
-            df_elbo = pd.DataFrame(elbo_results).set_index("d")
-            print("\n" + "=" * 25 + " elbo metrics (ll, L[q], re, kl) " + "=" * 25)
-            print(df_elbo.to_string())
-            df_elbo.to_csv("mnist_vae_elbo_results.csv")
-
-            # also save raw data as json for further analysis
-            # note: agg_results and agg_metrics are rebuilt each dimension loop,
-            # so we save the aggregated tables which contain all data
             with open("mnist_vae_elbo_raw.json", "w") as f:
                 json.dump(elbo_results, f, indent=2)
             print("raw elbo metrics saved to mnist_vae_elbo_raw.json")
