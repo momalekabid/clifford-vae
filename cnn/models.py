@@ -22,12 +22,14 @@ class Encoder(nn.Module):
         distribution: str,
         l2_normalize: bool = False,
         concentration_floor: float = 0.03,
+        img_size: int = 32,
     ):
         super().__init__()
         self.distribution = distribution
         self.l2_normalize = l2_normalize
         self.concentration_floor = concentration_floor
-        self.main = nn.Sequential(
+
+        layers = [
             nn.Conv2d(in_channels, 64, 4, 2, 1),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(64, 128, 4, 2, 1),
@@ -36,7 +38,22 @@ class Encoder(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(256, 512, 4, 2, 1),
             nn.LeakyReLU(0.2, inplace=True),
-        )
+        ]
+        # extra layer for 64x64 input: 64->32->16->8->4->2
+        if img_size == 64:
+            layers = [
+                nn.Conv2d(in_channels, 64, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(64, 128, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(128, 256, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(256, 512, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(512, 512, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+            ]
+        self.main = nn.Sequential(*layers)
         self.flat_dim = 512 * 2 * 2
         self.fc_mu = nn.Linear(self.flat_dim, latent_dim)
         if distribution == "gaussian":
@@ -71,19 +88,36 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, latent_dim: int, out_channels: int):
+    def __init__(self, latent_dim: int, out_channels: int, img_size: int = 32):
         super().__init__()
         self.fc = nn.Linear(latent_dim, 512 * 2 * 2)
-        self.main = nn.Sequential(
-            nn.ConvTranspose2d(512, 256, 4, 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose2d(256, 128, 4, 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose2d(128, 64, 4, 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose2d(64, out_channels, 4, 2, 1),
-            nn.Tanh(),
-        )
+
+        if img_size == 64:
+            # 2->4->8->16->32->64
+            self.main = nn.Sequential(
+                nn.ConvTranspose2d(512, 512, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(512, 256, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(256, 128, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(128, 64, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(64, out_channels, 4, 2, 1),
+                nn.Tanh(),
+            )
+        else:
+            # 2->4->8->16->32
+            self.main = nn.Sequential(
+                nn.ConvTranspose2d(512, 256, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(256, 128, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(128, 64, 4, 2, 1),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.ConvTranspose2d(64, out_channels, 4, 2, 1),
+                nn.Tanh(),
+            )
 
         # xavier initialization
         def init_weights(m):
@@ -112,6 +146,7 @@ class VAE(nn.Module):
         freq_weight: float = 1.0,
         l2_normalize: bool = False,
         concentration_floor: float = 0.03,
+        img_size: int = 32,
     ):
         super().__init__()
         self.latent_dim = latent_dim
@@ -131,9 +166,10 @@ class VAE(nn.Module):
             distribution=distribution,
             l2_normalize=l2_normalize,
             concentration_floor=concentration_floor,
+            img_size=img_size,
         )
         dec_in_dim = 2 * latent_dim if distribution == "clifford" else latent_dim
-        self.decoder = Decoder(dec_in_dim, out_channels=in_channels)
+        self.decoder = Decoder(dec_in_dim, out_channels=in_channels, img_size=img_size)
 
         self.to(device)
 

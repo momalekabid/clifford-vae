@@ -9,6 +9,7 @@ import torchvision.utils as tu
 import matplotlib.pyplot as plt
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.manifold import TSNE
 import time
 import json
 
@@ -374,6 +375,125 @@ def plot_fourier_coefficients(model, loader, device, save_path, n_samples=10):
         fontsize=11
     )
 
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
+def plot_latent_distributions(model, loader, device, save_path, n_dims=50, n_samples=2000):
+    """
+    plot histograms of individual latent dimensions (mu from encoder).
+    contrasts the learned distribution shape across dimensions -- useful for
+    seeing how gaussian vs clifford vs powerspherical latents differ structurally.
+    """
+    model.eval()
+    dist = getattr(model, "distribution", "gaussian")
+
+    all_mu = []
+    n_collected = 0
+    with torch.no_grad():
+        for x, _ in loader:
+            x = x.to(device)
+            mu, _ = model.encoder(x)
+            all_mu.append(mu.cpu())
+            n_collected += len(x)
+            if n_collected >= n_samples:
+                break
+
+    mu = torch.cat(all_mu, dim=0)[:n_samples].numpy()
+    latent_dim = mu.shape[1]
+    n_show = min(n_dims, latent_dim)
+
+    # grid layout
+    n_cols = 10
+    n_rows = (n_show + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(2 * n_cols, 2 * n_rows))
+    axes = np.array(axes).reshape(n_rows, n_cols)
+
+    for i in range(n_show):
+        r, c = divmod(i, n_cols)
+        ax = axes[r, c]
+        vals = mu[:, i]
+        ax.hist(vals, bins=40, density=True, alpha=0.8, color="steelblue", edgecolor="none")
+        ax.set_title(f"latent var {i+1}", fontsize=7)
+        ax.tick_params(labelsize=5)
+
+    # hide unused axes
+    for i in range(n_show, n_rows * n_cols):
+        r, c = divmod(i, n_cols)
+        axes[r, c].axis("off")
+
+    # compute summary stats
+    mean_std = np.std(mu, axis=0).mean()
+    mean_mean = np.mean(np.abs(np.mean(mu, axis=0)))
+    fig.suptitle(
+        f"{dist} latent space distribution (d={latent_dim}, n={len(mu)})\n"
+        f"avg |mean|={mean_mean:.3f}, avg std={mean_std:.3f}",
+        fontsize=11,
+    )
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
+def plot_latent_tsne(model, loader, device, save_path, n_samples=2000):
+    """
+    t-sne visualization of latent space colored by class label.
+    runs multiple perplexities (5, 30, 50) since each reveals different
+    structure scales — low perplexity shows local clusters, high shows
+    global geometry. uses 5000 iterations for proper convergence.
+    see: https://distill.pub/2016/misread-tsne/
+    """
+    model.eval()
+    dist = getattr(model, "distribution", "gaussian")
+
+    all_mu = []
+    all_labels = []
+    n_collected = 0
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device)
+            _, _, _, mu = model(x)
+            all_mu.append(mu.cpu())
+            all_labels.append(y)
+            n_collected += len(x)
+            if n_collected >= n_samples:
+                break
+
+    mu = torch.cat(all_mu, dim=0)[:n_samples].numpy()
+    labels = torch.cat(all_labels, dim=0)[:n_samples].numpy()
+    n_classes = len(np.unique(labels))
+
+    # multiple perplexities give a more complete picture
+    # perplexity ~= effective number of neighbors considered
+    perplexities = [5, 30, 50]
+    fig, axes = plt.subplots(1, len(perplexities), figsize=(6 * len(perplexities), 5))
+
+    for i, perp in enumerate(perplexities):
+        print(f"  running t-sne (perplexity={perp}) on {len(mu)} samples (d={mu.shape[1]})...")
+        tsne = TSNE(
+            n_components=2,
+            random_state=42,
+            perplexity=perp,
+            max_iter=5000,
+            learning_rate="auto",
+        )
+        z_2d = tsne.fit_transform(mu)
+
+        ax = axes[i]
+        scatter = ax.scatter(
+            z_2d[:, 0], z_2d[:, 1],
+            c=labels, cmap=plt.get_cmap("tab10", n_classes),
+            s=8, alpha=0.7,
+        )
+        ax.set_title(f"perplexity={perp}")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    plt.colorbar(scatter, ax=axes[-1], label="class")
+    fig.suptitle(f"{dist}: t-sne of latent space (d={mu.shape[1]})", fontsize=13)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
@@ -778,6 +898,31 @@ def main(args):
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
+                        # latent distribution histograms (contrasts distribution shapes across dims)
+                        t0 = time.time()
+                        print(f"generating latent distribution visualization...")
+                        latent_dist_path = plot_latent_distributions(
+                            model,
+                            test_loader,
+                            DEVICE,
+                            f"{output_dir}/latent_distributions.png",
+                            n_dims=50,
+                            n_samples=2000,
+                        )
+                        print(f"  completed in {time.time() - t0:.2f}s")
+
+                        # t-sne visualization of latent space
+                        t0 = time.time()
+                        print(f"generating t-sne visualization...")
+                        tsne_path = plot_latent_tsne(
+                            model,
+                            test_loader,
+                            DEVICE,
+                            f"{output_dir}/tsne.png",
+                            n_samples=2000,
+                        )
+                        print(f"  completed in {time.time() - t0:.2f}s")
+
                         # fourier coefficient visualization (shows unit magnitude property for clifford)
                         t0 = time.time()
                         print(f"generating fourier coefficient visualization...")
@@ -857,6 +1002,8 @@ def main(args):
                         images.update(
                             {
                                 "reconstructions": recon_path,
+                                "latent_distributions": latent_dist_path,
+                                "tsne": tsne_path,
                                 "fourier_coefficients": fourier_viz_path,
                                 "latent_interpolation": interp_path,
                             }
