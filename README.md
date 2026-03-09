@@ -32,14 +32,10 @@ python3 cnn/fashion_train.py
 python3 mnist/mnist_clifpws.py
 python3 mnist/mnist_vmf.py
 ```
-
-**note**: gaussian VAE has l2 normalization enabled by default. use `--no-l2_norm` to disable.
-
 run `python3 cnn/fashion_train.py --help` or `python3 mnist/mnist_clifpws.py --help` for all available options.
 
 ## SLURM submission
 
-create slurm job scripts (e.g., `slurm_mnist_clifpws.sh`):
 ```bash
 #!/bin/bash
 #SBATCH --job-name=mnist-clifpws
@@ -59,7 +55,6 @@ cd /path/to/clifford-vae
 python3 mnist/mnist_clifpws.py
 ```
 
-submit jobs:
 ```bash
 sbatch slurm_mnist_clifpws.sh
 sbatch slurm_mnist_vmf.sh
@@ -73,29 +68,3 @@ sbatch slurm_fashion.sh
 - `utils` : vsa and wandb plotting utils
 - 'plot_results.py' run this to generate final plots of latent dimension on x, accuracy/F1 on Y-axis
 
-## class labels
-### fashion-mnist classes
-
-- 0: t-shirt/top
-- 1: trouser
-- 2: pullover
-- 3: dress
-- 4: coat
-- 5: sandal
-- 6: shirt
-- 7: sneaker
-- 8: bag
-- 9: ankle boot
-
-### cifar-10 classes
-
-- 0: airplane
-- 1: automobile
-- 2: bird
-- 3: cat
-- 4: deer
-- 5: dog
-- 6: frog
-- 7: horse
-- 8: ship
-- 9: truck
