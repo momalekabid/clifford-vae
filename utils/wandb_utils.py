@@ -132,9 +132,9 @@ def test_self_binding(
     xs = np.arange(1, k_self_bind + 1)
     plt.plot(xs, sims, marker="o")
     plt.ylim(0.0, 1.05)
-    plt.xlabel("m (bind m times then unbind m times)")
-    plt.ylabel("Cosine similarity to original")
-    plt.title("Similarity After K Binds")
+    plt.xlabel("Number of Recursive Bind-Unbind Cycles ($m$)")
+    plt.ylabel("Cosine Similarity to Original")
+    plt.title("Invertible Self-Binding")
     plt.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(path_bind_curve, dpi=200, bbox_inches="tight")
@@ -199,7 +199,7 @@ def test_self_binding(
                     for label in selected_labels[: len(all_recon_vectors)]
                 ]
             )
-            plt.title(f"Reconstructions after bind+unbind m times\nRows: {class_info}")
+            plt.title(f"Reconstructions After $m$ Recursive Bind-Unbind Cycles\nRows: {class_info}")
             plt.tight_layout()
             plt.savefig(recon_paths, dpi=200, bbox_inches="tight")
             plt.close()
@@ -362,7 +362,7 @@ def test_cross_class_bind_unbind(
 
         plt.xticks([w // 2 + i * w for i in range(4)], labels, rotation=15, ha="right")
         plt.yticks([])
-        plt.title(f"Cross-Class Bind/Unbind Test (Avg Sim: {avg_sim:.3f})")
+        plt.title(f"Cross-Class Binding and Unbinding (Average Similarity: {avg_sim:.3f})")
         plt.tight_layout()
         plt.savefig(plot_path, dpi=200, bbox_inches="tight")
         plt.close()
@@ -586,9 +586,9 @@ def plot_clifford_torus_latent_scatter(
     plt.colorbar(sc)
     plt.xlim(-math.pi, math.pi)
     plt.ylim(-math.pi, math.pi)
-    plt.xlabel(f"angle[{ax0}]")
-    plt.ylabel(f"angle[{ax1}]")
-    plt.title("Clifford Torus Latent Angles")
+    plt.xlabel(f"Phase Angle $\\theta_{{{ax0}}}$")
+    plt.ylabel(f"Phase Angle $\\theta_{{{ax1}}}$")
+    plt.title("Clifford Torus Latent Phase Angles")
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -649,7 +649,7 @@ def plot_clifford_torus_recon_grid(
         plt.imshow(canvas.permute(1, 2, 0))
     plt.xticks([])
     plt.yticks([])
-    plt.title("Decoder Reconstructions over Torus Grid")
+    plt.title("Decoder Reconstructions over Clifford Torus Grid")
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -724,7 +724,7 @@ def test_vsa_operations(
             )
             plt.xlabel("Cosine Similarity")
             plt.ylabel("Count")
-            plt.title("Bind-Unbind Performance")
+            plt.title("Binding and Unbinding Performance")
             plt.legend()
             plt.grid(alpha=0.3)
 
@@ -735,7 +735,7 @@ def test_vsa_operations(
             )
             plt.xlabel("Test Index")
             plt.ylabel("Cosine Similarity")
-            plt.title("Per-Test Similarity")
+            plt.title("Per-Test Cosine Similarity")
             plt.grid(alpha=0.3)
             plt.tight_layout()
             plt.savefig(path_vsa_test, dpi=200, bbox_inches="tight")
@@ -813,7 +813,7 @@ def _plot_clifford_manifold_original(model, device, output_dir, n_grid=12, dims=
     plt.xticks([])
     plt.yticks([])
     plt.title(
-        f"Clifford Torus Manifold Systematic Traversal (dims {dims[0]},{dims[1]})"
+        f"Clifford Torus Manifold Traversal (Dimensions {dims[0]}, {dims[1]})"
     )
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
@@ -871,7 +871,7 @@ def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=
 
     plt.xticks([])
     plt.yticks([])
-    plt.title("PowerSpherical Manifold Reconstructions")
+    plt.title("Power Spherical Manifold Reconstructions")
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -929,7 +929,7 @@ def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=144, i
 
     plt.xticks([])
     plt.yticks([])
-    plt.title("Gaussian Manifold Reconstructions")
+    plt.title("Gaussian Manifold Random Sample Reconstructions")
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -986,23 +986,23 @@ def plot_cross_dist_comparison_dim(dim_results, latent_dim, dataset_name, output
             axes[2].plot(rf["k"], rf["accuracy"], marker="s", markersize=3,
                          color=color, linestyle=ls, label=label)
 
-    axes[0].set_xlabel("bundled vectors k")
-    axes[0].set_ylabel("retrieval accuracy")
-    axes[0].set_title(f"bundle capacity (d={latent_dim})")
+    axes[0].set_xlabel("Number of Bundled Vectors ($k$)")
+    axes[0].set_ylabel("Retrieval Accuracy")
+    axes[0].set_title(f"Bundle Capacity ($d={latent_dim}$)")
     axes[0].legend(fontsize=8)
     axes[0].grid(alpha=0.3)
     axes[0].set_ylim(0, 1.05)
 
-    axes[1].set_xlabel("bind/unbind depth m")
-    axes[1].set_ylabel("cosine similarity to original")
-    axes[1].set_title(f"approx. inverse binding (d={latent_dim})")
+    axes[1].set_xlabel("Number of Recursive Bind-Unbind Cycles ($m$)")
+    axes[1].set_ylabel("Cosine Similarity to Original")
+    axes[1].set_title(f"Invertible Self-Binding ($d={latent_dim}$)")
     axes[1].legend(fontsize=8)
     axes[1].grid(alpha=0.3)
     axes[1].set_ylim(-0.1, 1.05)
 
-    axes[2].set_xlabel("bundled role-filler pairs k")
-    axes[2].set_ylabel("unbinding accuracy")
-    axes[2].set_title(f"role-filler capacity (d={latent_dim})")
+    axes[2].set_xlabel("Number of Bundled Role-Filler Pairs ($k$)")
+    axes[2].set_ylabel("Unbinding Accuracy")
+    axes[2].set_title(f"Role-Filler Capacity ($d={latent_dim}$)")
     axes[2].legend(fontsize=8)
     axes[2].grid(alpha=0.3)
     axes[2].set_ylim(0, 1.05)
@@ -1018,62 +1018,165 @@ def plot_cross_dist_comparison_dim(dim_results, latent_dim, dataset_name, output
 
 def plot_across_dims_comparison(across_dim_results, latent_dims_used, dataset_name, output_dir):
     """
-    two-panel plot: knn accuracy vs latent_dim, generation FID vs latent_dim.
-    one line per distribution.
+    outputs knn accuracy, f1, and fid results as:
+      1. latex table (booktabs) ready to paste into paper
+      2. csv for easy parsing
+      3. wandb.Table if wandb is active
+    returns path to the .tex file.
     """
-    COLORS = {
-        "clifford": "#2196F3",
-        "powerspherical": "#FF9800",
-        "gaussian": "#4CAF50",
-        "gaussian_nol2": "#9C27B0",
+    LABELS_TEX = {
+        "clifford": "$\\mathcal{C}$-VAE",
+        "powerspherical": "$\\mathcal{S}$-VAE",
+        "gaussian": "$\\mathcal{N}$-VAE (L2)",
+        "gaussian_nol2": "$\\mathcal{N}$-VAE",
     }
-    LABELS = {
+    LABELS_PLAIN = {
         "clifford": "Clifford",
         "powerspherical": "PowerSpherical",
         "gaussian": "Gaussian (L2)",
         "gaussian_nol2": "Gaussian",
     }
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    dist_order = [d for d in ["gaussian_nol2", "gaussian", "powerspherical", "clifford"]
+                  if d in across_dim_results and across_dim_results[d].get("dims")]
 
-    for dist_name, data in across_dim_results.items():
-        if dist_name == "random_hrr":
-            continue
-        dims = data.get("dims", [])
-        knns = data.get("knn", [])
-        fids = data.get("fid", [])
-        color = COLORS.get(dist_name, "black")
-        label = LABELS.get(dist_name, dist_name)
-        if dims and knns:
-            axes[0].plot(dims, knns, marker="o", color=color, label=label, linewidth=2)
-        if dims and fids:
-            valid = [(d, f) for d, f in zip(dims, fids) if np.isfinite(f)]
-            if valid:
-                vd, vf = zip(*valid)
-                axes[1].plot(list(vd), list(vf), marker="o", color=color, label=label, linewidth=2)
+    if not dist_order:
+        return None
 
-    axes[0].set_xlabel("latent dim")
-    axes[0].set_ylabel("KNN accuracy (1000 train)")
-    axes[0].set_title(f"{dataset_name}: KNN accuracy vs latent dim")
-    axes[0].legend(fontsize=9)
-    axes[0].grid(alpha=0.3)
-    if len(latent_dims_used) > 1:
-        axes[0].set_xscale("log")
-
-    axes[1].set_xlabel("latent dim")
-    axes[1].set_ylabel("generation FID ↓")
-    axes[1].set_title(f"{dataset_name}: generation FID vs latent dim")
-    axes[1].legend(fontsize=9)
-    axes[1].grid(alpha=0.3)
-    if len(latent_dims_used) > 1:
-        axes[1].set_xscale("log")
-
-    plt.tight_layout()
+    dims = across_dim_results[dist_order[0]]["dims"]
+    train_sizes = [100, 600, 1000]
+    metrics = ["knn", "f1"]
+    metric_keys = {
+        "knn": ["knn_100", "knn_600", "knn_1000"],
+        "f1": ["f1_100", "f1_600", "f1_1000"],
+    }
     os.makedirs(output_dir, exist_ok=True)
-    save_path = os.path.join(output_dir, f"{dataset_name}_across_dims_comparison.png")
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    return save_path
+
+    def fmt_pct(v):
+        if v <= 1.0:
+            return f"{v * 100:.1f}"
+        return f"{v:.1f}"
+
+    # --- collect raw data ---
+    # rows: list of (dist_name, metric_name, n_train, [values per dim])
+    rows = []
+    for dist_name in dist_order:
+        data = across_dim_results[dist_name]
+        for m in metrics:
+            for n_train, key in zip(train_sizes, metric_keys[m]):
+                vals = data.get(key, [])
+                # pad if needed
+                vals = vals + [float("nan")] * (len(dims) - len(vals))
+                rows.append((dist_name, m, n_train, vals[:len(dims)]))
+
+    # find best per (metric, n_train, dim_idx) — highest is best
+    from collections import defaultdict
+    best_vals = defaultdict(lambda: (float("-inf"), None))
+    for dist_name, m, n_train, vals in rows:
+        for di, v in enumerate(vals):
+            if np.isnan(v):
+                continue
+            col_key = (m, n_train, di)
+            if v > best_vals[col_key][0]:
+                best_vals[col_key] = (v, dist_name)
+    best_dist = {k: dist for k, (_, dist) in best_vals.items()}
+
+    # --- 1. latex table ---
+    # format: like paper table — grouped columns by train size
+    # columns per group: one per distribution
+    n_dists = len(dist_order)
+    dist_syms = [LABELS_TEX[d] for d in dist_order]
+
+    lines = []
+    lines.append("\\begin{table}[h]")
+    lines.append("\\centering")
+    lines.append(f"\\caption{{Semi-supervised $k$-NN results on {dataset_name.replace('_', ' ').title()} (CNN, across latent dimensions).}}")
+    lines.append(f"\\label{{tab:{dataset_name}_cnn_knn}}")
+
+    # column spec: l | (n_dists cols) per train size
+    col_spec = "l" + ("|" + "c" * n_dists) * len(train_sizes)
+    lines.append(f"\\begin{{tabular}}{{{col_spec}}}")
+    lines.append("\\toprule")
+
+    # header row 1: train sizes
+    header1 = " "
+    for n_train in train_sizes:
+        header1 += f" & \\multicolumn{{{n_dists}}}{{c|}}{{{n_train}}}"
+    header1 = header1.rstrip("|") + " \\\\"
+    lines.append(header1)
+
+    # header row 2: distribution names
+    header2 = "Method"
+    for _ in train_sizes:
+        for sym in dist_syms:
+            header2 += f" & {sym}"
+    header2 += " \\\\"
+    lines.append(header2)
+    lines.append("\\midrule")
+
+    # one row per dim, one section per metric
+    for m, m_label in [("knn", "Accuracy"), ("f1", "Macro F1")]:
+        lines.append(f"\\multicolumn{{{1 + n_dists * len(train_sizes)}}}{{l}}{{\\textit{{{m_label}}}}} \\\\")
+        for di, d in enumerate(dims):
+            row_str = f"$d = {d}$"
+            for n_train in train_sizes:
+                for dist_name in dist_order:
+                    # find this row's value
+                    val = float("nan")
+                    for dn, rm, rn, vals in rows:
+                        if dn == dist_name and rm == m and rn == n_train:
+                            val = vals[di]
+                            break
+                    if np.isnan(val):
+                        row_str += " & —"
+                    else:
+                        s = fmt_pct(val)
+                        if best_dist.get((m, n_train, di)) == dist_name:
+                            row_str += f" & \\textbf{{{s}}}"
+                        else:
+                            row_str += f" & {s}"
+            row_str += " \\\\"
+            lines.append(row_str)
+        lines.append("\\addlinespace")
+
+    lines.append("\\bottomrule")
+    lines.append("\\end{tabular}")
+    lines.append("\\end{table}")
+
+    tex_str = "\n".join(lines)
+    tex_path = os.path.join(output_dir, f"{dataset_name}_results.tex")
+    with open(tex_path, "w") as f:
+        f.write(tex_str)
+    print(f"latex table saved to {tex_path}")
+
+    # --- 2. csv ---
+    csv_lines = ["method,metric,n_train," + ",".join(f"d={d}" for d in dims)]
+    for dist_name, m, n_train, vals in rows:
+        label = LABELS_PLAIN[dist_name]
+        n_str = str(n_train) if n_train else "—"
+        val_strs = [f"{v:.4f}" if not np.isnan(v) else "" for v in vals]
+        csv_lines.append(f"{label},{m},{n_str}," + ",".join(val_strs))
+    csv_path = os.path.join(output_dir, f"{dataset_name}_results.csv")
+    with open(csv_path, "w") as f:
+        f.write("\n".join(csv_lines))
+    print(f"csv saved to {csv_path}")
+
+    # --- 3. wandb table ---
+    try:
+        import wandb
+        if wandb.run is not None:
+            columns = ["Method", "Metric", "N_train"] + [f"d={d}" for d in dims]
+            wb_rows = []
+            for dist_name, m, n_train, vals in rows:
+                label = LABELS_PLAIN[dist_name]
+                wb_rows.append([label, m, n_train or "—"] + [round(v, 4) if not np.isnan(v) else None for v in vals])
+            wb_table = wandb.Table(columns=columns, data=wb_rows)
+            wandb.log({f"{dataset_name}_results": wb_table})
+            print(f"logged wandb table: {dataset_name}_results")
+    except Exception as e:
+        print(f"wandb table logging skipped: {e}")
+
+    return tex_path
 
 
 @torch.no_grad()
@@ -1182,8 +1285,8 @@ def plot_latent_dimension_exploration(
     )
 
     plt.title(
-        f"{dist.capitalize()} Latent Space Exploration (d={latent_dim})\n"
-        f"Each row shows variations along one dimension {range_str}"
+        f"{dist.capitalize()} Latent Space Traversal ($d={latent_dim}$)\n"
+        f"Each Row Shows Variations Along One Latent Dimension {range_str}"
     )
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")

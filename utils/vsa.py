@@ -176,9 +176,9 @@ def test_bundle_capacity(
             marker="o",
             capsize=3,
         )
-        plt.xlabel("bundled vectors k")
-        plt.ylabel("retrieval accuracy")
-        plt.title(f"bundle capacity (d={d}, N={n_items})")
+        plt.xlabel("Number of Bundled Vectors ($k$)")
+        plt.ylabel("Retrieval Accuracy")
+        plt.title(f"Bundle Capacity ($d={d}$, $N={n_items}$)")
         plt.grid(True, alpha=0.3)
         plt.ylim(0, 1.05)
         plt.tight_layout()
@@ -298,8 +298,8 @@ def test_binding_unbinding_pairs(
 
     if plot:
         plt.figure(figsize=(8, 5))
-        braid_label = " [BRAIDED]" if use_braiding else ""
-        bind_label = " (random keys)" if bind_with_random else ""
+        braid_label = " (Braided)" if use_braiding else ""
+        bind_label = " (Random Keys)" if bind_with_random else ""
         plt.errorbar(
             results["k"],
             results["accuracy"],
@@ -308,10 +308,10 @@ def test_binding_unbinding_pairs(
             capsize=3,
             color="red",
         )
-        plt.xlabel("# of Bundled Role-Filler Pairs (k)")
+        plt.xlabel("Number of Bundled Role-Filler Pairs ($k$)")
         plt.ylabel("Unbinding Accuracy")
         plt.title(
-            f"role-filler query capacity{bind_label}{braid_label} (d={d}, N={n_items}, {unbind_method})"
+            f"Role-Filler Query Capacity{bind_label}{braid_label} ($d={d}$, $N={n_items}$)"
         )
         plt.grid(True, alpha=0.3)
         plt.ylim(0, 1.05)
@@ -465,13 +465,13 @@ def test_per_class_bundle_capacity_k_items(
             ax_sim = fig.add_subplot(gs[0])
             im = ax_sim.imshow(avg_similarity, cmap="viridis", aspect="auto")
             if per_class_braid:
-                braid_label = " [PER-CLASS BRAID]"
+                braid_label = " (Per-Class Braiding)"
             elif use_braiding:
-                braid_label = " [RANDOM BRAID]"
+                braid_label = " (Random Braiding)"
             else:
                 braid_label = ""
             ax_sim.set_title(
-                f"bundle similarity matrix{braid_label}\n({items_per_class} item per class, {n_classes} classes)",
+                f"Bundle Similarity Matrix{braid_label}\n({items_per_class} Item per Class, {n_classes} Classes)",
                 fontsize=14,
                 fontweight="bold",
             )
@@ -489,8 +489,8 @@ def test_per_class_bundle_capacity_k_items(
             ax_sim.set_yticks(range(len(tick_labels)))
             ax_sim.set_xticklabels(tick_labels, rotation=90)
             ax_sim.set_yticklabels(tick_labels)
-            ax_sim.set_xlabel("bundle", fontsize=12)
-            ax_sim.set_ylabel("bundle", fontsize=12)
+            ax_sim.set_xlabel("Bundle Index", fontsize=12)
+            ax_sim.set_ylabel("Bundle Index", fontsize=12)
             plt.colorbar(im, ax=ax_sim, label="cosine similarity")
 
             ax_images = fig.add_subplot(gs[1])
@@ -536,7 +536,7 @@ def test_per_class_bundle_capacity_k_items(
                     ax_images.imshow(canvas)
 
                 ax_images.set_title(
-                    f"images ({n_classes} classes × {items_per_class} items)",
+                    f"Images ({n_classes} Classes $\\times$ {items_per_class} Items)",
                     fontsize=12,
                     fontweight="bold",
                 )

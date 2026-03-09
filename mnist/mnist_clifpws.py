@@ -95,7 +95,7 @@ def plot_reconstructions(model, loader, device, filepath):
 
         plt.figure(figsize=(10, 3))
         plt.imshow(grid.permute(1, 2, 0))
-        plt.title("top: original images | bottom: reconstructed images")
+        plt.title("Top: Original Images | Bottom: Reconstructed Images")
         plt.axis("off")
         plt.savefig(filepath, dpi=200, bbox_inches="tight")
         plt.close()
@@ -148,7 +148,7 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
         grid = tu.make_grid(x_recon_interp, nrow=steps, pad_value=0.5)
         plt.figure(figsize=(12, 2))
         plt.imshow(grid.cpu().permute(1, 2, 0))
-        plt.title(f"latent space interpolation ({model.distribution.upper()})")
+        plt.title(f"Latent Space Interpolation ({model.distribution.upper()}-VAE)")
         plt.axis("off")
         plt.savefig(filepath, dpi=200, bbox_inches="tight")
         plt.close()
@@ -174,7 +174,7 @@ def plot_latent_space(model, loader, device, filepath, n_plot=1000):
         s=10,
         alpha=0.8,
     )
-    plt.title(f"t-sne latent space for {model.distribution.upper()}-vae")
+    plt.title(f"t-SNE Latent Space ({model.distribution.upper()}-VAE)")
     plt.xticks([])
     plt.yticks([])
     plt.savefig(filepath, dpi=200, bbox_inches="tight")

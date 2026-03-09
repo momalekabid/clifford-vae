@@ -295,7 +295,7 @@ def plot_latent_interpolations(model, fixed_pairs, device, save_dir, n_steps=10)
                     axes[row, 0].imshow(img1_show.squeeze(0), cmap="gray")
                 else:
                     axes[row, 0].imshow(img1_show.permute(1, 2, 0))
-                axes[row, 0].set_title(f"class {c1}")
+                axes[row, 0].set_title(f"Class {c1}")
                 axes[row, 0].axis("off")
 
                 for i, t in enumerate(ts):
@@ -314,7 +314,7 @@ def plot_latent_interpolations(model, fixed_pairs, device, save_dir, n_steps=10)
                     axes[row, -1].imshow(img2_show.squeeze(0), cmap="gray")
                 else:
                     axes[row, -1].imshow(img2_show.permute(1, 2, 0))
-                axes[row, -1].set_title(f"class {c2}")
+                axes[row, -1].set_title(f"Class {c2}")
                 axes[row, -1].axis("off")
 
         plt.suptitle(f"latent interpolation ({interp_name})", fontsize=14)
@@ -361,7 +361,7 @@ def plot_latent_distributions(model, loader, device, save_path, n_dims=50, n_sam
         ax = axes[r, c]
         vals = mu[:, i]
         ax.hist(vals, bins=40, density=True, alpha=0.8, color="steelblue", edgecolor="none")
-        ax.set_title(f"latent var {i+1}", fontsize=7)
+        ax.set_title(f"Latent Dimension {i+1}", fontsize=7)
         ax.tick_params(labelsize=5)
 
     for i in range(n_show, n_rows * n_cols):
@@ -429,7 +429,7 @@ def plot_latent_tsne(model, loader, device, save_path, n_samples=2000):
             c=labels, cmap=plt.get_cmap("tab10", n_classes),
             s=8, alpha=0.7,
         )
-        ax.set_title(f"perplexity={perp}")
+        ax.set_title(f"Perplexity = {perp}")
         ax.set_xticks([])
         ax.set_yticks([])
 
@@ -660,7 +660,7 @@ def main(args):
         BC_K_RANGE = list(range(5, 51, 5))   # bundle capacity
         RF_K_RANGE = list(range(2, 21, 2))    # role-filler
 
-        across_dim_results = {d: {"knn": [], "fid": [], "dims": []} for d in distributions}
+        across_dim_results = {d: {"knn_100": [], "knn_600": [], "knn_1000": [], "f1_100": [], "f1_600": [], "f1_1000": [], "dims": []} for d in distributions}
 
         for latent_dim in latent_dims:
             dim_results = {}  # dist_name -> metrics dict
@@ -842,20 +842,40 @@ def main(args):
                         # === test 3: role-filler unbinding (schlegel et al. sec 3.3) ===
                         t0 = time.time()
                         print(f"running role-filler unbinding test ({dist_name})...")
-                        role_filler_raw = vsa_binding_unbinding(
-                            d=item_memory.shape[-1],
-                            n_items=1000,
-                            k_range=RF_K_RANGE,
-                            n_trials=20,
-                            normalize=normalize_vectors,
-                            device=DEVICE,
-                            plot=True,
-                            unbind_method="*",
-                            save_dir=output_dir,
-                            item_memory=item_memory,
-                            bind_with_random=True,
-                        )
-                        print(f"  completed in {time.time() - t0:.2f}s")
+                        # role-filler variants: (random_keys, braiding) combos
+                        rf_variants = [
+                            (True, False, "role_filler_capacity"),
+                            (False, False, "role_filler_no_random_keys"),
+                            (True, True, "role_filler_braided"),
+                            (False, True, "role_filler_no_random_keys_braided"),
+                        ]
+                        rf_results = {}
+                        for bind_rand, braid, rf_name in rf_variants:
+                            label = f"bind_with_random={bind_rand}, braiding={braid}"
+                            print(f"  running role-filler ({label})...")
+                            rf_res = vsa_binding_unbinding(
+                                d=item_memory.shape[-1],
+                                n_items=1000,
+                                k_range=RF_K_RANGE,
+                                n_trials=20,
+                                normalize=normalize_vectors,
+                                device=DEVICE,
+                                plot=True,
+                                unbind_method="*",
+                                save_dir=output_dir,
+                                item_memory=item_memory,
+                                bind_with_random=bind_rand,
+                                use_braiding=braid,
+                            )
+                            rf_results[rf_name] = rf_res
+                            # rename saved plot to variant name
+                            default_plot = os.path.join(output_dir, "role_filler_capacity.png")
+                            variant_plot = os.path.join(output_dir, f"{rf_name}.png")
+                            if os.path.exists(default_plot) and rf_name != "role_filler_capacity":
+                                os.rename(default_plot, variant_plot)
+
+                        role_filler_raw = rf_results.get("role_filler_capacity", {})
+                        print(f"  all role-filler variants completed in {time.time() - t0:.2f}s")
 
                         t0 = time.time()
                         print(f"running self-binding test ({dist_name})...")
@@ -1004,9 +1024,11 @@ def main(args):
                         bc_plot = os.path.join(output_dir, "bundle_capacity.png")
                         if os.path.exists(bc_plot):
                             images["bundle_capacity"] = bc_plot
-                        rf_plot = os.path.join(output_dir, "role_filler_capacity.png")
-                        if os.path.exists(rf_plot):
-                            images["role_filler_capacity"] = rf_plot
+                        for rf_name in ["role_filler_capacity", "role_filler_no_random_keys",
+                                        "role_filler_braided", "role_filler_no_random_keys_braided"]:
+                            rf_plot = os.path.join(output_dir, f"{rf_name}.png")
+                            if os.path.exists(rf_plot):
+                                images[rf_name] = rf_plot
 
                         sp = fourier_star.get("similarity_after_k_binds_plot_path")
                         sd = fourier_perp.get("similarity_after_k_binds_plot_path")
@@ -1129,16 +1151,31 @@ def main(args):
                         dim_results[dist_name] = {
                             "bundle_cap": bundle_cap_raw,
                             "role_filler": role_filler_raw,
+                            "role_filler_variants": rf_results,
                             "self_binding_k_sims": fourier_star.get("k_sims", []),
                             "self_binding_k_values": fourier_star.get("k_values", []),
                             "knn_acc": knn_metrics.get("knn_acc_1000", 0.0),
                             "gen_fid": gen_fid,
                         }
                         across_dim_results[dist_name]["dims"].append(latent_dim)
-                        across_dim_results[dist_name]["knn"].append(
+                        across_dim_results[dist_name]["knn_100"].append(
+                            knn_metrics.get("knn_acc_100", 0.0)
+                        )
+                        across_dim_results[dist_name]["knn_600"].append(
+                            knn_metrics.get("knn_acc_600", 0.0)
+                        )
+                        across_dim_results[dist_name]["knn_1000"].append(
                             knn_metrics.get("knn_acc_1000", 0.0)
                         )
-                        across_dim_results[dist_name]["fid"].append(gen_fid)
+                        across_dim_results[dist_name]["f1_100"].append(
+                            knn_metrics.get("knn_f1_100", 0.0)
+                        )
+                        across_dim_results[dist_name]["f1_600"].append(
+                            knn_metrics.get("knn_f1_600", 0.0)
+                        )
+                        across_dim_results[dist_name]["f1_1000"].append(
+                            knn_metrics.get("knn_f1_1000", 0.0)
+                        )
 
                     logger.finish_run()
 
