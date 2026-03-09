@@ -466,18 +466,6 @@ _CLASS_NAMES = {
         "ship",
         "truck",
     ],
-    "cinic10": [
-        "airplane",
-        "automobile",
-        "bird",
-        "cat",
-        "deer",
-        "dog",
-        "frog",
-        "horse",
-        "ship",
-        "truck",
-    ],
 }
 
 
