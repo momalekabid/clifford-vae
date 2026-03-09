@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import numpy as np
 import torch
@@ -10,11 +11,10 @@ import matplotlib.pyplot as plt
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.manifold import TSNE
-from sklearn.decomposition import PCA
-from collections import defaultdict
 import time
 import json
 
+import torch.nn.functional as F
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,12 +29,18 @@ from utils.wandb_utils import (
     plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
+    plot_latent_dimension_exploration,
+    plot_cross_dist_comparison_dim,
+    plot_across_dims_comparison,
 )
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
-    test_per_class_bundle_capacity_two_items,
-    test_binding_unbinding_with_self_binding,
+    test_per_class_bundle_capacity_k_items,
+    # test_binding_unbinding_with_self_binding,
+    bind as vsa_bind,
+    unbind as vsa_unbind,
+    normalize_vectors as vsa_normalize,
 )
 
 
@@ -47,18 +53,28 @@ DEVICE = (
 
 def train_epoch(model, loader, optimizer, device, beta):
     model.train()
-    sums = {"total": 0.0, "recon": 0.0, "kld": 0.0}
+    sums = {"total": 0.0, "recon": 0.0, "kld": 0.0, "entropy": 0.0}
     concentration_stats = []
+    sigma_0_vals = []
+    sigma_1_vals = []
+    effective_beta_vals = []
+
     for x, _ in loader:
         x = x.to(device)
         optimizer.zero_grad()
         x_recon, q_z, p_z, _ = model(x)
         losses = model.compute_loss(x, x_recon, q_z, p_z, beta)
         losses["total_loss"].backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         for k in ["total", "recon", "kld"]:
             sums[k] += losses[f"{k}_loss"].item() * x.size(0)
+        sums["entropy"] += losses["entropy"].item() * x.size(0)
+
+        if model.use_learnable_beta:
+            sigma_0_vals.append(losses["sigma_0"])
+            sigma_1_vals.append(losses["sigma_1"])
+        effective_beta_vals.append(losses["effective_beta"] if isinstance(losses["effective_beta"], float) else losses["effective_beta"].item())
 
         if hasattr(model, "distribution") and model.distribution in [
             "powerspherical",
@@ -68,7 +84,14 @@ def train_epoch(model, loader, optimizer, device, beta):
                 concentration_stats.append(q_z.concentration.detach())
 
     n = len(loader.dataset)
-    result = {f"train/{k}_loss": v / n for k, v in sums.items()}
+    result = {f"train/{k}_loss": v / n for k, v in sums.items() if k != "entropy"}
+    result["train/entropy"] = sums["entropy"] / n
+
+    if model.use_learnable_beta and sigma_0_vals:
+        result["train/sigma_0"] = np.mean(sigma_0_vals)
+        result["train/sigma_1"] = np.mean(sigma_1_vals)
+    if effective_beta_vals:
+        result["train/effective_beta"] = np.mean(effective_beta_vals)
 
     if concentration_stats and hasattr(model, "distribution"):
         all_concentrations = torch.cat(concentration_stats, dim=0)
@@ -90,8 +113,12 @@ def train_epoch(model, loader, optimizer, device, beta):
 
 def test_epoch(model, loader, device):
     model.eval()
-    sums = {"total": 0.0, "recon": 0.0, "kld": 0.0}
+    sums = {"total": 0.0, "recon": 0.0, "kld": 0.0, "entropy": 0.0}
     concentration_stats = []
+    sigma_0_vals = []
+    sigma_1_vals = []
+    effective_beta_vals = []
+
     with torch.no_grad():
         for x, _ in loader:
             x = x.to(device)
@@ -99,6 +126,12 @@ def test_epoch(model, loader, device):
             losses = model.compute_loss(x, x_recon, q_z, p_z, beta=1.0)
             for k in ["total", "recon", "kld"]:
                 sums[k] += losses[f"{k}_loss"].item() * x.size(0)
+            sums["entropy"] += losses["entropy"].item() * x.size(0)
+
+            if model.use_learnable_beta:
+                sigma_0_vals.append(losses["sigma_0"])
+                sigma_1_vals.append(losses["sigma_1"])
+            effective_beta_vals.append(losses["effective_beta"] if isinstance(losses["effective_beta"], float) else losses["effective_beta"].item())
 
             if hasattr(model, "distribution") and model.distribution in [
                 "powerspherical",
@@ -108,7 +141,14 @@ def test_epoch(model, loader, device):
                     concentration_stats.append(q_z.concentration.detach())
 
     n = len(loader.dataset)
-    result = {f"test/{k}_loss": v / n for k, v in sums.items()}
+    result = {f"test/{k}_loss": v / n for k, v in sums.items() if k != "entropy"}
+    result["test/entropy"] = sums["entropy"] / n
+
+    if model.use_learnable_beta and sigma_0_vals:
+        result["test/sigma_0"] = np.mean(sigma_0_vals)
+        result["test/sigma_1"] = np.mean(sigma_1_vals)
+    if effective_beta_vals:
+        result["test/effective_beta"] = np.mean(effective_beta_vals)
 
     if concentration_stats and hasattr(model, "distribution"):
         all_concentrations = torch.cat(concentration_stats, dim=0)
@@ -128,7 +168,6 @@ def test_epoch(model, loader, device):
     return result
 
 
-# evaluation and visualization helpers
 def save_reconstructions(model, loader, device, path, n_images=10):
     model.eval()
     x, _ = next(iter(loader))
@@ -142,55 +181,264 @@ def save_reconstructions(model, loader, device, path, n_images=10):
     return path
 
 
-def generate_tsne_plot(model, loader, device, path, n_samples=2000):
+def slerp(z1, z2, t):
+    """spherical linear interpolation between two vectors"""
+    z1_norm = z1 / z1.norm(dim=-1, keepdim=True)
+    z2_norm = z2 / z2.norm(dim=-1, keepdim=True)
+    dot = (z1_norm * z2_norm).sum(dim=-1, keepdim=True).clamp(-1, 1)
+    omega = torch.acos(dot)
+    sin_omega = torch.sin(omega)
+    if sin_omega.abs().min() < 1e-6:
+        return (1 - t) * z1_norm + t * z2_norm
+    s1 = torch.sin((1 - t) * omega) / sin_omega
+    s2 = torch.sin(t * omega) / sin_omega
+    return s1 * z1_norm + s2 * z2_norm
+
+
+def lerp(z1, z2, t):
+    """linear interpolation between two vectors"""
+    return (1 - t) * z1 + t * z2
+
+
+def clifford_manifold_interp(z1, z2, t, latent_dim):
+    """
+    Converts to angle space, interpolates angles (with wraparound), converts back.
+    this keeps the interpolation on the torus rather than cutting through ambient space.
+    """
+    freq1 = torch.fft.fft(z1, dim=-1)
+    freq2 = torch.fft.fft(z2, dim=-1)
+    angles1 = torch.angle(freq1[..., :latent_dim])
+    angles2 = torch.angle(freq2[..., :latent_dim])
+    diff = angles2 - angles1
+    diff = torch.atan2(torch.sin(diff), torch.cos(diff))
+    angles_interp = angles1 + t * diff
+
+    n = 2 * latent_dim
+    theta_s = torch.zeros((*angles_interp.shape[:-1], n), device=z1.device, dtype=z1.dtype)
+    theta_s[..., 1:latent_dim] = angles_interp[..., 1:]
+    theta_s[..., -latent_dim+1:] = -torch.flip(angles_interp[..., 1:], dims=(-1,))
+    samples_c = torch.exp(1j * theta_s)
+    return torch.fft.ifft(samples_c, dim=-1).real
+
+
+def get_fixed_interp_pairs(loader, n_pairs=5, seed=42):
+    """
+    Uses a fixed seed so the same images are used across all distribution runs;
+    Returns a list of (img1, img2, class1, class2) tuples (raw cpu tensors).
+    """
+    rng = np.random.RandomState(seed)
+
+    class_images = {}
+    for x, y in loader:
+        for i in range(len(y)):
+            label = y[i].item()
+            if label not in class_images:
+                class_images[label] = x[i].cpu()
+        if len(class_images) >= 10:
+            break
+
+    classes = sorted(class_images.keys())
+    pairs = []
+    used = set()
+    for _ in range(n_pairs * 10):
+        c1, c2 = rng.choice(classes, 2, replace=False)
+        key = (min(c1, c2), max(c1, c2))
+        if key not in used:
+            used.add(key)
+            pairs.append((class_images[c1], class_images[c2], c1, c2))
+        if len(pairs) >= n_pairs:
+            break
+
+    return pairs
+
+
+def plot_latent_interpolations(model, fixed_pairs, device, save_dir, n_steps=10):
+    """
+    Clifford: generates both slerp and manifold interpolations.
+    Powerspherical: uses slerp. for gaussian: uses lerp.
+    """
     model.eval()
-    latents, labels = [], []
-    with torch.no_grad():
-        for x, y in loader:
-            _, _, _, mu = model(x.to(device))
-            latents.append(mu.cpu().numpy())
-            labels.append(y.numpy())
-            if len(np.concatenate(labels)) >= n_samples:
-                break
-    Z = np.concatenate(latents)[:n_samples]
-    Y = np.concatenate(labels)[:n_samples]
-    tsne = TSNE(n_components=2, perplexity=30, max_iter=1000, random_state=42)
-    pts = tsne.fit_transform(Z)
-    plt.figure(figsize=(10, 8))
-    sc = plt.scatter(pts[:, 0], pts[:, 1], c=Y, cmap="tab10", s=8, alpha=0.8)
-    plt.colorbar(sc, ticks=np.unique(Y))
-    plt.title("t-SNE of Latent Means (μ)")
-    plt.savefig(path, dpi=500)
-    plt.close()
-    return path
+    dist = getattr(model, "distribution", "gaussian")
+    latent_dim = getattr(model, "latent_dim", None)
+
+    n_pairs = len(fixed_pairs)
+
+    if dist == "clifford":
+        interp_configs = [
+            ("slerp", slerp),
+            ("manifold", lambda z1, z2, t: clifford_manifold_interp(z1, z2, t, latent_dim)),
+        ]
+    elif dist == "powerspherical":
+        interp_configs = [("slerp", slerp)]
+    else:
+        interp_configs = [("lerp", lerp)]
+
+    saved_paths = []
+    ts = torch.linspace(0, 1, n_steps).to(device)
+
+    for interp_name, interp_fn in interp_configs:
+        fig, axes = plt.subplots(n_pairs, n_steps + 2, figsize=(2 * (n_steps + 2), 2 * n_pairs))
+        if n_pairs == 1:
+            axes = axes.reshape(1, -1)
+
+        with torch.no_grad():
+            for row, (img1, img2, c1, c2) in enumerate(fixed_pairs):
+                x1 = img1.unsqueeze(0).to(device)
+                x2 = img2.unsqueeze(0).to(device)
+                mu1, params1 = model.encoder(x1)
+                mu2, params2 = model.encoder(x2)
+                z1, _, _ = model.reparameterize(mu1, params1)
+                z2, _, _ = model.reparameterize(mu2, params2)
+
+                img1_show = (img1 * 0.5 + 0.5).clamp(0, 1)
+                if img1_show.shape[0] == 1:
+                    axes[row, 0].imshow(img1_show.squeeze(0), cmap="gray")
+                else:
+                    axes[row, 0].imshow(img1_show.permute(1, 2, 0))
+                axes[row, 0].set_title(f"Class {c1}")
+                axes[row, 0].axis("off")
+
+                for i, t in enumerate(ts):
+                    z_interp = interp_fn(z1, z2, t.item())
+                    x_recon = model.decoder(z_interp)
+                    img = (x_recon[0].cpu() * 0.5 + 0.5).clamp(0, 1)
+                    if img.shape[0] == 1:
+                        axes[row, i + 1].imshow(img.squeeze(0), cmap="gray")
+                    else:
+                        axes[row, i + 1].imshow(img.permute(1, 2, 0))
+                    axes[row, i + 1].set_title(f"t={t.item():.1f}")
+                    axes[row, i + 1].axis("off")
+
+                img2_show = (img2 * 0.5 + 0.5).clamp(0, 1)
+                if img2_show.shape[0] == 1:
+                    axes[row, -1].imshow(img2_show.squeeze(0), cmap="gray")
+                else:
+                    axes[row, -1].imshow(img2_show.permute(1, 2, 0))
+                axes[row, -1].set_title(f"Class {c2}")
+                axes[row, -1].axis("off")
+
+        plt.suptitle(f"latent interpolation ({interp_name})", fontsize=14)
+        plt.tight_layout()
+        save_path = os.path.join(save_dir, f"interpolation_{interp_name}.png")
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+        saved_paths.append(save_path)
+
+    return saved_paths[0] if saved_paths else None
 
 
-def generate_pca_plot(model, loader, device, path, n_samples=2000):
+def plot_latent_distributions(model, loader, device, save_path, n_dims=50, n_samples=2000):
+    """
+    plot histograms of individual latent dimensions (mu from encoder).
+    contrasts the learned distribution shape across dimensions -- useful for
+    seeing how gaussian vs clifford vs powerspherical latents differ structurally.
+    """
     model.eval()
-    latents, labels = [], []
+    dist = getattr(model, "distribution", "gaussian")
+
+    all_mu = []
+    n_collected = 0
     with torch.no_grad():
-        for x, y in loader:
-            _, _, _, mu = model(x.to(device))
-            latents.append(mu.cpu().numpy())
-            labels.append(y.numpy())
-            if len(np.concatenate(labels)) >= n_samples:
+        for x, _ in loader:
+            x = x.to(device)
+            mu, _ = model.encoder(x)
+            all_mu.append(mu.cpu())
+            n_collected += len(x)
+            if n_collected >= n_samples:
                 break
-    Z = np.concatenate(latents)[:n_samples]
-    Y = np.concatenate(labels)[:n_samples]
 
-    pca = PCA(n_components=min(50, Z.shape[1]))
-    Z_pca = pca.fit_transform(Z)
+    mu = torch.cat(all_mu, dim=0)[:n_samples].numpy()
+    latent_dim = mu.shape[1]
+    n_show = min(n_dims, latent_dim)
 
-    plt.figure(figsize=(8, 6))
-    sc = plt.scatter(Z_pca[:, 0], Z_pca[:, 1], c=Y, cmap="tab10", s=8, alpha=0.8)
-    plt.xlabel("PC1")
-    plt.ylabel("PC2")
-    plt.title("PCA of Latent Means (μ)")
-    plt.colorbar(sc, ticks=np.unique(Y))
+    n_cols = 10
+    n_rows = (n_show + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(2 * n_cols, 2 * n_rows))
+    axes = np.array(axes).reshape(n_rows, n_cols)
+
+    for i in range(n_show):
+        r, c = divmod(i, n_cols)
+        ax = axes[r, c]
+        vals = mu[:, i]
+        ax.hist(vals, bins=40, density=True, alpha=0.8, color="steelblue", edgecolor="none")
+        ax.set_title(f"Latent Dimension {i+1}", fontsize=7)
+        ax.tick_params(labelsize=5)
+
+    for i in range(n_show, n_rows * n_cols):
+        r, c = divmod(i, n_cols)
+        axes[r, c].axis("off")
+
+    mean_std = np.std(mu, axis=0).mean()
+    mean_mean = np.mean(np.abs(np.mean(mu, axis=0)))
+    fig.suptitle(
+        f"{dist} latent space distribution (d={latent_dim}, n={len(mu)})\n"
+        f"avg |mean|={mean_mean:.3f}, avg std={mean_std:.3f}",
+        fontsize=11,
+    )
     plt.tight_layout()
-    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.savefig(save_path, dpi=150)
     plt.close()
-    return path
+    return save_path
+
+
+def plot_latent_tsne(model, loader, device, save_path, n_samples=2000):
+    """
+    t-sne visualization of latent space colored by class label.
+    runs multiple perplexities (5, 30, 50) since each reveals different
+    structure scales — low perplexity shows local clusters, high shows
+    global geometry. uses 5000 iterations for proper convergence.
+    see: https://distill.pub/2016/misread-tsne/
+    """
+    model.eval()
+    dist = getattr(model, "distribution", "gaussian")
+
+    all_mu = []
+    all_labels = []
+    n_collected = 0
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device)
+            _, _, _, mu = model(x)
+            all_mu.append(mu.cpu())
+            all_labels.append(y)
+            n_collected += len(x)
+            if n_collected >= n_samples:
+                break
+
+    mu = torch.cat(all_mu, dim=0)[:n_samples].numpy()
+    labels = torch.cat(all_labels, dim=0)[:n_samples].numpy()
+    n_classes = len(np.unique(labels))
+
+    perplexities = [5, 30, 50]
+    fig, axes = plt.subplots(1, len(perplexities), figsize=(6 * len(perplexities), 5))
+
+    for i, perp in enumerate(perplexities):
+        print(f"  running t-sne (perplexity={perp}) on {len(mu)} samples (d={mu.shape[1]})...")
+        tsne = TSNE(
+            n_components=2,
+            random_state=42,
+            perplexity=perp,
+            max_iter=5000,
+            learning_rate="auto",
+        )
+        z_2d = tsne.fit_transform(mu)
+
+        ax = axes[i]
+        scatter = ax.scatter(
+            z_2d[:, 0], z_2d[:, 1],
+            c=labels, cmap=plt.get_cmap("tab10", n_classes),
+            s=8, alpha=0.7,
+        )
+        ax.set_title(f"Perplexity = {perp}")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    plt.colorbar(scatter, ax=axes[-1], label="class")
+    fig.suptitle(f"{dist}: t-sne of latent space (d={mu.shape[1]})", fontsize=13)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
 
 
 def filter_dataset_by_class(dataset, exclude_class):
@@ -211,8 +459,75 @@ def get_excluded_class_subset(dataset, exclude_class):
     return torch.utils.data.Subset(dataset, indices) if indices else None
 
 
+
+def sample_prior_z(dist_name, latent_dim, n, device, l2_normalize=False):
+    """sample n latent vectors from the prior.
+    clifford: uniform on (S^1)^{d-1} via d-1 free angles (DC+Nyquist fixed at 0).
+    powerspherical: uniform on S^{d-1} (κ→0 limit).
+    gaussian: isotropic N(0,I), or unit sphere if l2_normalize.
+    """
+    if dist_name == "clifford":
+        angles = torch.rand(n, latent_dim, device=device) * (2 * math.pi)
+        freq_dim = 2 * latent_dim
+        theta_s = torch.zeros(n, freq_dim, device=device)
+        theta_s[:, 1:latent_dim] = angles[:, 1:]
+        theta_s[:, -latent_dim + 1:] = -torch.flip(angles[:, 1:], dims=(-1,))
+        return torch.fft.ifft(torch.exp(1j * theta_s), dim=-1).real.float()
+    elif dist_name == "powerspherical":
+        z = torch.randn(n, latent_dim, device=device)
+        return z / z.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    else:
+        z = torch.randn(n, latent_dim, device=device)
+        if l2_normalize:
+            z = z / z.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        return z
+
+
+def compute_generation_fid(model, dist_name, latent_dim, test_loader, device,
+                            in_channels, n_samples=2048, batch_size=256):
+    """self-FID: frechet inception distance between prior samples (decoded) and test set.
+    lower = generated images closer to the real data distribution.
+    requires torchmetrics; silently returns nan if not installed.
+    """
+    try:
+        from torchmetrics.image.fid import FrechetInceptionDistance
+    except ImportError:
+        print("  torchmetrics not available, skipping generation FID")
+        return float("nan")
+
+    model.eval()
+    fid_metric = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+
+    n_real = 0
+    with torch.no_grad():
+        for x, _ in test_loader:
+            x_01 = (x.to(device) * 0.5 + 0.5).clamp(0, 1)
+            if in_channels == 1:
+                x_01 = x_01.repeat(1, 3, 1, 1)
+            fid_metric.update(x_01, real=True)
+            n_real += len(x)
+            if n_real >= n_samples:
+                break
+
+    l2_norm = getattr(model, "l2_normalize", False)
+    n_done = 0
+    with torch.no_grad():
+        while n_done < n_samples:
+            bs = min(batch_size, n_samples - n_done)
+            z = sample_prior_z(dist_name, latent_dim, bs, device, l2_normalize=l2_norm)
+            imgs_01 = (model.decoder(z) * 0.5 + 0.5).clamp(0, 1)
+            if in_channels == 1:
+                imgs_01 = imgs_01.repeat(1, 3, 1, 1)
+            fid_metric.update(imgs_01, real=False)
+            n_done += bs
+
+    score = fid_metric.compute().item()
+    fid_metric.reset()
+    return score
+
+
 def perform_knn_evaluation(
-    model, train_loader, test_loader, device, n_samples_list=[100, 600, 1000, 2048]
+    model, train_loader, test_loader, device, n_samples_list=[100, 600, 1000]
 ):
     """k-nn classification on latent embeddings with multiple training sample sizes."""
     print("knn eval in progress")
@@ -230,7 +545,6 @@ def perform_knn_evaluation(
     X_train_full, y_train_full = encode_dataset(train_loader)
     X_test, y_test = encode_dataset(test_loader)
 
-    # cosine metric for hyperspherical distributions
     metric = (
         "cosine"
         if getattr(model, "distribution", None) in ["powerspherical", "clifford"]
@@ -269,22 +583,36 @@ def main(args):
     print(f"Device: {DEVICE}")
     logger = WandbLogger(args)
 
-    latent_dims = (
-        args.latent_dims
-        if args.latent_dims
-        else [2, 4, 128, 256, 512, 1024, 2048, 4096]
-    )
-    distributions = ["clifford", "gaussian", "powerspherical"]
+    latent_dims = args.latent_dims if args.latent_dims else [2048, 4096]
+    distributions = ["clifford", "powerspherical", "gaussian", "gaussian_nol2"]
     datasets_to_test = ["fashionmnist", "cifar10"]
-    dataset_map = {"fashionmnist": datasets.FashionMNIST, "cifar10": datasets.CIFAR10}
+
+    # per-distribution lr overrides
+    dist_lr = {
+        "clifford": args.lr,
+        "powerspherical": 1e-4,
+        "gaussian": args.lr,
+        "gaussian_nol2": args.lr,
+    }
+
+    dataset_map = {
+        "fashionmnist": datasets.FashionMNIST,
+        "cifar10": datasets.CIFAR10,
+    }
+
+    class_names_map = {
+        "fashionmnist": ["tshirt", "trouser", "pullover", "dress", "coat",
+                         "sandal", "shirt", "sneaker", "bag", "boot"],
+        "cifar10": ["plane", "auto", "bird", "cat", "deer",
+                    "dog", "frog", "horse", "ship", "truck"],
+    }
 
     for dataset_name in datasets_to_test:
         is_color = dataset_name == "cifar10"
         in_channels = 3 if is_color else 1
-        IMG_SHAPE = (
-            (3, 32, 32) if is_color else (1, 32, 32)
-        )  # cifar: 3x32x32, fashion: 1x32x32
+        IMG_SHAPE = (3, 32, 32) if is_color else (1, 32, 32)
         dataset_class = dataset_map[dataset_name]
+        class_names = class_names_map[dataset_name]
         norm_mean, norm_std = (
             ((0.5,), (0.5,)) if not is_color else ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         )
@@ -295,6 +623,7 @@ def main(args):
                 transforms.Normalize(norm_mean, norm_std),
             ]
         )
+
         train_set_full = dataset_class(
             "data", train=True, download=True, transform=transform
         )
@@ -302,11 +631,8 @@ def main(args):
             "data", train=False, download=True, transform=transform
         )
 
-        # filter out excluded class if specified
         train_set = filter_dataset_by_class(train_set_full, args.exclude_class)
         test_set = filter_dataset_by_class(test_set_full, args.exclude_class)
-
-        # get excluded class test set for evaluation
         excluded_test_set = get_excluded_class_subset(test_set_full, args.exclude_class)
 
         train_loader = DataLoader(
@@ -328,7 +654,17 @@ def main(args):
                 f"excluding class {args.exclude_class} from training. excluded test set size: {len(excluded_test_set)}"
             )
 
+        # extract once per dataset so all distributions interpolate the same images
+        fixed_interp_pairs = get_fixed_interp_pairs(test_loader, n_pairs=5, seed=42)
+
+        BC_K_RANGE = list(range(5, 51, 5))   # bundle capacity
+        RF_K_RANGE = list(range(2, 21, 2))    # role-filler
+
+        across_dim_results = {d: {"knn_100": [], "knn_600": [], "knn_1000": [], "f1_100": [], "f1_600": [], "f1_1000": [], "dims": []} for d in distributions}
+
         for latent_dim in latent_dims:
+            dim_results = {}  # dist_name -> metrics dict
+
             for dist_name in distributions:
                 for trial in range(args.n_trials):
                     trial_suffix = f"-trial{trial+1}" if args.n_trials > 1 else ""
@@ -340,19 +676,37 @@ def main(args):
                     exp_start_time = time.time()
                     logger.start_run(exp_name, args)
 
-                    l2_norm = args.l2_norm if dist_name == "gaussian" else False
+                    # gaussian_nol2 is gaussian without l2 normalization
+                    if dist_name == "gaussian_nol2":
+                        actual_dist = "gaussian"
+                        l2_norm = False
+                    elif dist_name == "gaussian":
+                        actual_dist = "gaussian"
+                        l2_norm = args.l2_norm
+                    else:
+                        actual_dist = dist_name
+                        l2_norm = False
                     model = VAE(
                         latent_dim=latent_dim,
                         in_channels=in_channels,
-                        distribution=dist_name,
+                        distribution=actual_dist,
                         device=DEVICE,
                         recon_loss_type=args.recon_loss,
                         l1_weight=args.l1_weight,
                         freq_weight=0.0,
                         l2_normalize=l2_norm,
+                        use_learnable_beta=args.use_learnable_beta,
                     )
                     logger.watch_model(model)
-                    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+                    cur_lr = dist_lr.get(dist_name, args.lr)
+                    if args.use_learnable_beta:
+                        sigma_ids = {id(model.log_sigma_0), id(model.log_sigma_1)}
+                        optimizer = optim.AdamW([
+                            {"params": [p for p in model.parameters() if id(p) not in sigma_ids], "lr": cur_lr},
+                            {"params": [model.log_sigma_0, model.log_sigma_1], "lr": cur_lr * 0.1},
+                        ])
+                    else:
+                        optimizer = optim.AdamW(model.parameters(), lr=cur_lr)
                     best = float("inf")
                     patience_counter = 0
                     train_start_time = time.time()
@@ -378,12 +732,16 @@ def main(args):
                         return args.min_beta + (args.max_beta - args.min_beta) * t
 
                     for epoch in range(args.epochs):
-                        beta = kl_beta_for_epoch(epoch)
+                        if args.use_learnable_beta:
+                            beta = 1.0
+                        else:
+                            beta = kl_beta_for_epoch(epoch)
+
                         train_losses = train_epoch(
                             model, train_loader, optimizer, DEVICE, beta
                         )
                         test_losses = test_epoch(model, test_loader, DEVICE)
-                        val = test_losses["test/total_loss"]
+                        val = test_losses["test/recon_loss"] + test_losses["test/kld_loss"]
                         if np.isfinite(val) and val < best:
                             best = val
                             torch.save(
@@ -393,15 +751,16 @@ def main(args):
                         else:
                             patience_counter += 1
 
-                        logger.log_metrics(
-                            {
-                                "epoch": epoch,
-                                **train_losses,
-                                **test_losses,
-                                "best_test_loss": best,
-                                "beta": beta,
-                            }
-                        )
+                        metrics_to_log = {
+                            "epoch": epoch,
+                            **train_losses,
+                            **test_losses,
+                            "best_test_total_loss": best,
+                        }
+                        if not args.use_learnable_beta:
+                            metrics_to_log["beta"] = beta
+
+                        logger.log_metrics(metrics_to_log)
 
                         if args.patience > 0 and patience_counter >= args.patience:
                             print(
@@ -410,14 +769,16 @@ def main(args):
                             break
 
                     train_time = time.time() - train_start_time
-                    print(f"best loss: {best:.4f}, training time: {train_time:.2f}s")
+                    print(
+                        f"best total loss (recon+kld): {best:.4f}, training time: {train_time:.2f}s"
+                    )
 
                     if os.path.exists(f"{output_dir}/best_model.pt"):
-                        model.load_state_dict(
-                            torch.load(
-                                f"{output_dir}/best_model.pt", map_location=DEVICE
-                            )
-                        )
+                        ckpt = torch.load(f"{output_dir}/best_model.pt", map_location=DEVICE)
+                        if not args.use_learnable_beta:
+                            ckpt = {k: v for k, v in ckpt.items()
+                                    if k not in ("log_sigma_0", "log_sigma_1")}
+                        model.load_state_dict(ckpt)
 
                         eval_start_time = time.time()
                         normalize_vectors = True
@@ -439,15 +800,16 @@ def main(args):
                         item_images = torch.cat(images_list, 0)[:1000]
 
                         # === test 1: 1-item-per-class similarity matrix (no braiding) ===
+                        t0 = time.time()
                         print(
                             f"running 1-item-per-class test ({dist_name}, no braiding)..."
                         )
-                        two_per_class_res = test_per_class_bundle_capacity_two_items(
+                        two_per_class_res = test_per_class_bundle_capacity_k_items(
                             d=item_memory.shape[-1],
                             n_items=1000,
                             n_classes=10,
                             items_per_class=1,
-                            n_trials=20,
+                            n_trials=1,
                             normalize=normalize_vectors,
                             device=DEVICE,
                             plot=True,
@@ -456,16 +818,17 @@ def main(args):
                             labels=item_labels,
                             item_images=item_images,
                             use_braiding=False,
+                            class_names=class_names,
                         )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # === test 2: classical bundle capacity (no braiding) ===
-                        print(
-                            f"running classical bundle capacity ({dist_name}, no braiding)..."
-                        )
+                        # === test 2: bundle capacity (schlegel et al. sec 3.1) ===
+                        t0 = time.time()
+                        print(f"running bundle capacity test ({dist_name})...")
                         bundle_cap_raw = vsa_bundle_capacity(
                             d=item_memory.shape[-1],
                             n_items=1000,
-                            k_range=list(range(5, 51, 5)),
+                            k_range=BC_K_RANGE,
                             n_trials=20,
                             normalize=normalize_vectors,
                             device=DEVICE,
@@ -474,100 +837,48 @@ def main(args):
                             item_memory=item_memory,
                             use_braiding=False,
                         )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # test 2b: classical bundle capacity (with braiding)
-                        bundle_cap_raw_braid = {}
-                        if args.braid:
-                            print(
-                                f"running classical bundle capacity ({dist_name}, WITH braiding)..."
-                            )
-                            bundle_cap_raw_braid = vsa_bundle_capacity(
+                        # === test 3: role-filler unbinding (schlegel et al. sec 3.3) ===
+                        t0 = time.time()
+                        print(f"running role-filler unbinding test ({dist_name})...")
+                        # role-filler variants: (random_keys, braiding) combos
+                        rf_variants = [
+                            (True, False, "role_filler_capacity"),
+                            (False, False, "role_filler_no_random_keys"),
+                            (True, True, "role_filler_braided"),
+                            (False, True, "role_filler_no_random_keys_braided"),
+                        ]
+                        rf_results = {}
+                        for bind_rand, braid, rf_name in rf_variants:
+                            label = f"bind_with_random={bind_rand}, braiding={braid}"
+                            print(f"  running role-filler ({label})...")
+                            rf_res = vsa_binding_unbinding(
                                 d=item_memory.shape[-1],
                                 n_items=1000,
-                                k_range=list(range(5, 51, 5)),
+                                k_range=RF_K_RANGE,
                                 n_trials=20,
                                 normalize=normalize_vectors,
                                 device=DEVICE,
                                 plot=True,
-                                save_dir=os.path.join(output_dir, "braided"),
-                                item_memory=item_memory.clone(),
-                                use_braiding=True,
+                                unbind_method="*",
+                                save_dir=output_dir,
+                                item_memory=item_memory,
+                                bind_with_random=bind_rand,
+                                use_braiding=braid,
                             )
-                        bundle_cap_res = {
-                            "bundle_capacity_plot": os.path.join(
-                                output_dir, "bundle_capacity.png"
-                            ),
-                            "bundle_capacity_accuracies": {
-                                k: acc
-                                for k, acc in zip(
-                                    bundle_cap_raw["k"], bundle_cap_raw["accuracy"]
-                                )
-                            },
-                        }
+                            rf_results[rf_name] = rf_res
+                            # rename saved plot to variant name
+                            default_plot = os.path.join(output_dir, "role_filler_capacity.png")
+                            variant_plot = os.path.join(output_dir, f"{rf_name}.png")
+                            if os.path.exists(default_plot) and rf_name != "role_filler_capacity":
+                                os.rename(default_plot, variant_plot)
 
-                        # === test 3: bind-bundle-unbind (no braiding) ===
-                        print(
-                            f"running bind-bundle-unbind test ({dist_name}, no braiding)..."
-                        )
-                        unbind_bundled_raw = vsa_binding_unbinding(
-                            d=item_memory.shape[-1],
-                            n_items=1000,
-                            k_range=list(range(5, 31, 5)),
-                            n_trials=20,
-                            normalize=normalize_vectors,
-                            device=DEVICE,
-                            plot=True,
-                            save_dir=output_dir,
-                            item_memory=item_memory,
-                            use_braiding=False,
-                        )
-                        unbind_bundled_res_inv = {
-                            "unbind_bundled_plot": os.path.join(
-                                output_dir, "unbind_bundled_pairs_inv.png"
-                            ),
-                            "unbind_bundled_accuracies": {
-                                k: acc
-                                for k, acc in zip(
-                                    unbind_bundled_raw["k"],
-                                    unbind_bundled_raw["accuracy"],
-                                )
-                            },
-                        }
+                        role_filler_raw = rf_results.get("role_filler_capacity", {})
+                        print(f"  all role-filler variants completed in {time.time() - t0:.2f}s")
 
-                        # === test 3b: bind-bundle-unbind (WITH braiding) ===
-                        unbind_bundled_raw_braid = {}
-                        unbind_bundled_res_inv_braid = {}
-                        if args.braid:
-                            print(
-                                f"running bind-bundle-unbind test ({dist_name}, WITH braiding)..."
-                            )
-                            unbind_bundled_raw_braid = vsa_binding_unbinding(
-                                d=item_memory.shape[-1],
-                                n_items=1000,
-                                k_range=list(range(5, 31, 5)),
-                                n_trials=20,
-                                normalize=normalize_vectors,
-                                device=DEVICE,
-                                plot=True,
-                                save_dir=os.path.join(output_dir, "braided"),
-                                item_memory=item_memory.clone(),
-                                use_braiding=True,
-                            )
-                            unbind_bundled_res_inv_braid = {
-                                "unbind_bundled_plot_braid": os.path.join(
-                                    output_dir,
-                                    "braided",
-                                    "unbind_bundled_pairs_inv_braided.png",
-                                ),
-                                "unbind_bundled_accuracies_braid": {
-                                    k: acc
-                                    for k, acc in zip(
-                                        unbind_bundled_raw_braid["k"],
-                                        unbind_bundled_raw_braid["accuracy"],
-                                    )
-                                },
-                            }
-
+                        t0 = time.time()
+                        print(f"running self-binding test ({dist_name})...")
                         fourier_star = test_self_binding(
                             model,
                             test_loader,
@@ -576,15 +887,11 @@ def main(args):
                             unbind_method="*",
                             img_shape=IMG_SHAPE,
                         )
-                        fourier_perp = test_self_binding(
-                            model,
-                            test_loader,
-                            DEVICE,
-                            output_dir,
-                            unbind_method="†",
-                            img_shape=IMG_SHAPE,
-                        )
+                        print(f"  completed in {time.time() - t0:.2f}s")
+                        fourier_perp = {}
 
+                        t0 = time.time()
+                        print(f"running cross-class bind/unbind test ({dist_name})...")
                         cross_class_star = test_cross_class_bind_unbind(
                             model,
                             test_loader,
@@ -593,37 +900,60 @@ def main(args):
                             unbind_method="*",  # O(d), only shifting
                             img_shape=IMG_SHAPE,
                         )
-                        cross_class_perp = test_cross_class_bind_unbind(
-                            model,
-                            test_loader,
-                            DEVICE,
-                            output_dir,
-                            unbind_method="†",  # this is O(dlogd)
-                            img_shape=IMG_SHAPE,
-                        )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # reconstructions
+                        t0 = time.time()
+                        print(f"generating reconstructions...")
                         recon_path = save_reconstructions(
                             model,
                             test_loader,
                             DEVICE,
                             f"{output_dir}/reconstructions.png",
                         )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # t-SNE
-                        tsne_path = generate_tsne_plot(
-                            model, test_loader, DEVICE, f"{output_dir}/tsne.png"
+                        t0 = time.time()
+                        print(f"generating latent distribution visualization...")
+                        latent_dist_path = plot_latent_distributions(
+                            model,
+                            test_loader,
+                            DEVICE,
+                            f"{output_dir}/latent_distributions.png",
+                            n_dims=50,
+                            n_samples=2000,
                         )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # PCA
-                        pca_path = generate_pca_plot(
-                            model, test_loader, DEVICE, f"{output_dir}/pca.png"
+                        # t-sne visualization of latent space
+                        t0 = time.time()
+                        print(f"generating t-sne visualization...")
+                        tsne_path = plot_latent_tsne(
+                            model,
+                            test_loader,
+                            DEVICE,
+                            f"{output_dir}/tsne.png",
+                            n_samples=2000,
                         )
+                        print(f"  completed in {time.time() - t0:.2f}s")
+
+                        t0 = time.time()
+                        print(f"generating latent interpolations...")
+                        interp_path = plot_latent_interpolations(
+                            model,
+                            fixed_interp_pairs,
+                            DEVICE,
+                            output_dir,
+                            n_steps=10,
+                        )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
                         # knn eval
+                        t0 = time.time()
+                        print(f"running knn evaluation...")
                         knn_metrics = perform_knn_evaluation(
                             model, train_loader, test_loader, DEVICE, [100, 600, 1000]
                         )
+                        print(f"  completed in {time.time() - t0:.2f}s")
 
                         train_subset = torch.utils.data.Subset(
                             train_set, list(range(min(5000, len(train_set))))
@@ -639,6 +969,14 @@ def main(args):
                         )
                         mean_metric_key = "mean_vector_cosine_acc"
                         print(f"{mean_metric_key}: ", mean_vector_acc)
+
+                        t0 = time.time()
+                        print(f"computing generation fid...")
+                        gen_fid = compute_generation_fid(
+                            model, dist_name, latent_dim, test_loader, DEVICE,
+                            in_channels, n_samples=2048,
+                        )
+                        print(f"  generation_fid={gen_fid:.2f}  ({time.time() - t0:.2f}s)")
 
                         fourier_metrics = {}
                         fourier_metrics.update(
@@ -656,54 +994,14 @@ def main(args):
                             }
                         )
 
-                        # compute braiding metrics
-                        braiding_metrics = {}
-
-                        # model latents metrics (no braiding vs braiding)
-                        if bundle_cap_raw and bundle_cap_raw_braid:
-                            for k_val, acc_no, acc_yes in zip(
-                                bundle_cap_raw["k"],
-                                bundle_cap_raw["accuracy"],
-                                bundle_cap_raw_braid["accuracy"],
-                            ):
-                                braiding_metrics[
-                                    f"{dist_name}/bundle_acc_k{k_val}_no_braid"
-                                ] = acc_no
-                                braiding_metrics[
-                                    f"{dist_name}/bundle_acc_k{k_val}_braid"
-                                ] = acc_yes
-                                braiding_metrics[
-                                    f"{dist_name}/bundle_acc_k{k_val}_braid_delta"
-                                ] = (acc_yes - acc_no)
-
-                        # bind-bundle-unbind (no braiding vs braiding)
-                        if unbind_bundled_raw and unbind_bundled_raw_braid:
-                            for k_val, acc_no, acc_yes in zip(
-                                unbind_bundled_raw["k"],
-                                unbind_bundled_raw["accuracy"],
-                                unbind_bundled_raw_braid["accuracy"],
-                            ):
-                                braiding_metrics[
-                                    f"{dist_name}/unbind_bundled_acc_k{k_val}_no_braid"
-                                ] = acc_no
-                                braiding_metrics[
-                                    f"{dist_name}/unbind_bundled_acc_k{k_val}_braid"
-                                ] = acc_yes
-                                braiding_metrics[
-                                    f"{dist_name}/unbind_bundled_acc_k{k_val}_braid_delta"
-                                ] = (acc_yes - acc_no)
-
                         logger.log_metrics(
                             {
                                 **knn_metrics,
                                 **fourier_metrics,
-                                **braiding_metrics,
                                 mean_metric_key: float(mean_vector_acc),
-                                "final_best_loss": best,
+                                "final_best_total_loss": best,
+                                "generation_fid": gen_fid,
                                 "cross_class_bind_unbind_similarity_star": cross_class_star.get(
-                                    "cross_class_bind_unbind_similarity", 0.0
-                                ),
-                                "cross_class_bind_unbind_similarity_perp": cross_class_perp.get(
                                     "cross_class_bind_unbind_similarity", 0.0
                                 ),
                             }
@@ -712,44 +1010,25 @@ def main(args):
                         images.update(
                             {
                                 "reconstructions": recon_path,
+                                "latent_distributions": latent_dist_path,
                                 "tsne": tsne_path,
-                                "pca": pca_path,
+                                "latent_interpolation": interp_path,
                             }
                         )
-                        if bundle_cap_res.get("bundle_capacity_plot"):
-                            images["bundle_capacity"] = bundle_cap_res[
-                                "bundle_capacity_plot"
-                            ]
-
-                        # add braided bundle capacity plots
-                        bundle_braid_plot = os.path.join(
-                            output_dir, "braided", "bundle_capacity.png"
-                        )
-                        if os.path.exists(bundle_braid_plot):
-                            images["bundle_capacity_BRAIDED"] = bundle_braid_plot
 
                         two_per_class_plot = os.path.join(
-                            output_dir, "bundle_two_per_class_similarity.png"
+                            output_dir, "bundle_similarity_matrix.png"
                         )
                         if os.path.exists(two_per_class_plot):
-                            images["bundle_two_per_class_similarity"] = (
-                                two_per_class_plot
-                            )
-
-                        if unbind_bundled_res_inv.get("unbind_bundled_plot"):
-                            images["unbind_bundled_inv"] = unbind_bundled_res_inv[
-                                "unbind_bundled_plot"
-                            ]
-
-                        # add braided unbind_bundled plot
-                        if unbind_bundled_res_inv_braid.get(
-                            "unbind_bundled_plot_braid"
-                        ):
-                            images["unbind_bundled_inv_BRAIDED"] = (
-                                unbind_bundled_res_inv_braid[
-                                    "unbind_bundled_plot_braid"
-                                ]
-                            )
+                            images["bundle_similarity_matrix"] = two_per_class_plot
+                        bc_plot = os.path.join(output_dir, "bundle_capacity.png")
+                        if os.path.exists(bc_plot):
+                            images["bundle_capacity"] = bc_plot
+                        for rf_name in ["role_filler_capacity", "role_filler_no_random_keys",
+                                        "role_filler_braided", "role_filler_no_random_keys_braided"]:
+                            rf_plot = os.path.join(output_dir, f"{rf_name}.png")
+                            if os.path.exists(rf_plot):
+                                images[rf_name] = rf_plot
 
                         sp = fourier_star.get("similarity_after_k_binds_plot_path")
                         sd = fourier_perp.get("similarity_after_k_binds_plot_path")
@@ -758,7 +1037,6 @@ def main(args):
                         if sd:
                             images["similarity_after_k_binds_†"] = sd
 
-                        # reconstructions after m binds (every 10) for different pseudo-inverse methods * / †
                         rp = fourier_star.get("recon_after_k_binds_plot_path")
                         rd = fourier_perp.get("recon_after_k_binds_plot_path")
                         if rp:
@@ -770,13 +1048,8 @@ def main(args):
                             images["cross_class_binding_star"] = cross_class_star[
                                 "cross_class_bind_unbind_plot_path"
                             ]
-                        if cross_class_perp.get("cross_class_bind_unbind_plot_path"):
-                            images["cross_class_binding_perp"] = cross_class_perp[
-                                "cross_class_bind_unbind_plot_path"
-                            ]
 
                         if dist_name == "clifford" and 2 <= model.latent_dim <= 8:
-                            # manifold visualization for clifford (2d projection of first 2 dims)
                             cliff_viz = plot_clifford_manifold_visualization(
                                 model,
                                 DEVICE,
@@ -816,7 +1089,6 @@ def main(args):
                             if gauss_viz:
                                 images["gaussian_manifold_visualization"] = gauss_viz
 
-                        # evaluate on excluded class if specified
                         excluded_metrics = {}
                         if excluded_test_loader is not None:
                             print(
@@ -837,7 +1109,6 @@ def main(args):
                                 ],
                             }
 
-                            # save reconstructions for excluded class
                             excluded_recon_path = save_reconstructions(
                                 model,
                                 excluded_test_loader,
@@ -849,17 +1120,16 @@ def main(args):
                             ] = excluded_recon_path
 
                         summary = {
-                            "final_best_loss": best,
+                            "final_best_total_loss": best,
                             **fourier_metrics,
                             **knn_metrics,
-                            **braiding_metrics,
                             **excluded_metrics,
                             mean_metric_key: float(mean_vector_acc),
+                            "generation_fid": gen_fid,
                         }
                         logger.log_summary(summary)
                         logger.log_images(images)
 
-                        # save metrics to json for plotting script
                         metrics_save_path = f"{output_dir}/metrics.json"
                         with open(metrics_save_path, "w") as f:
                             json.dump(summary, f, indent=2)
@@ -868,7 +1138,6 @@ def main(args):
                         eval_time = time.time() - eval_start_time
                         exp_time = time.time() - exp_start_time
 
-                        # store timing info
                         timing_key = f"{exp_name}"
                         timing_results[timing_key] = {
                             "train_time_s": train_time,
@@ -879,9 +1148,83 @@ def main(args):
                             f"eval time: {eval_time:.2f}s, total exp time: {exp_time:.2f}s"
                         )
 
+                        dim_results[dist_name] = {
+                            "bundle_cap": bundle_cap_raw,
+                            "role_filler": role_filler_raw,
+                            "role_filler_variants": rf_results,
+                            "self_binding_k_sims": fourier_star.get("k_sims", []),
+                            "self_binding_k_values": fourier_star.get("k_values", []),
+                            "knn_acc": knn_metrics.get("knn_acc_1000", 0.0),
+                            "gen_fid": gen_fid,
+                        }
+                        across_dim_results[dist_name]["dims"].append(latent_dim)
+                        across_dim_results[dist_name]["knn_100"].append(
+                            knn_metrics.get("knn_acc_100", 0.0)
+                        )
+                        across_dim_results[dist_name]["knn_600"].append(
+                            knn_metrics.get("knn_acc_600", 0.0)
+                        )
+                        across_dim_results[dist_name]["knn_1000"].append(
+                            knn_metrics.get("knn_acc_1000", 0.0)
+                        )
+                        across_dim_results[dist_name]["f1_100"].append(
+                            knn_metrics.get("knn_f1_100", 0.0)
+                        )
+                        across_dim_results[dist_name]["f1_600"].append(
+                            knn_metrics.get("knn_f1_600", 0.0)
+                        )
+                        across_dim_results[dist_name]["f1_1000"].append(
+                            knn_metrics.get("knn_f1_1000", 0.0)
+                        )
+
                     logger.finish_run()
 
-    # save timing results
+            try:
+                ref_items = torch.randn(1000, latent_dim, device=DEVICE)
+                ref_items = F.normalize(ref_items, p=2, dim=-1)
+                ref_bc = vsa_bundle_capacity(
+                    d=latent_dim, n_items=1000, k_range=BC_K_RANGE,
+                    n_trials=20, normalize=True, device=DEVICE,
+                    item_memory=ref_items,
+                )
+                ref_rf = vsa_binding_unbinding(
+                    d=latent_dim, n_items=1000, k_range=RF_K_RANGE,
+                    n_trials=20, normalize=True, device=DEVICE,
+                    unbind_method="*", item_memory=ref_items, bind_with_random=False,
+                )
+                z_ref = F.normalize(torch.randn(1, latent_dim, device=DEVICE), p=2, dim=-1)
+                k_max = 50
+                ref_sims = []
+                for m in range(1, k_max + 1):
+                    cur = z_ref.clone()
+                    for _ in range(m):
+                        cur = vsa_bind(cur, z_ref)
+                    for _ in range(m):
+                        cur = vsa_unbind(cur, z_ref, method="*")
+                    ref_sims.append(F.cosine_similarity(cur, z_ref, dim=-1).mean().item())
+                dim_results["random_hrr"] = {
+                    "bundle_cap": ref_bc,
+                    "role_filler": ref_rf,
+                    "self_binding_k_sims": ref_sims,
+                    "self_binding_k_values": list(range(1, k_max + 1)),
+                }
+                comp_dir = f"results/comparisons/{dataset_name}"
+                comp_path = plot_cross_dist_comparison_dim(
+                    dim_results, latent_dim, dataset_name, comp_dir
+                )
+                print(f"saved cross-dist comparison to {comp_path}")
+            except Exception as e:
+                print(f"warning: cross-dist comparison failed for d={latent_dim}: {e}")
+
+        try:
+            comp_dir = f"results/comparisons/{dataset_name}"
+            across_path = plot_across_dims_comparison(
+                across_dim_results, latent_dims, dataset_name, comp_dir
+            )
+            print(f"saved across-dims comparison to {across_path}")
+        except Exception as e:
+            print(f"warning: across-dims comparison failed for {dataset_name}: {e}")
+
     script_total_time = time.time() - script_start_time
     timing_results["total_script_time_s"] = script_total_time
     with open("fashion_train_timing.json", "w") as f:
@@ -895,8 +1238,8 @@ if __name__ == "__main__":
         description="clifford vae experiments on fashionmnist/cifar10"
     )
     p.add_argument("--epochs", type=int, default=500, help="training epochs")
-    p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs")
-    p.add_argument("--batch_size", type=int, default=128, help="batch size")
+    p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs (ignored if --use_learnable_beta)")
+    p.add_argument("--batch_size", type=int, default=256, help="batch size")
     p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
     p.add_argument(
         "--no-l2_norm",
@@ -913,9 +1256,14 @@ if __name__ == "__main__":
         help="reconstruction loss type",
     )
     p.add_argument("--l1_weight", type=float, default=1.0, help="l1 pixel loss weight")
-    p.add_argument("--max_beta", type=float, default=1.0, help="max kl beta")
+    p.add_argument("--max_beta", type=float, default=1.0, help="max kl beta (ignored if --use_learnable_beta)")
     p.add_argument(
-        "--min_beta", type=float, default=0.1, help="min kl beta during cycles"
+        "--min_beta", type=float, default=0.1, help="min kl beta during cycles (ignored if --use_learnable_beta)"
+    )
+    p.add_argument(
+        "--use_learnable_beta",
+        action="store_true",
+        help="use learnable beta (L-VAE) instead of fixed/scheduled beta - eliminates need for warmup and beta scheduling",
     )
     p.add_argument("--no_wandb", action="store_true", help="disable wandb logging")
     p.add_argument(
@@ -924,7 +1272,7 @@ if __name__ == "__main__":
         default="clifford-experiments-CNN",
         help="wandb project name",
     )
-    p.add_argument("--patience", type=int, default=50, help="early stopping patience")
+    p.add_argument("--patience", type=int, default=75, help="early stopping patience")
     p.add_argument(
         "--cycle_epochs",
         type=int,
@@ -934,7 +1282,7 @@ if __name__ == "__main__":
     p.add_argument(
         "--n_trials",
         type=int,
-        default=5,
+        default=1,
         help="trials per config for statistical averaging",
     )
     p.add_argument(
@@ -947,8 +1295,8 @@ if __name__ == "__main__":
         "--latent_dims",
         type=int,
         nargs="+",
-        default=None,
-        help="latent dims to test (default=[2,4,128,512,1024,2048,4096])",
+        default=[128, 256, 512, 1024, 2048, 4096],
+        help="latent dims to test",
     )
     p.add_argument(
         "--braid",

@@ -132,9 +132,9 @@ def test_self_binding(
     xs = np.arange(1, k_self_bind + 1)
     plt.plot(xs, sims, marker="o")
     plt.ylim(0.0, 1.05)
-    plt.xlabel("m (bind m times then unbind m times)")
-    plt.ylabel("Cosine similarity to original")
-    plt.title("Similarity After K Binds")
+    plt.xlabel("Number of Recursive Bind-Unbind Cycles ($m$)")
+    plt.ylabel("Cosine Similarity to Original")
+    plt.title("Invertible Self-Binding")
     plt.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(path_bind_curve, dpi=200, bbox_inches="tight")
@@ -166,7 +166,6 @@ def test_self_binding(
                         imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
                 else:
                     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
-                # reshape flat output to image dimensions
                 imgs = imgs.view(-1, *img_shape)
                 imgs = imgs.cpu()
 
@@ -191,8 +190,6 @@ def test_self_binding(
             else:
                 plt.imshow(canvas.permute(1, 2, 0))
 
-            # is this even used
-            col_labels = [f"m=0"] + [f"m={m}" for m in recon_steps]
             plt.xticks([])
             plt.yticks([])
 
@@ -202,7 +199,7 @@ def test_self_binding(
                     for label in selected_labels[: len(all_recon_vectors)]
                 ]
             )
-            plt.title(f"Reconstructions after bind+unbind m times\nRows: {class_info}")
+            plt.title(f"Reconstructions After $m$ Recursive Bind-Unbind Cycles\nRows: {class_info}")
             plt.tight_layout()
             plt.savefig(recon_paths, dpi=200, bbox_inches="tight")
             plt.close()
@@ -214,6 +211,8 @@ def test_self_binding(
         "binding_k_self_similarity": cos_sim,
         "similarity_after_k_binds_plot_path": path_bind_curve,
         "recon_after_k_binds_plot_path": recon_paths,
+        "k_sims": sims,
+        "k_values": list(range(1, k_self_bind + 1)),
     }
 
 
@@ -302,22 +301,15 @@ def test_cross_class_bind_unbind(
         a = torch.nn.functional.normalize(a, p=2, dim=-1)
         b = torch.nn.functional.normalize(b, p=2, dim=-1)
 
-    # bind a and b
     ab = bind(a, b)
-
-    # to recover b (ab ⊛ a^-1 = b)
     recovered_b = unbind(ab, a, method=unbind_method)
-
-    #  to recover a (ab ⊛ b^-1 = a)
     recovered_a = unbind(ab, b, method=unbind_method)
 
-    # calculate similarities
     sim_b = torch.nn.functional.cosine_similarity(recovered_b, b, dim=-1).mean().item()
     sim_a = torch.nn.functional.cosine_similarity(recovered_a, a, dim=-1).mean().item()
 
     avg_sim = (sim_a + sim_b) / 2.0
 
-    # create reconstruction visualizations if we have a decoder
     plot_path = None
     try:
         os.makedirs(output_dir, exist_ok=True)
@@ -346,7 +338,6 @@ def test_cross_class_bind_unbind(
                     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
             else:
                 imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
-            # reshape flat output to image dimensions
             imgs = imgs.view(-1, *img_shape)
             imgs = imgs.cpu()
 
@@ -371,7 +362,7 @@ def test_cross_class_bind_unbind(
 
         plt.xticks([w // 2 + i * w for i in range(4)], labels, rotation=15, ha="right")
         plt.yticks([])
-        plt.title(f"Cross-Class Bind/Unbind Test (Avg Sim: {avg_sim:.3f})")
+        plt.title(f"Cross-Class Binding and Unbinding (Average Similarity: {avg_sim:.3f})")
         plt.tight_layout()
         plt.savefig(plot_path, dpi=200, bbox_inches="tight")
         plt.close()
@@ -504,7 +495,7 @@ def compute_class_means(model, loader, device, max_per_class: int = 1000):
         if dist_type == "powerspherical":
             vec = torch.nn.functional.normalize(
                 vec, p=2, dim=-1
-            )  # should already be normalized, just in case (unit-sphere)
+            )
         means[label] = vec
     return means
 
@@ -525,7 +516,6 @@ def evaluate_mean_vector_cosine(model, loader, device, class_means: dict):
         x = x.to(device)
         mu = _extract_latent_mu(model, x)
 
-        # use cosine similarity or dot product for all distributions
         sims = torch.nn.functional.cosine_similarity(
             mu.unsqueeze(1), mean_vector.unsqueeze(0), dim=-1
         )
@@ -584,9 +574,9 @@ def plot_clifford_torus_latent_scatter(
     plt.colorbar(sc)
     plt.xlim(-math.pi, math.pi)
     plt.ylim(-math.pi, math.pi)
-    plt.xlabel(f"angle[{ax0}]")
-    plt.ylabel(f"angle[{ax1}]")
-    plt.title("Clifford Torus Latent Angles")
+    plt.xlabel(f"Phase Angle $\\theta_{{{ax0}}}$")
+    plt.ylabel(f"Phase Angle $\\theta_{{{ax1}}}$")
+    plt.title("Clifford Torus Latent Phase Angles")
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -596,7 +586,6 @@ def plot_clifford_torus_latent_scatter(
 def _angles_to_clifford_vector(
     angles: torch.Tensor, normalize_ifft: bool = True
 ) -> torch.Tensor:
-    # angles shape (..., d), produce (..., 2d) real vector following CliffordPowerSphericalDistribution mapping
     d = angles.shape[-1]
     n = 2 * d
     device = angles.device
@@ -613,7 +602,7 @@ def _angles_to_clifford_vector(
 
 
 @torch.no_grad()
-def plot_clifford_torus_recon_grid(  # TODO fix /verify.. might only work for latend dims 2/4 otherwise pca to find best 2 dims to visualize
+def plot_clifford_torus_recon_grid(
     model, device, output_dir, dims=(0, 1), n_grid: int = 16
 ):
     if getattr(model, "distribution", None) != "clifford" or model.latent_dim < 2:
@@ -633,7 +622,6 @@ def plot_clifford_torus_recon_grid(  # TODO fix /verify.. might only work for la
     model.eval()
     imgs = model.decoder(Z).detach().cpu()
     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
-    # make grid
     H = n_grid
     W = n_grid
     C = imgs.shape[1]
@@ -649,7 +637,7 @@ def plot_clifford_torus_recon_grid(  # TODO fix /verify.. might only work for la
         plt.imshow(canvas.permute(1, 2, 0))
     plt.xticks([])
     plt.yticks([])
-    plt.title("Decoder Reconstructions over Torus Grid")
+    plt.title("Decoder Reconstructions over Clifford Torus Grid")
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -717,14 +705,14 @@ def test_vsa_operations(
             plt.subplot(1, 2, 1)
             plt.hist(single_bind_sims, bins=20, alpha=0.7, edgecolor="black")
             plt.axvline(
-                np.mean(single_bind_sims),  # weird type error but still works
+                np.mean(single_bind_sims),
                 color="red",
                 linestyle="--",
                 label=f"Mean: {np.mean(single_bind_sims):.3f}",
             )
             plt.xlabel("Cosine Similarity")
             plt.ylabel("Count")
-            plt.title("Bind-Unbind Performance")
+            plt.title("Binding and Unbinding Performance")
             plt.legend()
             plt.grid(alpha=0.3)
 
@@ -735,7 +723,7 @@ def test_vsa_operations(
             )
             plt.xlabel("Test Index")
             plt.ylabel("Cosine Similarity")
-            plt.title("Per-Test Similarity")
+            plt.title("Per-Test Cosine Similarity")
             plt.grid(alpha=0.3)
             plt.tight_layout()
             plt.savefig(path_vsa_test, dpi=200, bbox_inches="tight")
@@ -792,7 +780,6 @@ def _plot_clifford_manifold_original(model, device, output_dir, n_grid=12, dims=
         else:
             x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
 
-        # reshape flat output to image dimensions
         x_recon = x_recon.view(-1, *img_shape)
 
     C = x_recon.shape[1]
@@ -814,7 +801,7 @@ def _plot_clifford_manifold_original(model, device, output_dir, n_grid=12, dims=
     plt.xticks([])
     plt.yticks([])
     plt.title(
-        f"Clifford Torus Manifold Systematic Traversal (dims {dims[0]},{dims[1]})"
+        f"Clifford Torus Manifold Traversal (Dimensions {dims[0]}, {dims[1]})"
     )
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
@@ -842,9 +829,8 @@ def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=
     path = os.path.join(output_dir, "powerspherical_manifold_visualization.png")
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
 
-    # reduce to 12x12 grid to save memory (instead of 16x16)
     grid_size = 12
-    n_samples = grid_size * grid_size  # 144 samples
+    n_samples = grid_size * grid_size
 
     model.eval()
     with torch.no_grad():
@@ -852,7 +838,6 @@ def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=
         z = torch.nn.functional.normalize(z, p=2, dim=-1)
         x_recon = model.decoder(z)
         x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
-        # reshape flat output to image dimensions
         x_recon = x_recon.view(-1, *img_shape).cpu()
     x_recon_grid = x_recon[: grid_size * grid_size]
 
@@ -874,7 +859,7 @@ def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=
 
     plt.xticks([])
     plt.yticks([])
-    plt.title("PowerSpherical Manifold Reconstructions")
+    plt.title("Power Spherical Manifold Reconstructions")
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -902,16 +887,14 @@ def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=144, i
     path = os.path.join(output_dir, "gaussian_manifold_visualization.png")
     latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
 
-    # reduce to 12x12 grid to save memory (instead of 16x16)
     grid_size = 12
-    n_samples = grid_size * grid_size  # 144 samples
+    n_samples = grid_size * grid_size
 
     model.eval()
     with torch.no_grad():
         z = torch.randn(n_samples, latent_dim, device=device)
         x_recon = model.decoder(z)
         x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
-        # reshape flat output to image dimensions
         x_recon = x_recon.view(-1, *img_shape)
 
     x_recon_grid = x_recon[: grid_size * grid_size]
@@ -934,7 +917,365 @@ def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=144, i
 
     plt.xticks([])
     plt.yticks([])
-    plt.title("Gaussian Manifold Reconstructions")
+    plt.title("Gaussian Manifold Random Sample Reconstructions")
+    plt.tight_layout()
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close()
+
+    return path
+
+
+def plot_cross_dist_comparison_dim(dim_results, latent_dim, dataset_name, output_dir):
+    """
+    3-panel comparison graph for all distributions at a single latent_dim.
+    panels: bundle capacity | self-binding | role-filler capacity.
+    dim_results: dict {dist_name: {"bundle_cap", "role_filler", "self_binding_k_sims", "self_binding_k_values"}}
+    random_hrr entry shown as dashed reference line.
+    """
+    COLORS = {
+        "clifford": "#2196F3",
+        "powerspherical": "#FF9800",
+        "gaussian": "#4CAF50",
+        "gaussian_nol2": "#9C27B0",
+        "random_hrr": "#999999",
+    }
+    LABELS = {
+        "clifford": "Clifford",
+        "powerspherical": "PowerSpherical",
+        "gaussian": "Gaussian (L2)",
+        "gaussian_nol2": "Gaussian",
+        "random_hrr": "random HRR (ref.)",
+    }
+    ORDER = ["clifford", "powerspherical", "gaussian", "gaussian_nol2", "random_hrr"]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    for dist_name in ORDER:
+        metrics = dim_results.get(dist_name)
+        if metrics is None:
+            continue
+        ls = "--" if dist_name == "random_hrr" else "-"
+        color = COLORS.get(dist_name, "black")
+        label = LABELS.get(dist_name, dist_name)
+
+        bc = metrics.get("bundle_cap")
+        if bc and bc.get("k") and bc.get("accuracy"):
+            axes[0].plot(bc["k"], bc["accuracy"], marker="o", markersize=3,
+                         color=color, linestyle=ls, label=label)
+
+        k_sims = metrics.get("self_binding_k_sims", [])
+        k_vals = metrics.get("self_binding_k_values", [])
+        if k_sims and k_vals:
+            axes[1].plot(k_vals, k_sims, marker="o", markersize=3,
+                         color=color, linestyle=ls, label=label)
+
+        rf = metrics.get("role_filler")
+        if rf and rf.get("k") and rf.get("accuracy"):
+            axes[2].plot(rf["k"], rf["accuracy"], marker="s", markersize=3,
+                         color=color, linestyle=ls, label=label)
+
+    axes[0].set_xlabel("Number of Bundled Vectors ($k$)")
+    axes[0].set_ylabel("Retrieval Accuracy")
+    axes[0].set_title(f"Bundle Capacity ($d={latent_dim}$)")
+    axes[0].legend(fontsize=8)
+    axes[0].grid(alpha=0.3)
+    axes[0].set_ylim(0, 1.05)
+
+    axes[1].set_xlabel("Number of Recursive Bind-Unbind Cycles ($m$)")
+    axes[1].set_ylabel("Cosine Similarity to Original")
+    axes[1].set_title(f"Invertible Self-Binding ($d={latent_dim}$)")
+    axes[1].legend(fontsize=8)
+    axes[1].grid(alpha=0.3)
+    axes[1].set_ylim(-0.1, 1.05)
+
+    axes[2].set_xlabel("Number of Bundled Role-Filler Pairs ($k$)")
+    axes[2].set_ylabel("Unbinding Accuracy")
+    axes[2].set_title(f"Role-Filler Capacity ($d={latent_dim}$)")
+    axes[2].legend(fontsize=8)
+    axes[2].grid(alpha=0.3)
+    axes[2].set_ylim(0, 1.05)
+
+    fig.suptitle(f"{dataset_name} — VSA comparison (d={latent_dim})", fontsize=13)
+    plt.tight_layout()
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, f"vsa_comparison_d{latent_dim}.png")
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
+def plot_across_dims_comparison(across_dim_results, latent_dims_used, dataset_name, output_dir):
+    """
+    outputs knn accuracy, f1, and fid results as:
+      1. latex table (booktabs) ready to paste into paper
+      2. csv for easy parsing
+      3. wandb.Table if wandb is active
+    returns path to the .tex file.
+    """
+    LABELS_TEX = {
+        "clifford": "$\\mathcal{C}$-VAE",
+        "powerspherical": "$\\mathcal{S}$-VAE",
+        "gaussian": "$\\mathcal{N}$-VAE (L2)",
+        "gaussian_nol2": "$\\mathcal{N}$-VAE",
+    }
+    LABELS_PLAIN = {
+        "clifford": "Clifford",
+        "powerspherical": "PowerSpherical",
+        "gaussian": "Gaussian (L2)",
+        "gaussian_nol2": "Gaussian",
+    }
+
+    dist_order = [d for d in ["gaussian_nol2", "gaussian", "powerspherical", "clifford"]
+                  if d in across_dim_results and across_dim_results[d].get("dims")]
+
+    if not dist_order:
+        return None
+
+    dims = across_dim_results[dist_order[0]]["dims"]
+    train_sizes = [100, 600, 1000]
+    metrics = ["knn", "f1"]
+    metric_keys = {
+        "knn": ["knn_100", "knn_600", "knn_1000"],
+        "f1": ["f1_100", "f1_600", "f1_1000"],
+    }
+    os.makedirs(output_dir, exist_ok=True)
+
+    def fmt_pct(v):
+        if v <= 1.0:
+            return f"{v * 100:.1f}"
+        return f"{v:.1f}"
+
+    # --- collect raw data ---
+    # rows: list of (dist_name, metric_name, n_train, [values per dim])
+    rows = []
+    for dist_name in dist_order:
+        data = across_dim_results[dist_name]
+        for m in metrics:
+            for n_train, key in zip(train_sizes, metric_keys[m]):
+                vals = data.get(key, [])
+                # pad if needed
+                vals = vals + [float("nan")] * (len(dims) - len(vals))
+                rows.append((dist_name, m, n_train, vals[:len(dims)]))
+
+    # find best per (metric, n_train, dim_idx) — highest is best
+    from collections import defaultdict
+    best_vals = defaultdict(lambda: (float("-inf"), None))
+    for dist_name, m, n_train, vals in rows:
+        for di, v in enumerate(vals):
+            if np.isnan(v):
+                continue
+            col_key = (m, n_train, di)
+            if v > best_vals[col_key][0]:
+                best_vals[col_key] = (v, dist_name)
+    best_dist = {k: dist for k, (_, dist) in best_vals.items()}
+
+    # --- 1. latex table ---
+    # format: like paper table — grouped columns by train size
+    # columns per group: one per distribution
+    n_dists = len(dist_order)
+    dist_syms = [LABELS_TEX[d] for d in dist_order]
+
+    lines = []
+    lines.append("\\begin{table}[h]")
+    lines.append("\\centering")
+    lines.append(f"\\caption{{Semi-supervised $k$-NN results on {dataset_name.replace('_', ' ').title()} (CNN, across latent dimensions).}}")
+    lines.append(f"\\label{{tab:{dataset_name}_cnn_knn}}")
+
+    # column spec: l | (n_dists cols) per train size
+    col_spec = "l" + ("|" + "c" * n_dists) * len(train_sizes)
+    lines.append(f"\\begin{{tabular}}{{{col_spec}}}")
+    lines.append("\\toprule")
+
+    # header row 1: train sizes
+    header1 = " "
+    for n_train in train_sizes:
+        header1 += f" & \\multicolumn{{{n_dists}}}{{c|}}{{{n_train}}}"
+    header1 = header1.rstrip("|") + " \\\\"
+    lines.append(header1)
+
+    # header row 2: distribution names
+    header2 = "Method"
+    for _ in train_sizes:
+        for sym in dist_syms:
+            header2 += f" & {sym}"
+    header2 += " \\\\"
+    lines.append(header2)
+    lines.append("\\midrule")
+
+    # one row per dim, one section per metric
+    for m, m_label in [("knn", "Accuracy"), ("f1", "Macro F1")]:
+        lines.append(f"\\multicolumn{{{1 + n_dists * len(train_sizes)}}}{{l}}{{\\textit{{{m_label}}}}} \\\\")
+        for di, d in enumerate(dims):
+            row_str = f"$d = {d}$"
+            for n_train in train_sizes:
+                for dist_name in dist_order:
+                    # find this row's value
+                    val = float("nan")
+                    for dn, rm, rn, vals in rows:
+                        if dn == dist_name and rm == m and rn == n_train:
+                            val = vals[di]
+                            break
+                    if np.isnan(val):
+                        row_str += " & —"
+                    else:
+                        s = fmt_pct(val)
+                        if best_dist.get((m, n_train, di)) == dist_name:
+                            row_str += f" & \\textbf{{{s}}}"
+                        else:
+                            row_str += f" & {s}"
+            row_str += " \\\\"
+            lines.append(row_str)
+        lines.append("\\addlinespace")
+
+    lines.append("\\bottomrule")
+    lines.append("\\end{tabular}")
+    lines.append("\\end{table}")
+
+    tex_str = "\n".join(lines)
+    tex_path = os.path.join(output_dir, f"{dataset_name}_results.tex")
+    with open(tex_path, "w") as f:
+        f.write(tex_str)
+    print(f"latex table saved to {tex_path}")
+
+    # --- 2. csv ---
+    csv_lines = ["method,metric,n_train," + ",".join(f"d={d}" for d in dims)]
+    for dist_name, m, n_train, vals in rows:
+        label = LABELS_PLAIN[dist_name]
+        n_str = str(n_train) if n_train else "—"
+        val_strs = [f"{v:.4f}" if not np.isnan(v) else "" for v in vals]
+        csv_lines.append(f"{label},{m},{n_str}," + ",".join(val_strs))
+    csv_path = os.path.join(output_dir, f"{dataset_name}_results.csv")
+    with open(csv_path, "w") as f:
+        f.write("\n".join(csv_lines))
+    print(f"csv saved to {csv_path}")
+
+    # --- 3. wandb table ---
+    try:
+        import wandb
+        if wandb.run is not None:
+            columns = ["Method", "Metric", "N_train"] + [f"d={d}" for d in dims]
+            wb_rows = []
+            for dist_name, m, n_train, vals in rows:
+                label = LABELS_PLAIN[dist_name]
+                wb_rows.append([label, m, n_train or "—"] + [round(v, 4) if not np.isnan(v) else None for v in vals])
+            wb_table = wandb.Table(columns=columns, data=wb_rows)
+            wandb.log({f"{dataset_name}_results": wb_table})
+            print(f"logged wandb table: {dataset_name}_results")
+    except Exception as e:
+        print(f"wandb table logging skipped: {e}")
+
+    return tex_path
+
+
+@torch.no_grad()
+def plot_latent_dimension_exploration(
+    model, loader, device, output_dir, n_dims_to_explore=6, n_steps=9, img_shape=(1, 28, 28)
+):
+    """
+    explore individual latent dimensions by encoding a sample and varying each dimension.
+    inspired by stitch fix's style space exploration.
+
+    for clifford: varies angles in [-pi, pi]
+    for gaussian: varies in [-3, 3] (3 std devs)
+    """
+    latent_dim = getattr(model, "latent_dim", getattr(model, "z_dim", None))
+    dist = getattr(model, "distribution", None)
+
+    if latent_dim is None or latent_dim < 4:
+        return None
+
+    model.eval()
+    for x, y in loader:
+        x_sample = x[0:1].to(device)
+        break
+
+    out = model(x_sample)
+    if isinstance(out, (tuple, list)):
+        _, _, _, mu = out
+    else:
+        mu = out
+
+    base_latent = mu.detach().clone()
+
+    dims_to_explore = min(n_dims_to_explore, latent_dim)
+    if latent_dim > 10:
+        dim_indices = [int(i * latent_dim / dims_to_explore) for i in range(dims_to_explore)]
+    else:
+        dim_indices = list(range(dims_to_explore))
+
+    if dist == "clifford":
+        variation_range = torch.linspace(-math.pi, math.pi, n_steps, device=device)
+    else:
+        variation_range = torch.linspace(-3.0, 3.0, n_steps, device=device)
+
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, f"{dist}_style_exploration.png")
+
+    all_reconstructions = []
+
+    for dim_idx in dim_indices:
+        row_reconstructions = []
+        for val in variation_range:
+            modified_latent = base_latent.clone()
+            modified_latent[:, dim_idx] = val
+            if dist == "clifford":
+                z = _angles_to_clifford_vector(modified_latent, normalize_ifft=True)
+            else:
+                z = modified_latent
+            x_recon = model.decoder(z)
+
+            if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
+                if model.decoder.output_activation == "sigmoid":
+                    x_recon = torch.sigmoid(x_recon)
+                else:
+                    x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
+            else:
+                x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
+
+            x_recon = x_recon.view(-1, *img_shape)
+            row_reconstructions.append(x_recon[0])
+
+        all_reconstructions.append(row_reconstructions)
+
+    C = img_shape[0]
+    h, w = img_shape[1], img_shape[2]
+    n_rows = len(dim_indices)
+    n_cols = n_steps
+    canvas = torch.zeros(C, n_rows * h, n_cols * w)
+
+    for row_idx, row_recons in enumerate(all_reconstructions):
+        for col_idx, img in enumerate(row_recons):
+            canvas[:, row_idx * h : (row_idx + 1) * h, col_idx * w : (col_idx + 1) * w] = img.cpu()
+
+    fig_height = max(8, n_rows * 1.5)
+    fig_width = max(12, n_cols * 1.5)
+    plt.figure(figsize=(fig_width, fig_height))
+
+    if C == 1:
+        plt.imshow(canvas.squeeze(0).cpu().numpy(), cmap="gray")
+    else:
+        plt.imshow(canvas.permute(1, 2, 0).cpu().numpy())
+
+    plt.yticks(
+        [h * i + h // 2 for i in range(n_rows)],
+        [f"Dim {dim_indices[i]}" for i in range(n_rows)]
+    )
+
+    if dist == "clifford":
+        range_str = "[-π, π]"
+    else:
+        range_str = "[-3σ, 3σ]"
+
+    plt.xticks(
+        [w * i + w // 2 for i in range(n_cols)],
+        [f"{variation_range[i]:.2f}" for i in range(n_cols)],
+        rotation=45
+    )
+
+    plt.title(
+        f"{dist.capitalize()} Latent Space Traversal ($d={latent_dim}$)\n"
+        f"Each Row Shows Variations Along One Latent Dimension {range_str}"
+    )
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()

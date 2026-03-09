@@ -7,7 +7,6 @@ from torchvision import datasets, transforms
 import torchvision.utils as tu
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import accuracy_score, f1_score
-from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import math
@@ -28,13 +27,13 @@ from utils.wandb_utils import (
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
 )
+import torch.nn.functional as F
 from utils.vsa import (
+    test_per_class_bundle_capacity_k_items,
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
-    test_per_class_bundle_capacity_two_items,
-    test_binding_unbinding_with_self_binding,
 )
-from mnist.mlp_vae import MLPVAE, vae_loss
+from mnist.mlp_vae import MLPVAE, vae_loss, compute_test_metrics
 
 
 class BinarizeWithRandomThreshold:
@@ -96,7 +95,7 @@ def plot_reconstructions(model, loader, device, filepath):
 
         plt.figure(figsize=(10, 3))
         plt.imshow(grid.permute(1, 2, 0))
-        plt.title("top: original images | bottom: reconstructed images")
+        plt.title("Top: Original Images | Bottom: Reconstructed Images")
         plt.axis("off")
         plt.savefig(filepath, dpi=200, bbox_inches="tight")
         plt.close()
@@ -149,7 +148,7 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
         grid = tu.make_grid(x_recon_interp, nrow=steps, pad_value=0.5)
         plt.figure(figsize=(12, 2))
         plt.imshow(grid.cpu().permute(1, 2, 0))
-        plt.title(f"latent space interpolation ({model.distribution.upper()})")
+        plt.title(f"Latent Space Interpolation ({model.distribution.upper()}-VAE)")
         plt.axis("off")
         plt.savefig(filepath, dpi=200, bbox_inches="tight")
         plt.close()
@@ -159,11 +158,8 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
 def plot_latent_space(model, loader, device, filepath, n_plot=1000):
     print(f"generating t-sne plot for {n_plot} points...")
     X_z, y = encode_dataset(model, loader, device)
-
-    # reduce memory usage
     X_z, y = X_z[:n_plot], y[:n_plot]
 
-    # use single perplexity to avoid memory issues
     perplexity = 30
     print(f"running t-sne with perplexity={perplexity}...")
     tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity, max_iter=1000)
@@ -178,45 +174,12 @@ def plot_latent_space(model, loader, device, filepath, n_plot=1000):
         s=10,
         alpha=0.8,
     )
-    plt.title(f"t-sne latent space for {model.distribution.upper()}-vae")
+    plt.title(f"t-SNE Latent Space ({model.distribution.upper()}-VAE)")
     plt.xticks([])
     plt.yticks([])
     plt.savefig(filepath, dpi=200, bbox_inches="tight")
     plt.close()
 
-    return filepath
-
-
-def plot_pca_analysis(model, loader, device, filepath, n_plot=1000):
-    """pca analysis: scatter + explained variance."""
-    print(f"pca analysis for {n_plot} points...")
-    X_z, y = encode_dataset(model, loader, device)
-    X_z, y = X_z[:n_plot], y[:n_plot]
-
-    pca = PCA(n_components=min(50, X_z.shape[1]))
-    Z_pca = pca.fit_transform(X_z)
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-
-    sc = ax1.scatter(
-        Z_pca[:, 0], Z_pca[:, 1], c=y, cmap=plt.get_cmap("tab10", 10), s=10, alpha=0.8
-    )
-    ax1.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)")
-    ax1.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)")
-    ax1.set_title(f"PCA of Latent Space (μ) - {model.distribution.upper()}")
-    plt.colorbar(sc, ax=ax1, ticks=np.unique(y))
-
-    n_components = min(20, len(pca.explained_variance_ratio_))
-    ax2.bar(range(1, n_components + 1), pca.explained_variance_ratio_[:n_components])
-    ax2.set_xlabel("Principal Component")
-    ax2.set_ylabel("Explained Variance Ratio")
-    ax2.set_title(
-        f"PCA Explained Variance\n(Total: {pca.explained_variance_ratio_.sum():.1%})"
-    )
-
-    plt.tight_layout()
-    plt.savefig(filepath, dpi=200, bbox_inches="tight")
-    plt.close()
     return filepath
 
 
@@ -252,7 +215,15 @@ def run(args):
     test_eval_loader = DataLoader(test_dataset, batch_size=512, num_workers=0)
 
     final_results = []
+    elbo_results = []  # for davidson-style table
     distributions_to_test = ["normal", "powerspherical", "clifford"]
+
+    # per-distribution lr overrides
+    dist_lr = {
+        "normal": args.lr,
+        "powerspherical": 1e-4,
+        "clifford": args.lr,
+    }
     knn_samples = [100, 600, 1000]
     logger = WandbLogger(args)
 
@@ -261,6 +232,11 @@ def run(args):
 
         agg_results = {
             dist: {s: [] for s in knn_samples} for dist in distributions_to_test
+        }
+        # aggregate elbo metrics for results table
+        agg_metrics = {
+            dist: {"ll": [], "entropy": [], "recon": [], "kl": []}
+            for dist in distributions_to_test
         }
 
         for dist in distributions_to_test:
@@ -274,7 +250,7 @@ def run(args):
                 continue
 
             print(
-                f"\n--- Testing {dist.upper()}-VAE with d={mdim} (model z_dim={model_z_dim}) ---"
+                f"\n--- Testing {dist.upper()}-VAE with d={mdim} (model z_dim={model_z_dim}, lr={dist_lr.get(dist, args.lr)}) ---"
             )
 
             for run in range(args.n_runs):
@@ -289,7 +265,7 @@ def run(args):
                 model = MLPVAE(
                     h_dim=args.h_dim, z_dim=model_z_dim, distribution=dist, l2_normalize=l2_norm
                 ).to(device)
-                optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+                optimizer = torch.optim.Adam(model.parameters(), lr=dist_lr.get(dist, args.lr))
 
                 # training
                 best_val_loss = float("inf")
@@ -307,7 +283,7 @@ def run(args):
                         optimizer.zero_grad()
                         loss = vae_loss(model, x_mb.to(device), beta=beta)
                         loss.backward()
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                         optimizer.step()
                         total_train_loss += loss.item()
 
@@ -350,6 +326,14 @@ def run(args):
                     model.load_state_dict(torch.load(model_path, map_location=device))
 
                     eval_start_time = time.time()
+
+                    # compute elbo metrics for results table (LL, L[q], RE, KL)
+                    test_metrics = compute_test_metrics(model, test_eval_loader, device)
+                    for metric_name in ["ll", "entropy", "recon", "kl"]:
+                        agg_metrics[dist][metric_name].append(test_metrics[metric_name])
+                    print(f"  LL: {test_metrics['ll']:.2f}, L[q]: {test_metrics['entropy']:.2f}, "
+                          f"RE: {test_metrics['recon']:.2f}, KL: {test_metrics['kl']:.2f}")
+
                     knn_results = perform_knn_evaluation(
                         model, train_eval_loader, test_eval_loader, device, knn_samples
                     )
@@ -364,7 +348,6 @@ def run(args):
                     )
                     test_subset_loader = DataLoader(test_subset, batch_size=64)
 
-                    # self-binding tests with both pseudo-inverse (*) and deconvolution (†)
                     fourier_pseudo = test_self_binding(
                         model,
                         test_subset_loader,
@@ -372,15 +355,8 @@ def run(args):
                         f"visualizations/d_{mdim}/{dist}",
                         unbind_method="*",
                     )
-                    fourier_deconv = test_self_binding(
-                        model,
-                        test_subset_loader,
-                        device,
-                        f"visualizations/d_{mdim}/{dist}",
-                        unbind_method="†",
-                    )
+                    fourier_deconv = {}
 
-                    # cross-class binding tests with both methods
                     cross_class_pseudo = test_cross_class_bind_unbind(
                         model,
                         test_subset_loader,
@@ -388,18 +364,11 @@ def run(args):
                         f"visualizations/d_{mdim}/{dist}",
                         unbind_method="*",
                     )
-                    cross_class_deconv = test_cross_class_bind_unbind(
-                        model,
-                        test_subset_loader,
-                        device,
-                        f"visualizations/d_{mdim}/{dist}",
-                        unbind_method="†",
-                    )
+                    cross_class_deconv = {}
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
 
-                    # prepare latent memory for vsa tests (reduced from 1000 to 500 for memory)
                     normalize_vectors = True
                     latents = []
                     labels_list = []
@@ -415,14 +384,13 @@ def run(args):
                     item_labels = torch.cat(labels_list, 0)[:500].to(device)
                     item_images = torch.cat(images_list, 0)[:500]
 
-                    # test 1: 1-item-per-class bundle capacity (no braiding)
                     print(f"running 1-item-per-class test ({dist}, no braiding)...")
-                    two_per_class_res = test_per_class_bundle_capacity_two_items(
+                    two_per_class_res = test_per_class_bundle_capacity_k_items(
                         d=item_memory.shape[-1],
                         n_items=500,
                         n_classes=10,
                         items_per_class=1,
-                        n_trials=10,
+                        n_trials=2,
                         normalize=normalize_vectors,
                         device=device,
                         plot=True,
@@ -431,108 +399,38 @@ def run(args):
                         labels=item_labels,
                         item_images=item_images,
                         use_braiding=False,
+                        class_names=[str(i) for i in range(10)],
                     )
 
-                    # test 2: classical bundle capacity (no braiding)
-                    print(f"running classical bundle capacity ({dist}, no braiding)...")
+                    # bundle capacity (schlegel et al. sec 5.4)
+                    print(f"running bundle capacity ({dist})...")
                     bundle_cap_raw = vsa_bundle_capacity(
                         d=item_memory.shape[-1],
                         n_items=500,
-                        k_range=list(range(5, 31, 5)),
-                        n_trials=10,
+                        k_range=list(range(5, 51, 5)),
+                        n_trials=20,
                         normalize=normalize_vectors,
                         device=device,
                         plot=True,
                         save_dir=vis_dir,
                         item_memory=item_memory,
-                        use_braiding=False,
                     )
 
-                    # test 2b: classical bundle capacity (with braiding)
-                    bundle_cap_raw_braid = {}
-                    if args.braid:
-                        print(
-                            f"running classical bundle capacity ({dist}, WITH braiding)..."
-                        )
-                        bundle_cap_raw_braid = vsa_bundle_capacity(
-                            d=item_memory.shape[-1],
-                            n_items=500,
-                            k_range=list(range(5, 31, 5)),
-                            n_trials=10,
-                            normalize=normalize_vectors,
-                            device=device,
-                            plot=True,
-                            save_dir=os.path.join(vis_dir, "braided"),
-                            item_memory=item_memory.clone(),
-                            use_braiding=True,
-                        )
-                    bundle_cap_res = {
-                        "bundle_capacity_plot": os.path.join(
-                            vis_dir, "bundle_capacity.png"
-                        ),
-                        "bundle_capacity_accuracies": {
-                            k: acc
-                            for k, acc in zip(
-                                bundle_cap_raw["k"], bundle_cap_raw["accuracy"]
-                            )
-                        },
-                    }
-
-                    # test 3: bind-bundle-unbind (no braiding)
-                    print(f"running bind-bundle-unbind test ({dist}, no braiding)...")
-                    unbind_bundled_raw = vsa_binding_unbinding(
+                    # role-filler unbinding (schlegel et al. sec 3.3)
+                    print(f"running role-filler unbinding ({dist})...")
+                    role_filler_raw = vsa_binding_unbinding(
                         d=item_memory.shape[-1],
                         n_items=500,
-                        k_range=list(range(5, 21, 5)),
-                        n_trials=10,
+                        k_range=list(range(2, 21, 2)),
+                        n_trials=20,
                         normalize=normalize_vectors,
                         device=device,
                         plot=True,
+                        unbind_method="*",
                         save_dir=vis_dir,
                         item_memory=item_memory,
-                        use_braiding=False,
+                        bind_with_random=True,
                     )
-                    unbind_bundled_res_inv = {
-                        "unbind_bundled_plot": os.path.join(
-                            vis_dir, "unbind_bundled_pairs_inv.png"
-                        ),
-                        "unbind_bundled_accuracies": {
-                            k: acc
-                            for k, acc in zip(
-                                unbind_bundled_raw["k"], unbind_bundled_raw["accuracy"]
-                            )
-                        },
-                    }
-
-                    # test 3b: bind-bundle-unbind (WITH braiding)
-                    unbind_bundled_raw_braid = {}
-                    unbind_bundled_res_inv_braid = {}
-                    if args.braid:
-                        print(f"running bind-bundle-unbind test ({dist}, WITH braiding)...")
-                        unbind_bundled_raw_braid = vsa_binding_unbinding(
-                            d=item_memory.shape[-1],
-                            n_items=500,
-                            k_range=list(range(5, 21, 5)),
-                            n_trials=10,
-                            normalize=normalize_vectors,
-                            device=device,
-                            plot=True,
-                            save_dir=os.path.join(vis_dir, "braided"),
-                            item_memory=item_memory.clone(),
-                            use_braiding=True,
-                        )
-                        unbind_bundled_res_inv_braid = {
-                            "unbind_bundled_plot_braid": os.path.join(
-                                vis_dir, "braided", "unbind_bundled_pairs_inv_braided.png"
-                            ),
-                            "unbind_bundled_accuracies_braid": {
-                                k: acc
-                                for k, acc in zip(
-                                    unbind_bundled_raw_braid["k"],
-                                    unbind_bundled_raw_braid["accuracy"],
-                                )
-                            },
-                        }
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
@@ -549,12 +447,6 @@ def run(args):
                         device,
                         os.path.join(vis_dir, "tsne.png"),
                     )
-                    pca_path = plot_pca_analysis(
-                        model,
-                        test_eval_loader,
-                        device,
-                        os.path.join(vis_dir, "pca.png"),
-                    )
                     interp_path = plot_interpolations(
                         model,
                         test_eval_loader,
@@ -562,7 +454,6 @@ def run(args):
                         os.path.join(vis_dir, "interpolations.png"),
                     )
 
-                    # manifold-specific visualizations
                     if dist == "clifford" and mdim >= 2:
                         cliff_viz = plot_clifford_manifold_visualization(
                             model, device, vis_dir, n_grid=16, dims=(0, 1)
@@ -580,11 +471,9 @@ def run(args):
                         images_to_log = {
                             "Reconstructions": recon_path,
                             "Latent t-SNE": tsne_path,
-                            "Latent PCA": pca_path,
                             "Interpolations": interp_path,
                         }
 
-                        # add self-binding tests results
                         for tag, fr in {
                             "*": fourier_pseudo,
                             "†": fourier_deconv,
@@ -598,45 +487,21 @@ def run(args):
                                     "recon_after_k_binds_plot_path"
                                 ]
 
-                        # add vsa bundle capacity tests
-                        if bundle_cap_res.get("bundle_capacity_plot"):
-                            images_to_log["Bundle_Capacity"] = bundle_cap_res[
-                                "bundle_capacity_plot"
-                            ]
-
-                        # add braided bundle capacity plot
-                        bundle_braid_plot = os.path.join(
-                            vis_dir, "braided", "bundle_capacity.png"
-                        )
-                        if os.path.exists(bundle_braid_plot):
-                            images_to_log["Bundle_Capacity_BRAIDED"] = (
-                                bundle_braid_plot
-                            )
-
-                        # add two-per-class test
                         two_per_class_plot = os.path.join(
-                            vis_dir, "bundle_two_per_class_similarity.png"
+                            vis_dir, "bundle_similarity_matrix.png"
                         )
                         if os.path.exists(two_per_class_plot):
-                            images_to_log["Bundle_Two_Per_Class_Similarity"] = (
+                            images_to_log["Bundle_Similarity_Matrix"] = (
                                 two_per_class_plot
                             )
 
-                        # add unbind bundled tests
-                        if unbind_bundled_res_inv.get("unbind_bundled_plot"):
-                            images_to_log["Unbind_Bundled_Inv"] = (
-                                unbind_bundled_res_inv["unbind_bundled_plot"]
-                            )
-                        if unbind_bundled_res_inv_braid.get(
-                            "unbind_bundled_plot_braid"
-                        ):
-                            images_to_log["Unbind_Bundled_Inv_BRAIDED"] = (
-                                unbind_bundled_res_inv_braid[
-                                    "unbind_bundled_plot_braid"
-                                ]
-                            )
+                        bc_plot = os.path.join(vis_dir, "bundle_capacity.png")
+                        if os.path.exists(bc_plot):
+                            images_to_log["Bundle_Capacity"] = bc_plot
+                        rf_plot = os.path.join(vis_dir, "role_filler_capacity.png")
+                        if os.path.exists(rf_plot):
+                            images_to_log["Role_Filler_Capacity"] = rf_plot
 
-                        # add cross-class binding tests
                         if cross_class_pseudo.get(
                             "cross_class_bind_unbind_plot_path"
                         ):
@@ -654,7 +519,6 @@ def run(args):
                                 ]
                             )
 
-                        # add manifold-specific visualizations to wandb
                         if dist == "clifford" and mdim >= 2 and cliff_viz:
                             images_to_log["Clifford_Manifold"] = cliff_viz
                         elif dist == "powerspherical" and mdim >= 2 and pow_viz:
@@ -669,7 +533,6 @@ def run(args):
                             k: v for k, v in knn_results.items() if k.startswith("knn_")
                         }
 
-                        # collect fourier metrics from both pseudo-inverse and deconvolution
                         fourier_metrics = {}
                         fourier_metrics.update(
                             {
@@ -686,43 +549,6 @@ def run(args):
                             }
                         )
 
-                        # compute braiding metrics
-                        braiding_metrics = {}
-
-                        # model latents metrics (no braiding vs braiding)
-                        if bundle_cap_raw and bundle_cap_raw_braid:
-                            for k_val, acc_no, acc_yes in zip(
-                                bundle_cap_raw["k"],
-                                bundle_cap_raw["accuracy"],
-                                bundle_cap_raw_braid["accuracy"],
-                            ):
-                                braiding_metrics[
-                                    f"{dist}/bundle_acc_k{k_val}_no_braid"
-                                ] = acc_no
-                                braiding_metrics[
-                                    f"{dist}/bundle_acc_k{k_val}_braid"
-                                ] = acc_yes
-                                braiding_metrics[
-                                    f"{dist}/bundle_acc_k{k_val}_braid_delta"
-                                ] = (acc_yes - acc_no)
-
-                        # bind-bundle-unbind (no braiding vs braiding)
-                        if unbind_bundled_raw and unbind_bundled_raw_braid:
-                            for k_val, acc_no, acc_yes in zip(
-                                unbind_bundled_raw["k"],
-                                unbind_bundled_raw["accuracy"],
-                                unbind_bundled_raw_braid["accuracy"],
-                            ):
-                                braiding_metrics[
-                                    f"{dist}/unbind_bundled_acc_k{k_val}_no_braid"
-                                ] = acc_no
-                                braiding_metrics[
-                                    f"{dist}/unbind_bundled_acc_k{k_val}_braid"
-                                ] = acc_yes
-                                braiding_metrics[
-                                    f"{dist}/unbind_bundled_acc_k{k_val}_braid_delta"
-                                ] = (acc_yes - acc_no)
-
                         train_subset = torch.utils.data.Subset(
                             train_dataset, list(range(min(5000, len(train_dataset))))
                         )
@@ -738,9 +564,13 @@ def run(args):
                             {
                                 **knn_metrics,
                                 **fourier_metrics,
-                                **braiding_metrics,
                                 "mean_vector_cosine_acc": float(mean_vector_acc),
                                 "final_val_loss": best_val_loss,
+                                # elbo metrics for results table
+                                "test/ll": test_metrics["ll"],
+                                "test/entropy": test_metrics["entropy"],
+                                "test/recon": test_metrics["recon"],
+                                "test/kl": test_metrics["kl"],
                                 "cross_class_bind_unbind_similarity_pseudo": cross_class_pseudo.get(
                                     "cross_class_bind_unbind_similarity", 0.0
                                 ),
@@ -754,8 +584,12 @@ def run(args):
                             **knn_metrics,
                             "final_val_loss": best_val_loss,
                             **fourier_metrics,
-                            **braiding_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
+                            # elbo metrics for results table
+                            "test/ll": test_metrics["ll"],
+                            "test/entropy": test_metrics["entropy"],
+                            "test/recon": test_metrics["recon"],
+                            "test/kl": test_metrics["kl"],
                             "cross_class_bind_unbind_similarity_pseudo": cross_class_pseudo.get(
                                 "cross_class_bind_unbind_similarity", 0.0
                             ),
@@ -801,17 +635,46 @@ def run(args):
                     row_data[f"{dist.upper()}_{n_samples}"] = "N/A"
         final_results.append(row_data)
 
-    if final_results:
-        import pandas as pd
+        elbo_row = {"d": mdim}
+        for dist in distributions_to_test:
+            for metric in ["ll", "entropy", "recon", "kl"]:
+                values = agg_metrics[dist][metric]
+                if values:
+                    mean_val = np.mean(values)
+                    std_val = np.std(values)
+                    elbo_row[f"{dist.upper()}_{metric}"] = f"{mean_val:.2f}±{std_val:.2f}"
+                else:
+                    elbo_row[f"{dist.upper()}_{metric}"] = "N/A"
+        elbo_results.append(elbo_row)
 
-        df = pd.DataFrame(final_results).set_index("d")
-        print("\n" + "=" * 25 + " results (knn acc %) " + "=" * 25)
-        print(df.to_string())
-        df.to_csv("mnist_vae_knn_results.csv")
+    if final_results:
+        try:
+            import pandas as pd
+            df = pd.DataFrame(final_results).set_index("d")
+            print("\n" + "=" * 25 + " results (knn acc %) " + "=" * 25)
+            print(df.to_string())
+            df.to_csv("mnist_vae_knn_results.csv")
+
+            if elbo_results:
+                df_elbo = pd.DataFrame(elbo_results).set_index("d")
+                print("\n" + "=" * 25 + " elbo metrics (ll, L[q], re, kl) " + "=" * 25)
+                print(df_elbo.to_string())
+                df_elbo.to_csv("mnist_vae_elbo_results.csv")
+        except ImportError:
+            print("\n" + "=" * 25 + " results (knn acc %) " + "=" * 25)
+            for row in final_results:
+                print(row)
+            with open("mnist_vae_knn_results.json", "w") as f:
+                json.dump(final_results, f, indent=2)
+            print("results saved to mnist_vae_knn_results.json")
+
+        if elbo_results:
+            with open("mnist_vae_elbo_raw.json", "w") as f:
+                json.dump(elbo_results, f, indent=2)
+            print("raw elbo metrics saved to mnist_vae_elbo_raw.json")
     else:
         print("no results were generated.")
 
-    # save timing results
     script_total_time = time.time() - script_start_time
     timing_results["total_script_time_s"] = script_total_time
     with open("mnist_clifpws_timing.json", "w") as f:
@@ -864,11 +727,6 @@ if __name__ == "__main__":
         type=str,
         default="mnist-svae-experiments",
         help="W&B project name",
-    )
-    parser.add_argument(
-        "--braid",
-        action="store_true",
-        help="run braiding tests",
     )
 
     args = parser.parse_args()
