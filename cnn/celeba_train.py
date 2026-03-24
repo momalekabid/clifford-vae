@@ -490,6 +490,146 @@ def plot_attribute_traversal(model, loader, device, save_dir, attr_names,
     return save_path
 
 
+def plot_decoded_bundles_by_attr(model, loader, device, save_path,
+                                attr_names, n_samples=2000, top_attrs=6):
+    """
+    bundle latent prototypes conditioned on celeba binary attributes and
+    decode to see if constituent features appear in the output image.
+    picks the most balanced attributes, computes mean latent for positive
+    samples, then bundles increasing numbers of attribute prototypes.
+    """
+    model.eval()
+    dist = getattr(model, "distribution", "gaussian")
+
+    all_z = []
+    all_attrs = []
+    with torch.no_grad():
+        for x, attrs in loader:
+            x = x.to(device)
+            _, _, _, z = model(x)
+            all_z.append(z)
+            all_attrs.append(attrs.to(device))
+            if sum(t.shape[0] for t in all_z) >= n_samples:
+                break
+    all_z = torch.cat(all_z, 0)[:n_samples]
+    all_attrs = torch.cat(all_attrs, 0)[:n_samples]
+
+    # pick attributes with reasonable positive rate (20-80%)
+    pos_rates = all_attrs.float().mean(dim=0)
+    balanced = ((pos_rates > 0.2) & (pos_rates < 0.8)).cpu()
+    candidates = [i for i in range(len(attr_names)) if balanced[i]]
+    if len(candidates) < top_attrs:
+        candidates = list(range(min(top_attrs, len(attr_names))))
+    selected = candidates[:top_attrs]
+
+    # compute mean latent for positive samples of each attribute
+    attr_means = {}
+    for idx in selected:
+        mask = all_attrs[:, idx] == 1
+        if mask.sum() > 0:
+            attr_means[idx] = all_z[mask].mean(dim=0)
+
+    # bundle increasing numbers of attributes
+    bundle_sizes = [1, 2, 3, min(4, len(attr_means))]
+    n_combos = 3
+    rng = np.random.RandomState(42)
+
+    fig, axes = plt.subplots(
+        len(bundle_sizes), n_combos,
+        figsize=(3 * n_combos, 3 * len(bundle_sizes)),
+    )
+    if len(bundle_sizes) == 1:
+        axes = axes.reshape(1, -1)
+
+    attr_keys = list(attr_means.keys())
+    with torch.no_grad():
+        for row, k in enumerate(bundle_sizes):
+            for col in range(n_combos):
+                chosen = rng.choice(attr_keys, size=min(k, len(attr_keys)), replace=False).tolist()
+                bundle = sum(attr_means[c] for c in chosen)
+                decoded = model.decoder(bundle.unsqueeze(0))
+                img = (decoded[0].cpu() * 0.5 + 0.5).clamp(0, 1)
+                axes[row, col].imshow(img.permute(1, 2, 0))
+                label = " + ".join(attr_names[c] for c in chosen)
+                axes[row, col].set_title(label, fontsize=5)
+                axes[row, col].axis("off")
+
+    fig.suptitle(f"{dist}: decoded bundles of attribute prototypes", fontsize=11)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
+def plot_decoded_bindings_celeba(model, loader, device, save_path,
+                                n_samples=500, n_pairs=8):
+    """
+    bind pairs of celeba images via circular convolution, decode the
+    bound vector, and show what it looks like. also decode unbindings.
+    columns: A, B, decode(A⊛B), unbind B→A', unbind A→B'
+    """
+    model.eval()
+    dist = getattr(model, "distribution", "gaussian")
+
+    all_z = []
+    all_imgs = []
+    with torch.no_grad():
+        for x, _ in loader:
+            x = x.to(device)
+            _, _, _, z = model(x)
+            all_z.append(z)
+            all_imgs.append(x.cpu())
+            if sum(t.shape[0] for t in all_z) >= n_samples:
+                break
+    all_z = torch.cat(all_z, 0)[:n_samples]
+    all_imgs = torch.cat(all_imgs, 0)[:n_samples]
+
+    rng = np.random.RandomState(42)
+
+    fig, axes = plt.subplots(n_pairs, 5, figsize=(12, 2.2 * n_pairs))
+    col_titles = ["A", "B", "decode(A⊛B)", "unbind B→A'", "unbind A→B'"]
+    for j, t in enumerate(col_titles):
+        axes[0, j].set_title(t, fontsize=9)
+
+    with torch.no_grad():
+        for row in range(n_pairs):
+            idx1, idx2 = rng.choice(len(all_z), size=2, replace=False)
+            z1 = all_z[idx1].unsqueeze(0)
+            z2 = all_z[idx2].unsqueeze(0)
+
+            bound = torch.fft.ifft(
+                torch.fft.fft(z1, dim=-1) * torch.fft.fft(z2, dim=-1), dim=-1
+            ).real
+
+            z2_inv = torch.roll(z2.flip(-1), 1, dims=-1)
+            z1_inv = torch.roll(z1.flip(-1), 1, dims=-1)
+            unbound_a = torch.fft.ifft(
+                torch.fft.fft(bound, dim=-1) * torch.fft.fft(z2_inv, dim=-1), dim=-1
+            ).real
+            unbound_b = torch.fft.ifft(
+                torch.fft.fft(bound, dim=-1) * torch.fft.fft(z1_inv, dim=-1), dim=-1
+            ).real
+
+            imgs = [
+                all_imgs[idx1],
+                all_imgs[idx2],
+                model.decoder(bound)[0].cpu(),
+                model.decoder(unbound_a)[0].cpu(),
+                model.decoder(unbound_b)[0].cpu(),
+            ]
+
+            for j, img in enumerate(imgs):
+                img = (img * 0.5 + 0.5).clamp(0, 1)
+                axes[row, j].imshow(img.permute(1, 2, 0))
+                axes[row, j].axis("off")
+
+    fig.suptitle(f"{dist}: decoded bindings (circular convolution)", fontsize=11)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
 def sample_prior_z(dist_name, latent_dim, n, device, l2_normalize=False):
     if dist_name == "clifford":
         angles = torch.rand(n, latent_dim, device=device) * (2 * math.pi)
@@ -717,6 +857,27 @@ def main(args):
                     )
                     print(f"  completed in {time.time() - t0:.2f}s")
 
+                    # decoded bundle visualization using attribute-based prototypes
+                    t0 = time.time()
+                    print(f"generating decoded bundle visualization...")
+                    bundle_path = plot_decoded_bundles_by_attr(
+                        model, test_loader, DEVICE,
+                        f"{output_dir}/decoded_bundles.png",
+                        attr_names=attr_names,
+                        n_samples=2000,
+                    )
+                    print(f"  completed in {time.time() - t0:.2f}s")
+
+                    # decoded binding visualization
+                    t0 = time.time()
+                    print(f"generating decoded binding visualization...")
+                    binding_path = plot_decoded_bindings_celeba(
+                        model, test_loader, DEVICE,
+                        f"{output_dir}/decoded_bindings.png",
+                        n_samples=500, n_pairs=8,
+                    )
+                    print(f"  completed in {time.time() - t0:.2f}s")
+
                     t0 = time.time()
                     print(f"generating latent interpolations...")
                     interp_path = plot_latent_interpolations(
@@ -754,6 +915,21 @@ def main(args):
                     )
                     print(f"  completed in {time.time() - t0:.2f}s")
 
+                    # deconv self-binding ablation
+                    deconv_dir = f"{output_dir}/deconv"
+                    os.makedirs(deconv_dir, exist_ok=True)
+                    t0 = time.time()
+                    print(f"running self-binding test deconv ({dist_name})...")
+                    fourier_deconv = test_self_binding(
+                        model,
+                        test_loader,
+                        DEVICE,
+                        deconv_dir,
+                        unbind_method="†",
+                        img_shape=IMG_SHAPE,
+                    )
+                    print(f"  completed in {time.time() - t0:.2f}s")
+
                     t0 = time.time()
                     print(f"running cross-class bind/unbind test ({dist_name})...")
                     cross_class_star = test_cross_class_bind_unbind(
@@ -762,6 +938,19 @@ def main(args):
                         DEVICE,
                         output_dir,
                         unbind_method="*",
+                        img_shape=IMG_SHAPE,
+                    )
+                    print(f"  completed in {time.time() - t0:.2f}s")
+
+                    # deconv cross-class ablation
+                    t0 = time.time()
+                    print(f"running cross-class bind/unbind test deconv ({dist_name})...")
+                    cross_class_deconv = test_cross_class_bind_unbind(
+                        model,
+                        test_loader,
+                        DEVICE,
+                        deconv_dir,
+                        unbind_method="†",
                         img_shape=IMG_SHAPE,
                     )
                     print(f"  completed in {time.time() - t0:.2f}s")
@@ -784,20 +973,36 @@ def main(args):
 
                     # role-filler unbinding (schlegel et al. sec 3.3)
                     t0 = time.time()
-                    print(f"running role-filler unbinding test ({dist_name})...")
-                    role_filler_raw = vsa_binding_unbinding(
-                        d=item_memory.shape[-1],
-                        n_items=min(1000, item_memory.shape[0]),
-                        k_range=RF_K_RANGE,
-                        n_trials=20,
-                        normalize=True,
-                        device=DEVICE,
-                        plot=True,
-                        unbind_method="*",
-                        save_dir=output_dir,
-                        item_memory=item_memory,
-                        bind_with_random=True,
-                    )
+                    print(f"running role-filler unbinding tests ({dist_name})...")
+                    normalize_vectors = True
+                    rf_variants = [
+                        (True, False, "*", output_dir, "role_filler_capacity"),
+                        (False, False, "*", output_dir, "role_filler_no_random_keys"),
+                        (True, False, "†", deconv_dir, "role_filler_capacity_deconv"),
+                        (False, False, "†", deconv_dir, "role_filler_no_random_keys_deconv"),
+                    ]
+                    rf_results = {}
+                    for bind_rand, braid, ubmethod, save_d, rf_name in rf_variants:
+                        rf_res = vsa_binding_unbinding(
+                            d=item_memory.shape[-1],
+                            n_items=min(1000, item_memory.shape[0]),
+                            k_range=RF_K_RANGE,
+                            n_trials=20,
+                            normalize=normalize_vectors,
+                            device=DEVICE,
+                            plot=True,
+                            unbind_method=ubmethod,
+                            save_dir=save_d,
+                            item_memory=item_memory,
+                            bind_with_random=bind_rand,
+                            use_braiding=braid,
+                        )
+                        rf_results[rf_name] = rf_res
+                        default_plot = os.path.join(save_d, "role_filler_capacity.png")
+                        variant_plot = os.path.join(save_d, f"{rf_name}.png")
+                        if os.path.exists(default_plot) and rf_name != "role_filler_capacity":
+                            os.rename(default_plot, variant_plot)
+                    role_filler_raw = rf_results.get("role_filler_capacity", {})
                     print(f"  completed in {time.time() - t0:.2f}s")
 
                     t0 = time.time()
@@ -832,12 +1037,21 @@ def main(args):
                             if isinstance(v, (int, float, bool))
                         }
                     )
+                    fourier_metrics.update(
+                        {
+                            f"†/{k}": v
+                            for k, v in fourier_deconv.items()
+                            if isinstance(v, (int, float, bool))
+                        }
+                    )
 
                     images.update(
                         {
                             "reconstructions": recon_path,
                             "latent_distributions": latent_dist_path,
                             "latent_interpolation": interp_path,
+                            "decoded_bundles": bundle_path,
+                            "decoded_bindings": binding_path,
                         }
                     )
 
@@ -863,6 +1077,27 @@ def main(args):
                         images["cross_class_binding_star"] = cross_class_star[
                             "cross_class_bind_unbind_plot_path"
                         ]
+
+                    # deconv plot paths
+                    sp_d = fourier_deconv.get("similarity_after_k_binds_plot_path")
+                    if sp_d:
+                        images["similarity_after_k_binds_†"] = sp_d
+                    rp_d = fourier_deconv.get("recon_after_k_binds_plot_path")
+                    if rp_d:
+                        images["recon_after_k_binds_†"] = rp_d
+                    if cross_class_deconv.get("cross_class_bind_unbind_plot_path"):
+                        images["cross_class_binding_deconv"] = cross_class_deconv[
+                            "cross_class_bind_unbind_plot_path"
+                        ]
+                    # deconv role-filler plots
+                    for rf_name in ["role_filler_capacity_deconv", "role_filler_no_random_keys_deconv"]:
+                        rf_p = os.path.join(deconv_dir, f"{rf_name}.png")
+                        if os.path.exists(rf_p):
+                            images[rf_name] = rf_p
+                    # star role-filler no-random-keys plot
+                    rf_nr = os.path.join(output_dir, "role_filler_no_random_keys.png")
+                    if os.path.exists(rf_nr):
+                        images["role_filler_no_random_keys"] = rf_nr
 
                     if dist_name == "clifford" and 2 <= model.latent_dim <= 8:
                         cliff_viz = plot_clifford_manifold_visualization(
@@ -894,6 +1129,9 @@ def main(args):
                             "cross_class_bind_unbind_similarity_star": cross_class_star.get(
                                 "cross_class_bind_unbind_similarity", 0.0
                             ),
+                            "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
+                                "cross_class_bind_unbind_similarity", 0.0
+                            ),
                         }
                     )
 
@@ -903,6 +1141,12 @@ def main(args):
                         "generation_fid": gen_fid,
                         "max_attr_correlation": corr_results["corr_data"]["max_abs_correlation"],
                         "mean_attr_correlation": corr_results["corr_data"]["mean_abs_correlation"],
+                        "cross_class_bind_unbind_similarity_star": cross_class_star.get(
+                            "cross_class_bind_unbind_similarity", 0.0
+                        ),
+                        "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
+                            "cross_class_bind_unbind_similarity", 0.0
+                        ),
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)

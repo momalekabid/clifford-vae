@@ -326,6 +326,7 @@ def test_binding_unbinding_pairs(
     return results
 
 
+
 def test_per_class_bundle_capacity_k_items(
     d: int = 1024,
     n_items: int = 1000,
@@ -416,13 +417,14 @@ def test_per_class_bundle_capacity_k_items(
 
         for class_id in valid_classes:
             class_indices = class_to_items[class_id]
-            perm = torch.randperm(len(class_indices))[:items_per_class]
+            # use first items_per_class items per class for deterministic 1:1 comparability
+            selected_indices = class_indices[:items_per_class]
 
-            for idx in perm:
-                item_vector = item_memory[class_indices[idx]]
+            for idx in selected_indices:
+                item_vector = item_memory[idx]
                 selected_bundles.append(item_vector)
                 bundle_labels.append(class_id)
-                bundle_img_indices.append(class_indices[idx].item())
+                bundle_img_indices.append(idx.item())
 
         if len(selected_bundles) < n_classes * items_per_class:
             continue

@@ -169,6 +169,13 @@ def run(args):
                     model, test_subset_loader, device, vis_dir, unbind_method="*"
                 )
 
+                # deconv unbinding ablation
+                deconv_dir = f"visualizations/d_{d_manifold}/vmf/deconv"
+                os.makedirs(deconv_dir, exist_ok=True)
+                self_bind_deconv = test_self_binding(
+                    model, test_subset_loader, device, deconv_dir, unbind_method="†"
+                )
+
                 with torch.no_grad():
                     latents = []
                     for x, _ in test_subset_loader:
@@ -188,19 +195,34 @@ def run(args):
                     item_memory=item_memory,
                 )
 
-                role_filler_raw = vsa_binding_unbinding(
-                    d=item_memory.shape[-1],
-                    n_items=500,
-                    k_range=list(range(2, 21, 2)),
-                    n_trials=3,
-                    normalize=True,
-                    device=device,
-                    plot=True,
-                    unbind_method="*",
-                    save_dir=vis_dir,
-                    item_memory=item_memory,
-                    bind_with_random=True,
-                )
+                # run role-filler variants with both unbind methods
+                rf_variants = [
+                    (True, "*", vis_dir, "role_filler_capacity"),
+                    (False, "*", vis_dir, "role_filler_no_random_keys"),
+                    (True, "†", deconv_dir, "role_filler_capacity_deconv"),
+                    (False, "†", deconv_dir, "role_filler_no_random_keys_deconv"),
+                ]
+                rf_results = {}
+                for bind_rand, ubmethod, save_d, rf_name in rf_variants:
+                    rf_res = vsa_binding_unbinding(
+                        d=item_memory.shape[-1],
+                        n_items=500,
+                        k_range=list(range(2, 21, 2)),
+                        n_trials=3,
+                        normalize=True,
+                        device=device,
+                        plot=True,
+                        unbind_method=ubmethod,
+                        save_dir=save_d,
+                        item_memory=item_memory,
+                        bind_with_random=bind_rand,
+                    )
+                    rf_results[rf_name] = rf_res
+                    default_plot = os.path.join(save_d, "role_filler_capacity.png")
+                    variant_plot = os.path.join(save_d, f"{rf_name}.png")
+                    if os.path.exists(default_plot) and rf_name != "role_filler_capacity":
+                        os.rename(default_plot, variant_plot)
+                role_filler_raw = rf_results.get("role_filler_capacity", {})
 
                 if logger.use:
                     knn_metrics = {k: v for k, v in knn_results.items() if k.startswith("knn_")}
@@ -209,9 +231,15 @@ def run(args):
                         for k, v in self_bind.items()
                         if isinstance(v, (int, float, bool))
                     }
+                    sb_deconv_metrics = {
+                        f"self_binding_deconv/{k}": v
+                        for k, v in self_bind_deconv.items()
+                        if isinstance(v, (int, float, bool))
+                    }
                     logger.log_metrics({
                         **knn_metrics,
                         **sb_metrics,
+                        **sb_deconv_metrics,
                         "test/ll": test_metrics["ll"],
                         "test/entropy": test_metrics["entropy"],
                         "test/recon": test_metrics["recon"],
@@ -229,10 +257,18 @@ def run(args):
                     rf_plot = os.path.join(vis_dir, "role_filler_capacity.png")
                     if os.path.exists(rf_plot):
                         images_to_log["Role_Filler_Capacity"] = rf_plot
+                    sp_d = self_bind_deconv.get("similarity_after_k_binds_plot_path")
+                    if sp_d:
+                        images_to_log["Self_Binding_†"] = sp_d
+                    for rf_name in ["role_filler_no_random_keys", "role_filler_capacity_deconv", "role_filler_no_random_keys_deconv"]:
+                        save_d = deconv_dir if "deconv" in rf_name else vis_dir
+                        rf_plot = os.path.join(save_d, f"{rf_name}.png")
+                        if os.path.exists(rf_plot):
+                            images_to_log[rf_name] = rf_plot
                     if images_to_log:
                         logger.log_images(images_to_log)
 
-                    logger.log_summary({**knn_metrics, **sb_metrics,
+                    logger.log_summary({**knn_metrics, **sb_metrics, **sb_deconv_metrics,
                                         "test/ll": test_metrics["ll"],
                                         "test/entropy": test_metrics["entropy"],
                                         "test/recon": test_metrics["recon"],

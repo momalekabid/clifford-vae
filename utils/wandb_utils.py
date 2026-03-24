@@ -285,8 +285,9 @@ def test_cross_class_bind_unbind(
             class_a_indices = torch.where(class_a_mask)[0]
             class_b_indices = torch.where(class_b_mask)[0]
 
-            a_idx = class_a_indices[torch.randint(0, len(class_a_indices), (1,))]
-            b_idx = class_b_indices[torch.randint(0, len(class_b_indices), (1,))]
+            # use first item per class for deterministic 1:1 comparability across distributions
+            a_idx = class_a_indices[0:1]
+            b_idx = class_b_indices[0:1]
 
             a = all_z[a_idx]
             b = all_z[b_idx]
@@ -1033,6 +1034,11 @@ def plot_across_dims_comparison(across_dim_results, latent_dims_used, dataset_na
 
     dims = across_dim_results[dist_order[0]]["dims"]
     train_sizes = [100, 600, 1000]
+    # check if mean_cosine data is available
+    has_mean_cosine = any(
+        len(across_dim_results[d].get("mean_cosine", [])) > 0
+        for d in dist_order
+    )
     metrics = ["knn", "f1"]
     metric_keys = {
         "knn": ["knn_100", "knn_600", "knn_1000"],
@@ -1056,6 +1062,11 @@ def plot_across_dims_comparison(across_dim_results, latent_dims_used, dataset_na
                 # pad if needed
                 vals = vals + [float("nan")] * (len(dims) - len(vals))
                 rows.append((dist_name, m, n_train, vals[:len(dims)]))
+        # mean_cosine has no train_size breakdown
+        if has_mean_cosine:
+            vals = data.get("mean_cosine", [])
+            vals = vals + [float("nan")] * (len(dims) - len(vals))
+            rows.append((dist_name, "mean_cosine", None, vals[:len(dims)]))
 
     # find best per (metric, n_train, dim_idx) — highest is best
     from collections import defaultdict
@@ -1120,6 +1131,39 @@ def plot_across_dims_comparison(across_dim_results, latent_dims_used, dataset_na
                     else:
                         s = fmt_pct(val)
                         if best_dist.get((m, n_train, di)) == dist_name:
+                            row_str += f" & \\textbf{{{s}}}"
+                        else:
+                            row_str += f" & {s}"
+            row_str += " \\\\"
+            lines.append(row_str)
+        lines.append("\\addlinespace")
+
+    # mean cosine accuracy section (no train size breakdown, spans all columns)
+    if has_mean_cosine:
+        lines.append(f"\\multicolumn{{{1 + n_dists * len(train_sizes)}}}{{l}}{{\\textit{{Mean Cosine Acc.}}}} \\\\")
+        for di, d in enumerate(dims):
+            row_str = f"$d = {d}$"
+            # find best across dists for this dim
+            best_mc_val, best_mc_dist = float("-inf"), None
+            for dist_name in dist_order:
+                for dn, rm, rn, vals in rows:
+                    if dn == dist_name and rm == "mean_cosine":
+                        v = vals[di]
+                        if not np.isnan(v) and v > best_mc_val:
+                            best_mc_val, best_mc_dist = v, dist_name
+                        break
+            for n_train in train_sizes:
+                for dist_name in dist_order:
+                    val = float("nan")
+                    for dn, rm, rn, vals in rows:
+                        if dn == dist_name and rm == "mean_cosine":
+                            val = vals[di]
+                            break
+                    if np.isnan(val):
+                        row_str += " & —"
+                    else:
+                        s = fmt_pct(val)
+                        if dist_name == best_mc_dist:
                             row_str += f" & \\textbf{{{s}}}"
                         else:
                             row_str += f" & {s}"

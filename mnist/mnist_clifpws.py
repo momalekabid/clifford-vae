@@ -355,7 +355,12 @@ def run(args):
                         f"visualizations/d_{mdim}/{dist}",
                         unbind_method="*",
                     )
-                    fourier_deconv = {}
+                    deconv_dir = f"visualizations/d_{mdim}/{dist}/deconv"
+                    os.makedirs(deconv_dir, exist_ok=True)
+                    fourier_deconv = test_self_binding(
+                        model, test_subset_loader, device, deconv_dir,
+                        unbind_method="†",
+                    )
 
                     cross_class_pseudo = test_cross_class_bind_unbind(
                         model,
@@ -364,7 +369,10 @@ def run(args):
                         f"visualizations/d_{mdim}/{dist}",
                         unbind_method="*",
                     )
-                    cross_class_deconv = {}
+                    cross_class_deconv = test_cross_class_bind_unbind(
+                        model, test_subset_loader, device, deconv_dir,
+                        unbind_method="†",
+                    )
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
@@ -416,21 +424,37 @@ def run(args):
                         item_memory=item_memory,
                     )
 
-                    # role-filler unbinding (schlegel et al. sec 3.3)
+                    # role-filler variants
                     print(f"running role-filler unbinding ({dist})...")
-                    role_filler_raw = vsa_binding_unbinding(
-                        d=item_memory.shape[-1],
-                        n_items=500,
-                        k_range=list(range(2, 21, 2)),
-                        n_trials=20,
-                        normalize=normalize_vectors,
-                        device=device,
-                        plot=True,
-                        unbind_method="*",
-                        save_dir=vis_dir,
-                        item_memory=item_memory,
-                        bind_with_random=True,
-                    )
+                    rf_variants = [
+                        (True, False, "*", "role_filler_capacity"),
+                        (False, False, "*", "role_filler_no_random_keys"),
+                        (True, False, "†", "role_filler_capacity_deconv"),
+                        (False, False, "†", "role_filler_no_random_keys_deconv"),
+                    ]
+                    rf_results = {}
+                    for bind_rand, braid, ubmethod, rf_name in rf_variants:
+                        save_d = deconv_dir if ubmethod == "†" else vis_dir
+                        rf_res = vsa_binding_unbinding(
+                            d=item_memory.shape[-1],
+                            n_items=500,
+                            k_range=list(range(2, 21, 2)),
+                            n_trials=20,
+                            normalize=normalize_vectors,
+                            device=device,
+                            plot=True,
+                            unbind_method=ubmethod,
+                            save_dir=save_d,
+                            item_memory=item_memory,
+                            bind_with_random=bind_rand,
+                            use_braiding=braid,
+                        )
+                        rf_results[rf_name] = rf_res
+                        default_plot = os.path.join(save_d, "role_filler_capacity.png")
+                        variant_plot = os.path.join(save_d, f"{rf_name}.png")
+                        if os.path.exists(default_plot) and rf_name != "role_filler_capacity":
+                            os.rename(default_plot, variant_plot)
+                    role_filler_raw = rf_results.get("role_filler_capacity", {})
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
@@ -518,6 +542,12 @@ def run(args):
                                     "cross_class_bind_unbind_plot_path"
                                 ]
                             )
+
+                        # log extra role-filler variant plots
+                        for rf_name in ["role_filler_no_random_keys", "role_filler_capacity_deconv", "role_filler_no_random_keys_deconv"]:
+                            rf_plot = os.path.join(vis_dir if "deconv" not in rf_name else deconv_dir, f"{rf_name}.png")
+                            if os.path.exists(rf_plot):
+                                images_to_log[rf_name] = rf_plot
 
                         if dist == "clifford" and mdim >= 2 and cliff_viz:
                             images_to_log["Clifford_Manifold"] = cliff_viz
