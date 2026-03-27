@@ -26,6 +26,7 @@ from utils.wandb_utils import (
     plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
+    test_pairwise_bind_bundle_decode,
 )
 import torch.nn.functional as F
 from utils.vsa import (
@@ -456,6 +457,14 @@ def run(args):
                             os.rename(default_plot, variant_plot)
                     role_filler_raw = rf_results.get("role_filler_capacity", {})
 
+                    # pairwise bind-bundle-decode test
+                    pairwise_bind_bundle_path = test_pairwise_bind_bundle_decode(
+                        model, test_subset_loader, device, vis_dir,
+                        class_names=[str(i) for i in range(10)],
+                        img_shape=(1, 28, 28),
+                        n_classes=10,
+                    )
+
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
 
@@ -542,6 +551,9 @@ def run(args):
                                     "cross_class_bind_unbind_plot_path"
                                 ]
                             )
+
+                        if pairwise_bind_bundle_path and os.path.exists(pairwise_bind_bundle_path):
+                            images_to_log["Pairwise_Bind_Bundle_Decode"] = pairwise_bind_bundle_path
 
                         # log extra role-filler variant plots
                         for rf_name in ["role_filler_no_random_keys", "role_filler_capacity_deconv", "role_filler_no_random_keys_deconv"]:

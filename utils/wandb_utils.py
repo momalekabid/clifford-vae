@@ -1327,3 +1327,131 @@ def plot_latent_dimension_exploration(
     return path
 
 
+def _decode_vectors(model, vectors, img_shape):
+    """decode latent vectors to images, handling different model types."""
+    with torch.no_grad():
+        imgs = model.decoder(vectors)
+        if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
+            if model.decoder.output_activation == "sigmoid":
+                imgs = torch.sigmoid(imgs)
+            else:
+                imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
+        else:
+            # mlp decoder outputs logits (sigmoid), cnn/spherear use tanh
+            if imgs.shape[-1] == 784 or (len(imgs.shape) == 2 and imgs.shape[-1] == 784):
+                imgs = torch.sigmoid(imgs)
+            else:
+                imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
+        imgs = imgs.view(-1, *img_shape)
+    return imgs.cpu()
+
+
+def test_pairwise_bind_bundle_decode(
+    model, loader, device, output_dir,
+    class_names=None, img_shape=None,
+    n_classes=10,
+):
+    """
+    for each pair of classes, decode bind(a,b) and bundle(a,b).
+    grid: rows = class pairs, cols = [orig_a, orig_b, decode(bind), decode(bundle)]
+    """
+    from itertools import combinations
+
+    model.eval()
+
+    # collect one decoder-ready z and original image per class
+    class_z = {}
+    class_img = {}
+
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device)
+
+            # get decoder-ready z depending on model type
+            if hasattr(model, 'reparameterize') and hasattr(model, 'encoder'):
+                # sphereAR style: z is (B, T, D) or (B, T, 2D)
+                mu, params = model.encoder(x)
+                z, _, _ = model.reparameterize(mu, params)
+            elif hasattr(model, 'encode'):
+                # mlp style
+                out = model(x if x.dim() == 2 else x.view(x.size(0), -1))
+                if isinstance(out, (tuple, list)) and len(out) == 4 and isinstance(out[0], tuple):
+                    (_, _), _, z, _ = out
+                else:
+                    z_mean, _ = model.encode(x if x.dim() == 2 else x.view(x.size(0), -1))
+                    z = z_mean
+            else:
+                out = model(x)
+                z = out[-1] if isinstance(out, (tuple, list)) else out
+
+            for i in range(len(y)):
+                label = y[i].item()
+                if label not in class_z and len(class_z) < n_classes:
+                    class_z[label] = z[i:i+1]
+                    class_img[label] = x[i:i+1]
+
+            if len(class_z) >= n_classes:
+                break
+
+    if len(class_z) < 2:
+        return {"pairwise_bind_bundle_path": None}
+
+    os.makedirs(output_dir, exist_ok=True)
+    labels = sorted(class_z.keys())
+    pairs = list(combinations(labels, 2))
+
+    if img_shape is None:
+        sample_x = class_img[labels[0]]
+        img_shape = tuple(sample_x.shape[1:])
+
+    rows = []
+    pair_labels = []
+
+    for la, lb in pairs:
+        za = class_z[la]
+        zb = class_z[lb]
+
+        # bind and bundle operate on last dim, works for any shape
+        z_bind = bind(za, zb)
+        z_bundle = (za + zb) / math.sqrt(2)
+
+        # decode all 4
+        all_z = torch.cat([za, zb, z_bind, z_bundle], dim=0)
+        imgs = _decode_vectors(model, all_z, img_shape)
+        rows.append(imgs)
+
+        na = class_names[la] if class_names and la < len(class_names) else str(la)
+        nb = class_names[lb] if class_names and lb < len(class_names) else str(lb)
+        pair_labels.append(f"{na}+{nb}")
+
+    # build grid
+    C, H, W = img_shape
+    n_rows = len(rows)
+    n_cols = 4
+    canvas = torch.zeros(C, n_rows * H, n_cols * W)
+
+    for r, imgs in enumerate(rows):
+        for c in range(min(n_cols, len(imgs))):
+            canvas[:, r * H:(r + 1) * H, c * W:(c + 1) * W] = imgs[c]
+
+    fig_h = max(4, n_rows * 0.8)
+    fig_w = max(6, n_cols * 2)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    if C == 1:
+        ax.imshow(canvas.squeeze(0).numpy(), cmap="gray")
+    else:
+        ax.imshow(canvas.permute(1, 2, 0).numpy())
+
+    ax.set_yticks([H * i + H // 2 for i in range(n_rows)])
+    ax.set_yticklabels(pair_labels, fontsize=max(4, 8 - n_rows // 10))
+    ax.set_xticks([W * i + W // 2 for i in range(n_cols)])
+    ax.set_xticklabels(["class A", "class B", "bind(A,B)", "bundle(A,B)"], fontsize=9)
+    ax.set_title("pairwise bind & bundle decode")
+    plt.tight_layout()
+
+    path = os.path.join(output_dir, "pairwise_bind_bundle_decode.png")
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close()
+
+    return {"pairwise_bind_bundle_path": path, "n_pairs": len(pairs)}

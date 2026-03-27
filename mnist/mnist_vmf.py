@@ -14,6 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.wandb_utils import (
     WandbLogger,
     test_self_binding,
+    test_pairwise_bind_bundle_decode,
 )
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
@@ -224,6 +225,14 @@ def run(args):
                         os.rename(default_plot, variant_plot)
                 role_filler_raw = rf_results.get("role_filler_capacity", {})
 
+                # pairwise bind-bundle-decode test
+                pairwise_bind_bundle_path = test_pairwise_bind_bundle_decode(
+                    model, test_subset_loader, device, vis_dir,
+                    class_names=[str(i) for i in range(10)],
+                    img_shape=(1, 28, 28),
+                    n_classes=10,
+                )
+
                 if logger.use:
                     knn_metrics = {k: v for k, v in knn_results.items() if k.startswith("knn_")}
                     sb_metrics = {
@@ -265,6 +274,8 @@ def run(args):
                         rf_plot = os.path.join(save_d, f"{rf_name}.png")
                         if os.path.exists(rf_plot):
                             images_to_log[rf_name] = rf_plot
+                    if pairwise_bind_bundle_path and os.path.exists(pairwise_bind_bundle_path):
+                        images_to_log["Pairwise_Bind_Bundle_Decode"] = pairwise_bind_bundle_path
                     if images_to_log:
                         logger.log_images(images_to_log)
 

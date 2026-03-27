@@ -27,6 +27,7 @@ from utils.wandb_utils import (
     WandbLogger,
     plot_cross_dist_comparison_dim,
     plot_across_dims_comparison,
+    test_pairwise_bind_bundle_decode,
 )
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
@@ -489,6 +490,15 @@ def main(args):
 
                     role_filler_raw = rf_results.get("role_filler_capacity", {})
 
+                    # pairwise bind-bundle-decode test
+                    print(f"running pairwise bind-bundle-decode test ({dist_name})...")
+                    pairwise_bind_bundle_path = test_pairwise_bind_bundle_decode(
+                        model, test_loader, DEVICE, output_dir,
+                        class_names=CLASS_NAMES,
+                        img_shape=(3, 32, 32),
+                        n_classes=10,
+                    )
+
                     # self-binding and cross-class tests expect flat latent from model(x),
                     # but per-token model returns (B, T, D) mu — skip for now
                     fourier_star = {}
@@ -534,6 +544,8 @@ def main(args):
                         images["recon_after_k_binds_*"] = rp
                     if cross_class_star.get("cross_class_bind_unbind_plot_path"):
                         images["cross_class_binding_star"] = cross_class_star["cross_class_bind_unbind_plot_path"]
+                    if pairwise_bind_bundle_path and os.path.exists(pairwise_bind_bundle_path):
+                        images["pairwise_bind_bundle_decode"] = pairwise_bind_bundle_path
 
                     summary = {
                         "final_best_total_loss": best,
