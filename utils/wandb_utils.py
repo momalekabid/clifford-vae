@@ -10,7 +10,27 @@ try:
 except Exception:
     wandb = None
 
-from .vsa import bind, unbind, invert
+from .vsa import bind, unbind, invert, hrr_init, unitary_init, normalize_vectors
+
+
+def _get_flat_z(model, x):
+    """extract decoder-ready z from model, flattened to (B, flat_dim)."""
+    if hasattr(model, 'reparameterize') and hasattr(model, 'encoder'):
+        # vit/rescnn models: encoder -> reparameterize gives (B, T, D) or (B, T, 2*D)
+        mu, params = model.encoder(x)
+        z, _, _ = model.reparameterize(mu, params)
+    elif hasattr(model, 'encode'):
+        x_in = x if x.dim() == 2 else x.view(x.size(0), -1)
+        z, _ = model.encode(x_in)
+    else:
+        out = model(x)
+        z = out[-1] if isinstance(out, (tuple, list)) else out
+
+    # flatten per-token to per-sample
+    if z.dim() == 3:
+        z = z.reshape(z.size(0), -1)
+
+    return z
 
 
 def test_self_binding(
@@ -18,10 +38,15 @@ def test_self_binding(
     loader,
     device,
     output_dir,
-    k_self_bind: int = 50,
+    k_self_bind: int = 40,
     unbind_method: str = "*",
     img_shape=(1, 28, 28),
+    n_trials: int = 10,
 ):
+    """schlegel et al. sec 3.2 — sequential bind with random latent partners, then unbind in reverse.
+    measures cosine similarity between recovered vector and original at each depth m.
+    uses real encoded latents as partners (not synthetic random vectors).
+    """
     try:
         model.eval()
         with torch.no_grad():
@@ -29,24 +54,10 @@ def test_self_binding(
             all_labels = []
             for x, y in loader:
                 x = x.to(device)
-                out = model(x)
-                if isinstance(out, (tuple, list)):
-                    if len(out) == 4 and isinstance(out[0], tuple):
-                        (z_mean, _), _, z, _ = out
-                    elif len(out) == 4:
-                        _, q_z, _, mu = out
-                        z = (
-                            q_z.rsample()
-                            if getattr(model, "distribution", None) == "clifford"
-                            else mu
-                        )
-                    else:
-                        z = out[-1]
-                else:
-                    z = out
+                z = _get_flat_z(model, x)
                 all_z.append(z.detach())
                 all_labels.append(y)
-                if len(torch.cat(all_z, 0)) >= 100:
+                if len(torch.cat(all_z, 0)) >= 200:
                     break
 
             if not all_z:
@@ -58,22 +69,6 @@ def test_self_binding(
             all_z = torch.cat(all_z, 0)
             all_labels = torch.cat(all_labels, 0)
 
-            unique_labels = torch.unique(all_labels)[:3]
-            selected_z = []
-            selected_labels = []
-
-            for label in unique_labels:
-                label_mask = all_labels == label
-                if label_mask.sum() > 0:
-                    indices = torch.where(label_mask)[0]
-                    random_idx = indices[torch.randint(0, len(indices), (1,))]
-                    selected_z.append(all_z[random_idx])
-                    selected_labels.append(label.item())
-
-            if not selected_z:
-                selected_z = [all_z[0]]
-                selected_labels = [all_labels[0].item()]
-
     except Exception:
         return {
             "binding_k_self_similarity": 0.0,
@@ -81,128 +76,199 @@ def test_self_binding(
         }
 
     if getattr(model, "distribution", None) == "gaussian":
-        selected_z = [
-            torch.nn.functional.normalize(z.unsqueeze(0), p=2, dim=-1)
-            for z in selected_z
-        ]
-    else:
-        selected_z = [z.unsqueeze(0) for z in selected_z]
+        all_z = torch.nn.functional.normalize(all_z, p=2, dim=-1)
 
-    a = selected_z[0]
-    ab = a.clone()
-    for _ in range(k_self_bind):
-        ab = bind(ab, a)
-    for _ in range(k_self_bind):
-        ab = unbind(ab, a, method=unbind_method)
-    cos_sim = torch.nn.functional.cosine_similarity(ab, a, dim=-1).mean().item()
+    # cap depth to available partners
+    max_depth = min(k_self_bind, len(all_z) - 1)
 
-    sims = []
-    recon_every = 10
-    all_recon_vectors = []
-    recon_steps = []
-
-    for m in range(1, k_self_bind + 1):
-        cur = a.clone()
-        for _ in range(m):
-            cur = bind(cur, a)
-        for _ in range(m):
-            cur = unbind(cur, a, method=unbind_method)
-        sim_m = torch.nn.functional.cosine_similarity(cur, a, dim=-1).mean().item()
-        sims.append(sim_m)
-
-    for i, start_vec in enumerate(selected_z):
-        recon_vectors_for_this_start = [start_vec.squeeze(0)]
-        for m in range(1, k_self_bind + 1):
-            cur = start_vec.clone()
+    # --- curve 1: self-binding (bind with self m times, unbind m times) ---
+    self_depth_sims = {m: [] for m in range(1, max_depth + 1)}
+    for trial in range(n_trials):
+        idx = torch.randint(0, len(all_z), (1,)).item()
+        target = all_z[idx:idx+1]
+        for m in range(1, max_depth + 1):
+            bound = target.clone()
             for _ in range(m):
-                cur = bind(cur, start_vec)
+                bound = bind(bound, target)
+            recovered = bound.clone()
             for _ in range(m):
-                cur = unbind(cur, start_vec, method=unbind_method)
-            if (m % recon_every == 0) or (m == k_self_bind):
-                recon_vectors_for_this_start.append(cur.squeeze(0))
-                if i == 0:
-                    recon_steps.append(m)
-        all_recon_vectors.append(recon_vectors_for_this_start)
+                recovered = unbind(recovered, target, method=unbind_method)
+            sim = torch.nn.functional.cosine_similarity(recovered, target, dim=-1).mean().item()
+            self_depth_sims[m].append(sim)
+
+    # --- curve 2: random-partner binding (schlegel sec 3.2) ---
+    rand_depth_sims = {m: [] for m in range(1, max_depth + 1)}
+    for trial in range(n_trials):
+        idx = torch.randint(0, len(all_z), (1,)).item()
+        target = all_z[idx:idx+1]
+
+        other_idx = [i for i in range(len(all_z)) if i != idx]
+        perm = torch.randperm(len(other_idx))[:max_depth]
+        partners = all_z[[other_idx[p] for p in perm]]
+
+        for m in range(1, max_depth + 1):
+            bound = target.clone()
+            for i in range(m):
+                bound = bind(bound, partners[i:i+1])
+            recovered = bound.clone()
+            for i in range(m - 1, -1, -1):
+                recovered = unbind(recovered, partners[i:i+1], method=unbind_method)
+            sim = torch.nn.functional.cosine_similarity(recovered, target, dim=-1).mean().item()
+            rand_depth_sims[m].append(sim)
+
+    depths = list(range(1, max_depth + 1))
+    self_means = [np.mean(self_depth_sims[m]) for m in depths]
+    self_stds = [np.std(self_depth_sims[m]) for m in depths]
+    rand_means = [np.mean(rand_depth_sims[m]) for m in depths]
+    rand_stds = [np.std(rand_depth_sims[m]) for m in depths]
+
+    # use random-partner similarity as the primary metric (harder test)
+    cos_sim = rand_means[-1] if rand_means else 0.0
+    # expose both for logging
+    mean_sims = rand_means
 
     path_bind_curve = os.path.join(
         output_dir, f"similarity_after_k_binds_{unbind_method}.png"
     )
     os.makedirs(output_dir, exist_ok=True)
-    plt.figure(figsize=(7, 4))
-    xs = np.arange(1, k_self_bind + 1)
-    plt.plot(xs, sims, marker="o")
-    plt.ylim(0.0, 1.05)
-    plt.xlabel("Number of Recursive Bind-Unbind Cycles ($m$)")
-    plt.ylabel("Cosine Similarity to Original")
-    plt.title("Invertible Self-Binding")
-    plt.grid(alpha=0.3)
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    ax.plot(depths, self_means, "o-", markersize=3, label="self-binding", color="tab:blue")
+    ax.fill_between(depths,
+                    [m - s for m, s in zip(self_means, self_stds)],
+                    [m + s for m, s in zip(self_means, self_stds)],
+                    alpha=0.15, color="tab:blue")
+
+    ax.plot(depths, rand_means, "s-", markersize=3, label="random latent partners", color="tab:orange")
+    ax.fill_between(depths,
+                    [m - s for m, s in zip(rand_means, rand_stds)],
+                    [m + s for m, s in zip(rand_means, rand_stds)],
+                    alpha=0.15, color="tab:orange")
+
+    # baselines: HRR and unitary vectors at same dimensionality
+    d = all_z.shape[-1]
+    for bname, init_fn, color, marker in [
+        ("HRR", hrr_init, "tab:gray", "^"),
+        ("unitary (FHRR)", unitary_init, "tab:green", "v"),
+    ]:
+        b_depth_sims = {m: [] for m in range(1, max_depth + 1)}
+        for trial in range(n_trials):
+            bvecs = init_fn(max_depth + 1, d, device="cpu")
+            bvecs = normalize_vectors(bvecs)
+            target = bvecs[0:1]
+            partners = bvecs[1:]
+            for m in range(1, max_depth + 1):
+                bound = target.clone()
+                for i in range(m):
+                    bound = bind(bound, partners[i:i+1])
+                recovered = bound.clone()
+                for i in range(m - 1, -1, -1):
+                    recovered = unbind(recovered, partners[i:i+1], method=unbind_method)
+                sim = torch.nn.functional.cosine_similarity(recovered, target, dim=-1).mean().item()
+                b_depth_sims[m].append(sim)
+        b_means = [np.mean(b_depth_sims[m]) for m in depths]
+        b_stds = [np.std(b_depth_sims[m]) for m in depths]
+        ax.plot(depths, b_means, f"{marker}-", markersize=3, label=bname, color=color,
+                linestyle="--", alpha=0.7)
+        ax.fill_between(depths,
+                        [m - s for m, s in zip(b_means, b_stds)],
+                        [m + s for m, s in zip(b_means, b_stds)],
+                        alpha=0.08, color=color)
+
+    ax.set_ylim(-0.1, 1.05)
+    ax.set_xlabel("binding depth $m$")
+    ax.set_ylabel("cosine similarity to original")
+    ax.set_title(f"approximate inverse binding depth (d={all_z.shape[-1]})")
+    ax.legend()
+    ax.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(path_bind_curve, dpi=200, bbox_inches="tight")
     plt.close()
 
+    # decode reconstructions at selected depths for a few example vectors
+    recon_paths = None
     try:
-        if all_recon_vectors:
+        recon_every = max(1, max_depth // 5)
+        recon_depths = [m for m in depths if m % recon_every == 0 or m == max_depth]
+
+        # pick 3 different class examples
+        unique_labels = torch.unique(all_labels)[:3]
+        example_indices = []
+        example_labels = []
+        for label in unique_labels:
+            mask = all_labels == label
+            if mask.sum() > 0:
+                idx = torch.where(mask)[0][0].item()
+                example_indices.append(idx)
+                example_labels.append(label.item())
+
+        if example_indices:
+            all_recon_vectors = []
+            for ex_idx in example_indices:
+                target = all_z[ex_idx:ex_idx+1]
+                row_vecs = [target.squeeze(0)]
+
+                other_idx = [i for i in range(len(all_z)) if i != ex_idx]
+                perm = torch.randperm(len(other_idx))[:max_depth]
+                partners = all_z[[other_idx[p] for p in perm]]
+
+                for m in recon_depths:
+                    bound = target.clone()
+                    for i in range(m):
+                        bound = bind(bound, partners[i:i+1])
+                    recovered = bound.clone()
+                    for i in range(m - 1, -1, -1):
+                        recovered = unbind(recovered, partners[i:i+1], method=unbind_method)
+                    row_vecs.append(recovered.squeeze(0))
+                all_recon_vectors.append(row_vecs)
+
             recon_paths = os.path.join(
                 output_dir, f"recon_after_k_binds_{unbind_method}.png"
             )
 
-            all_vectors = []
-            row_labels = []
-
-            for i, recon_vectors_for_start in enumerate(all_recon_vectors):
-                for vec in recon_vectors_for_start:
-                    all_vectors.append(vec)
-                class_label = selected_labels[i] if i < len(selected_labels) else i
-                row_labels.append(f"Class {class_label}")
+            flat_vecs = []
+            for row in all_recon_vectors:
+                flat_vecs.extend(row)
 
             with torch.no_grad():
-                imgs = model.decoder(torch.stack(all_vectors, 0))
-                if hasattr(model, "decoder") and hasattr(
-                    model.decoder, "output_activation"
-                ):
+                imgs = model.decoder(torch.stack(flat_vecs, 0))
+                if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
                     if model.decoder.output_activation == "sigmoid":
                         imgs = torch.sigmoid(imgs)
                     else:
                         imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
                 else:
                     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
-                imgs = imgs.view(-1, *img_shape)
-                imgs = imgs.cpu()
+                imgs = imgs.view(-1, *img_shape).cpu()
 
             C, h, w = imgs.shape[1], imgs.shape[-2], imgs.shape[-1]
             n_rows = len(all_recon_vectors)
-            n_cols = len(all_recon_vectors[0]) if all_recon_vectors else 1
-
+            n_cols = len(all_recon_vectors[0])
             canvas = torch.zeros(C, n_rows * h, n_cols * w)
 
             img_idx = 0
             for row in range(n_rows):
                 for col in range(n_cols):
                     if img_idx < len(imgs):
-                        canvas[
-                            :, row * h : (row + 1) * h, col * w : (col + 1) * w
-                        ] = imgs[img_idx]
+                        canvas[:, row * h:(row + 1) * h, col * w:(col + 1) * w] = imgs[img_idx]
                         img_idx += 1
 
-            plt.figure(figsize=(max(12, n_cols * 1.5), max(6, n_rows * 2)))
+            fig, ax = plt.subplots(figsize=(max(12, n_cols * 1.5), max(4, n_rows * 2)))
             if C == 1:
-                plt.imshow(canvas.squeeze(0), cmap="gray")
+                ax.imshow(canvas.squeeze(0).numpy(), cmap="gray")
             else:
-                plt.imshow(canvas.permute(1, 2, 0))
+                ax.imshow(canvas.permute(1, 2, 0).numpy())
 
-            plt.xticks([])
-            plt.yticks([])
-
-            class_info = ", ".join(
-                [
-                    f"Class {label}"
-                    for label in selected_labels[: len(all_recon_vectors)]
-                ]
-            )
-            plt.title(f"Reconstructions After $m$ Recursive Bind-Unbind Cycles\nRows: {class_info}")
+            col_labels = ["original"] + [f"m={m}" for m in recon_depths]
+            ax.set_xticks([w * i + w // 2 for i in range(n_cols)])
+            ax.set_xticklabels(col_labels, fontsize=8)
+            ax.set_yticks([h * i + h // 2 for i in range(n_rows)])
+            ax.set_yticklabels([f"class {l}" for l in example_labels], fontsize=9)
+            ax.set_title("decoded recovery after m sequential bind-unbind cycles")
             plt.tight_layout()
             plt.savefig(recon_paths, dpi=200, bbox_inches="tight")
             plt.close()
+
     except Exception as e:
         print(e)
         recon_paths = None
@@ -211,170 +277,8 @@ def test_self_binding(
         "binding_k_self_similarity": cos_sim,
         "similarity_after_k_binds_plot_path": path_bind_curve,
         "recon_after_k_binds_plot_path": recon_paths,
-        "k_sims": sims,
-        "k_values": list(range(1, k_self_bind + 1)),
-    }
-
-
-def test_cross_class_bind_unbind(
-    model,
-    loader,
-    device,
-    output_dir,
-    unbind_method: str = "*",
-    img_shape=(1, 28, 28),
-):
-    """
-    Test binding/unbinding different classes, with reconstructions.
-    """
-    try:
-        model.eval()
-        with torch.no_grad():
-            all_z = []
-            all_labels = []
-            for x, y in loader:
-                x = x.to(device)
-                out = model(x)
-                if isinstance(out, (tuple, list)):
-                    if len(out) == 4 and isinstance(out[0], tuple):
-                        (z_mean, _), _, z, _ = out
-                    elif len(out) == 4:
-                        _, q_z, _, mu = out
-                        z = (
-                            q_z.rsample()
-                            if getattr(model, "distribution", None) == "clifford"
-                            else mu
-                        )
-                    else:
-                        z = out[-1]
-                else:
-                    z = out
-                all_z.append(z.detach())
-                all_labels.append(y)
-                if len(torch.cat(all_z, 0)) >= 200:
-                    break
-
-            if not all_z:
-                return {
-                    "cross_class_bind_unbind_similarity": 0.0,
-                    "cross_class_bind_unbind_plot_path": None,
-                }
-
-            all_z = torch.cat(all_z, 0)
-            all_labels = torch.cat(all_labels, 0)
-
-            unique_labels = torch.unique(all_labels)
-            if len(unique_labels) < 2:
-                return {
-                    "cross_class_bind_unbind_similarity": 0.0,
-                    "cross_class_bind_unbind_plot_path": None,
-                }
-
-            class_a_label = unique_labels[0]
-            class_b_label = unique_labels[1]
-
-            class_a_mask = all_labels == class_a_label
-            class_b_mask = all_labels == class_b_label
-
-            if class_a_mask.sum() == 0 or class_b_mask.sum() == 0:
-                return {
-                    "cross_class_bind_unbind_similarity": 0.0,
-                    "cross_class_bind_unbind_plot_path": None,
-                }
-
-            class_a_indices = torch.where(class_a_mask)[0]
-            class_b_indices = torch.where(class_b_mask)[0]
-
-            # use first item per class for deterministic 1:1 comparability across distributions
-            a_idx = class_a_indices[0:1]
-            b_idx = class_b_indices[0:1]
-
-            a = all_z[a_idx]
-            b = all_z[b_idx]
-
-    except Exception:
-        return {
-            "cross_class_bind_unbind_similarity": 0.0,
-            "cross_class_bind_unbind_plot_path": None,
-        }
-
-    if getattr(model, "distribution", None) == "gaussian":
-        a = torch.nn.functional.normalize(a, p=2, dim=-1)
-        b = torch.nn.functional.normalize(b, p=2, dim=-1)
-
-    ab = bind(a, b)
-    recovered_b = unbind(ab, a, method=unbind_method)
-    recovered_a = unbind(ab, b, method=unbind_method)
-
-    sim_b = torch.nn.functional.cosine_similarity(recovered_b, b, dim=-1).mean().item()
-    sim_a = torch.nn.functional.cosine_similarity(recovered_a, a, dim=-1).mean().item()
-
-    avg_sim = (sim_a + sim_b) / 2.0
-
-    plot_path = None
-    try:
-        os.makedirs(output_dir, exist_ok=True)
-        plot_path = os.path.join(
-            output_dir, f"cross_class_bind_unbind_{unbind_method}.png"
-        )
-
-        with torch.no_grad():
-            vectors_to_decode = torch.stack(
-                [
-                    a.squeeze(0),
-                    b.squeeze(0),
-                    recovered_a.squeeze(0),
-                    recovered_b.squeeze(0),
-                ],
-                0,
-            )
-            imgs = model.decoder(vectors_to_decode)
-
-            if hasattr(model, "decoder") and hasattr(
-                model.decoder, "output_activation"
-            ):
-                if model.decoder.output_activation == "sigmoid":
-                    imgs = torch.sigmoid(imgs)
-                else:
-                    imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
-            else:
-                imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
-            imgs = imgs.view(-1, *img_shape)
-            imgs = imgs.cpu()
-
-        C, h, w = imgs.shape[1], imgs.shape[-2], imgs.shape[-1]
-        canvas = torch.zeros(C, h, 4 * w)
-
-        labels = [
-            f"A (class {class_a_label.item()})",
-            f"B (class {class_b_label.item()})",
-            f"Recovered A (sim: {sim_a:.3f})",
-            f"Recovered B (sim: {sim_b:.3f})",
-        ]
-
-        for i in range(4):
-            canvas[:, :, i * w : (i + 1) * w] = imgs[i]
-
-        plt.figure(figsize=(12, 3))
-        if C == 1:
-            plt.imshow(canvas.squeeze(0), cmap="gray")
-        else:
-            plt.imshow(canvas.permute(1, 2, 0))
-
-        plt.xticks([w // 2 + i * w for i in range(4)], labels, rotation=15, ha="right")
-        plt.yticks([])
-        plt.title(f"Cross-Class Binding and Unbinding (Average Similarity: {avg_sim:.3f})")
-        plt.tight_layout()
-        plt.savefig(plot_path, dpi=200, bbox_inches="tight")
-        plt.close()
-
-    except Exception as e:
-        print(e)
-        plot_path = None
-
-    return {
-        "cross_class_bind_unbind_similarity": avg_sim,
-        "cross_class_bind_unbind_plot_path": plot_path,
+        "k_sims": mean_sims,
+        "k_values": depths,
     }
 
 
@@ -431,14 +335,18 @@ def _extract_latent_mu(model, x: torch.Tensor):
         if len(out) == 4 and isinstance(out[0], tuple):
             # ((z_mean, z_param2), (q_z,p_z), z, x_recon)
             (z_mean, _), _, _, _ = out
-            return z_mean
+            mu = z_mean
         elif len(out) == 4:
             # (x_recon, q_z, p_z, mu)
             _, _, _, mu = out
-            return mu
         else:
-            return out[-1]
-    return out
+            mu = out[-1]
+    else:
+        mu = out
+    # flatten per-token to per-sample for vit/rescnn
+    if mu.dim() == 3:
+        mu = mu.reshape(mu.size(0), -1)
+    return mu
 
 
 _CLASS_NAMES = {
@@ -1369,16 +1277,18 @@ def test_pairwise_bind_bundle_decode(
 
             # get decoder-ready z depending on model type
             if hasattr(model, 'reparameterize') and hasattr(model, 'encoder'):
-                # sphereAR style: z is (B, T, D) or (B, T, 2D)
+                # cnn vae, sphereAR, cliffordar: encoder(x) returns (mu, params)
+                # must check before 'encode' since cliffordar has both
                 mu, params = model.encoder(x)
                 z, _, _ = model.reparameterize(mu, params)
             elif hasattr(model, 'encode'):
-                # mlp style
-                out = model(x if x.dim() == 2 else x.view(x.size(0), -1))
+                # mlp vae: has encode() method, forward returns ((mu, p), (q,p), z, recon)
+                x_in = x if x.dim() == 2 else x.view(x.size(0), -1)
+                out = model(x_in)
                 if isinstance(out, (tuple, list)) and len(out) == 4 and isinstance(out[0], tuple):
-                    (_, _), _, z, _ = out
+                    (_, _), _, z, _ = out  # z is decoder-ready sampled latent
                 else:
-                    z_mean, _ = model.encode(x if x.dim() == 2 else x.view(x.size(0), -1))
+                    z_mean, _ = model.encode(x_in)
                     z = z_mean
             else:
                 out = model(x)
@@ -1407,6 +1317,9 @@ def test_pairwise_bind_bundle_decode(
     rows = []
     pair_labels = []
 
+    sims_a = []
+    sims_b = []
+
     for la, lb in pairs:
         za = class_z[la]
         zb = class_z[lb]
@@ -1415,8 +1328,17 @@ def test_pairwise_bind_bundle_decode(
         z_bind = bind(za, zb)
         z_bundle = (za + zb) / math.sqrt(2)
 
-        # decode all 4
-        all_z = torch.cat([za, zb, z_bind, z_bundle], dim=0)
+        # unbind to recover individual items
+        recovered_a = unbind(z_bind, zb)
+        recovered_b = unbind(z_bind, za)
+
+        sim_a = torch.nn.functional.cosine_similarity(recovered_a, za, dim=-1).mean().item()
+        sim_b = torch.nn.functional.cosine_similarity(recovered_b, zb, dim=-1).mean().item()
+        sims_a.append(sim_a)
+        sims_b.append(sim_b)
+
+        # decode all 6: orig_a, orig_b, bind, bundle, recovered_a, recovered_b
+        all_z = torch.cat([za, zb, z_bind, z_bundle, recovered_a, recovered_b], dim=0)
         imgs = _decode_vectors(model, all_z, img_shape)
         rows.append(imgs)
 
@@ -1427,7 +1349,7 @@ def test_pairwise_bind_bundle_decode(
     # build grid
     C, H, W = img_shape
     n_rows = len(rows)
-    n_cols = 4
+    n_cols = 6
     canvas = torch.zeros(C, n_rows * H, n_cols * W)
 
     for r, imgs in enumerate(rows):
@@ -1446,12 +1368,81 @@ def test_pairwise_bind_bundle_decode(
     ax.set_yticks([H * i + H // 2 for i in range(n_rows)])
     ax.set_yticklabels(pair_labels, fontsize=max(4, 8 - n_rows // 10))
     ax.set_xticks([W * i + W // 2 for i in range(n_cols)])
-    ax.set_xticklabels(["class A", "class B", "bind(A,B)", "bundle(A,B)"], fontsize=9)
-    ax.set_title("pairwise bind & bundle decode")
+    ax.set_xticklabels(["A", "B", "bind(A,B)", "bundle(A,B)", "unbind→A", "unbind→B"], fontsize=8)
+    avg_sim = (sum(sims_a) + sum(sims_b)) / (2 * len(sims_a)) if sims_a else 0
+    ax.set_title(f"pairwise bind, bundle & unbind recovery (avg cosine sim: {avg_sim:.3f})")
     plt.tight_layout()
 
     path = os.path.join(output_dir, "pairwise_bind_bundle_decode.png")
     plt.savefig(path, dpi=200, bbox_inches="tight")
     plt.close()
 
-    return {"pairwise_bind_bundle_path": path, "n_pairs": len(pairs)}
+    avg_unbind_sim = (sum(sims_a) + sum(sims_b)) / (2 * len(sims_a)) if sims_a else 0
+    return {
+        "pairwise_bind_bundle_path": path,
+        "n_pairs": len(pairs),
+        "avg_unbind_similarity": avg_unbind_sim,
+    }
+
+
+def sample_prior_z(dist_name, latent_dim, n, device, l2_normalize=False):
+    """sample n latent vectors from the prior."""
+    if dist_name == "clifford":
+        angles = torch.rand(n, latent_dim, device=device) * (2 * math.pi)
+        freq_dim = 2 * latent_dim
+        theta_s = torch.zeros(n, freq_dim, device=device)
+        theta_s[:, 1:latent_dim] = angles[:, 1:]
+        theta_s[:, -latent_dim + 1:] = -torch.flip(angles[:, 1:], dims=(-1,))
+        return torch.fft.ifft(torch.exp(1j * theta_s), dim=-1).real.float()
+    elif dist_name == "powerspherical":
+        z = torch.randn(n, latent_dim, device=device)
+        return z / z.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    else:
+        z = torch.randn(n, latent_dim, device=device)
+        if l2_normalize:
+            z = z / z.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        return z
+
+
+def compute_fid(model, test_loader, device, dist_name, latent_dim,
+                in_channels=3, n_samples=2048, batch_size=256):
+    """frechet inception distance between prior samples (decoded) and test set.
+    requires torchmetrics; returns nan if not installed.
+    """
+    try:
+        from torchmetrics.image.fid import FrechetInceptionDistance
+    except ImportError:
+        print("  torchmetrics not available, skipping FID")
+        return {"fid": float("nan")}
+
+    model.eval()
+    fid_metric = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+
+    # real images
+    n_real = 0
+    with torch.no_grad():
+        for x, _ in test_loader:
+            x_01 = (x.to(device) * 0.5 + 0.5).clamp(0, 1)
+            if in_channels == 1:
+                x_01 = x_01.repeat(1, 3, 1, 1)
+            fid_metric.update(x_01, real=True)
+            n_real += len(x)
+            if n_real >= n_samples:
+                break
+
+    # fake images from prior
+    l2_norm = getattr(model, "l2_normalize", False)
+    n_done = 0
+    with torch.no_grad():
+        while n_done < n_samples:
+            bs = min(batch_size, n_samples - n_done)
+            z = sample_prior_z(dist_name, latent_dim, bs, device, l2_normalize=l2_norm)
+            imgs_01 = (model.decoder(z) * 0.5 + 0.5).clamp(0, 1)
+            if in_channels == 1:
+                imgs_01 = imgs_01.repeat(1, 3, 1, 1)
+            fid_metric.update(imgs_01, real=False)
+            n_done += bs
+
+    score = fid_metric.compute().item()
+    fid_metric.reset()
+    return {"fid": score}

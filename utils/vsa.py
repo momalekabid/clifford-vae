@@ -168,17 +168,44 @@ def test_bundle_capacity(
     if plot:
         import os
 
+        # compute baselines with HRR and unitary vectors at same d
+        baselines = {}
+        for bname, init_fn in [("HRR", hrr_init), ("unitary", unitary_init)]:
+            bvecs = init_fn(n_items, d, device="cpu")
+            if normalize:
+                bvecs = normalize_vectors(bvecs)
+            b_res = {"k": [], "accuracy": [], "std": []}
+            for k in k_range:
+                trial_accs = []
+                for _ in range(min(n_trials, 10)):
+                    n_needed = min(2 * k, n_items)
+                    actual_k = n_needed // 2
+                    idx = torch.randperm(n_items)[:n_needed]
+                    X = bvecs[idx[:actual_k]]
+                    Xp = bvecs[idx[actual_k:actual_k * 2]]
+                    C1 = bundle(X, normalize=True)
+                    C2 = bundle(Xp, normalize=True)
+                    s1 = F.cosine_similarity(X, C1.unsqueeze(0).expand(actual_k, -1), dim=-1)
+                    s2 = F.cosine_similarity(X, C2.unsqueeze(0).expand(actual_k, -1), dim=-1)
+                    trial_accs.append((s1 > s2).float().mean().item())
+                b_res["k"].append(k)
+                b_res["accuracy"].append(float(np.mean(trial_accs)))
+                b_res["std"].append(float(np.std(trial_accs)))
+            baselines[bname] = b_res
+
         plt.figure(figsize=(8, 5))
-        plt.errorbar(
-            results["k"],
-            results["accuracy"],
-            yerr=results["std"],
-            marker="o",
-            capsize=3,
-        )
+        plt.errorbar(results["k"], results["accuracy"], yerr=results["std"],
+                     marker="o", capsize=3, label="learned latents", color="tab:blue")
+        plt.errorbar(baselines["HRR"]["k"], baselines["HRR"]["accuracy"],
+                     yerr=baselines["HRR"]["std"], marker="^", capsize=3,
+                     label="HRR (random)", color="tab:gray", linestyle="--", alpha=0.7)
+        plt.errorbar(baselines["unitary"]["k"], baselines["unitary"]["accuracy"],
+                     yerr=baselines["unitary"]["std"], marker="v", capsize=3,
+                     label="unitary (FHRR)", color="tab:green", linestyle="--", alpha=0.7)
         plt.xlabel("Number of Bundled Vectors ($k$)")
         plt.ylabel("Retrieval Accuracy")
         plt.title(f"Bundle Capacity ($d={d}$, $N={n_items}$)")
+        plt.legend()
         plt.grid(True, alpha=0.3)
         plt.ylim(0, 1.05)
         plt.tight_layout()
@@ -231,6 +258,9 @@ def test_binding_unbinding_pairs(
         if normalize:
             item_memory = normalize_vectors(item_memory)
 
+    # move to cpu for fft — cuFFT chokes on large flattened latent dims
+    item_memory = item_memory.cpu()
+
     results = {"k": [], "accuracy": [], "std": []}
 
     for k in k_range:
@@ -238,13 +268,13 @@ def test_binding_unbinding_pairs(
 
         for _ in range(n_trials):
             if bind_with_random:
-                indices = torch.randperm(n_items, device=device)[:k]
+                indices = torch.randperm(n_items)[:k]
                 fillers = item_memory[indices]
-                roles = unitary_init(k, d, device=device)
+                roles = unitary_init(k, d, device="cpu")
                 if normalize:
                     roles = normalize_vectors(roles)
             else:
-                indices = torch.randperm(n_items, device=device)[: 2 * k]
+                indices = torch.randperm(n_items)[: 2 * k]
                 roles = item_memory[indices[:k]]
                 fillers = item_memory[indices[k : 2 * k]]
 
@@ -254,7 +284,7 @@ def test_binding_unbinding_pairs(
                 braided_pairs = []
                 perms = []
                 for i in range(k):
-                    perm = torch.randperm(d, device=device)
+                    perm = torch.randperm(d)
                     perms.append(perm)
                     braided = permute_vector(pairs[i], perm)
                     braided_pairs.append(braided)
@@ -297,28 +327,63 @@ def test_binding_unbinding_pairs(
         results["std"].append(std_acc)
 
     if plot:
-        plt.figure(figsize=(8, 5))
-        braid_label = " (Braided)" if use_braiding else ""
+        import os
+
+        # compute baselines with HRR and unitary vectors at same d
+        baselines = {}
+        for bname, init_fn in [("HRR", hrr_init), ("unitary", unitary_init)]:
+            bvecs = init_fn(n_items, d, device="cpu")
+            if normalize:
+                bvecs = normalize_vectors(bvecs)
+            b_res = {"k": [], "accuracy": [], "std": []}
+            for k in k_range:
+                trial_accs = []
+                for _ in range(min(n_trials, 10)):
+                    if bind_with_random:
+                        idx = torch.randperm(n_items)[:k]
+                        fillers = bvecs[idx]
+                        roles = unitary_init(k, d, device="cpu")
+                        if normalize:
+                            roles = normalize_vectors(roles)
+                    else:
+                        idx = torch.randperm(n_items)[:2 * k]
+                        roles = bvecs[idx[:k]]
+                        fillers = bvecs[idx[k:2 * k]]
+                    pairs = bind(roles, fillers)
+                    bundled = bundle(pairs, normalize=True)
+                    correct = 0
+                    for i in range(k):
+                        recovered = unbind(bundled.unsqueeze(0), roles[i].unsqueeze(0),
+                                           method=unbind_method).squeeze()
+                        sims = similarity(recovered, bvecs)
+                        best_idx = torch.argmax(sims).item()
+                        target_idx = idx[i].item() if bind_with_random else idx[k + i].item()
+                        if best_idx == target_idx:
+                            correct += 1
+                    trial_accs.append(correct / k)
+                b_res["k"].append(k)
+                b_res["accuracy"].append(float(np.mean(trial_accs)))
+                b_res["std"].append(float(np.std(trial_accs)))
+            baselines[bname] = b_res
+
         bind_label = " (Random Keys)" if bind_with_random else ""
-        plt.errorbar(
-            results["k"],
-            results["accuracy"],
-            yerr=results["std"],
-            marker="s",
-            capsize=3,
-            color="red",
-        )
+        plt.figure(figsize=(8, 5))
+        plt.errorbar(results["k"], results["accuracy"], yerr=results["std"],
+                     marker="s", capsize=3, label="learned latents", color="tab:blue")
+        plt.errorbar(baselines["HRR"]["k"], baselines["HRR"]["accuracy"],
+                     yerr=baselines["HRR"]["std"], marker="^", capsize=3,
+                     label="HRR (random)", color="tab:gray", linestyle="--", alpha=0.7)
+        plt.errorbar(baselines["unitary"]["k"], baselines["unitary"]["accuracy"],
+                     yerr=baselines["unitary"]["std"], marker="v", capsize=3,
+                     label="unitary (FHRR)", color="tab:green", linestyle="--", alpha=0.7)
         plt.xlabel("Number of Bundled Role-Filler Pairs ($k$)")
         plt.ylabel("Unbinding Accuracy")
-        plt.title(
-            f"Role-Filler Query Capacity{bind_label}{braid_label} ($d={d}$, $N={n_items}$)"
-        )
+        plt.title(f"Role-Filler Query Capacity{bind_label} ($d={d}$, $N={n_items}$)")
+        plt.legend()
         plt.grid(True, alpha=0.3)
         plt.ylim(0, 1.05)
         plt.tight_layout()
         if save_dir:
-            import os
-
             os.makedirs(save_dir, exist_ok=True)
             plt.savefig(os.path.join(save_dir, "role_filler_capacity.png"), dpi=200)
         plt.close()

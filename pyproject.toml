@@ -13,3 +13,12 @@ dependencies = [
     "torchvision>=0.16",
     "wandb>=0.15",
 ]
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu124"
+name = "pytorch"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }

@@ -116,7 +116,6 @@ if __name__ == "__main__":
     init_fns = {
         "HRR": lambda n, d, dev=device: hrr_init(n, d, device=dev),
         "Unitary (FHRR)": lambda n, d, dev=device: unitary_init(n, d, device=dev),
-        "Clifford": lambda n, d, dev=device: clifford_init(n, d, device=dev),
     }
 
     results = {}
