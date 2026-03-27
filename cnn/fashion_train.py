@@ -1177,6 +1177,8 @@ def main(args):
                         print(f"  all role-filler variants completed in {time.time() - t0:.2f}s")
 
                         # deconv variants
+                        deconv_dir = f"{output_dir}/deconv"
+                        os.makedirs(deconv_dir, exist_ok=True)
                         print(f"running role-filler deconv variants ({dist_name})...")
                         rf_deconv_variants = [
                             (True, False, "role_filler_capacity_deconv"),

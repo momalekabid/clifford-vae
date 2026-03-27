@@ -226,12 +226,13 @@ def run(args):
                 role_filler_raw = rf_results.get("role_filler_capacity", {})
 
                 # pairwise bind-bundle-decode test
-                pairwise_bind_bundle_path = test_pairwise_bind_bundle_decode(
+                pairwise_result = test_pairwise_bind_bundle_decode(
                     model, test_subset_loader, device, vis_dir,
                     class_names=[str(i) for i in range(10)],
                     img_shape=(1, 28, 28),
                     n_classes=10,
                 )
+                pairwise_bind_bundle_path = pairwise_result.get("pairwise_bind_bundle_path")
 
                 if logger.use:
                     knn_metrics = {k: v for k, v in knn_results.items() if k.startswith("knn_")}

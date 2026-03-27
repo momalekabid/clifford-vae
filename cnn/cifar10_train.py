@@ -492,12 +492,13 @@ def main(args):
 
                     # pairwise bind-bundle-decode test
                     print(f"running pairwise bind-bundle-decode test ({dist_name})...")
-                    pairwise_bind_bundle_path = test_pairwise_bind_bundle_decode(
+                    pairwise_result = test_pairwise_bind_bundle_decode(
                         model, test_loader, DEVICE, output_dir,
                         class_names=CLASS_NAMES,
                         img_shape=(3, 32, 32),
                         n_classes=10,
                     )
+                    pairwise_bind_bundle_path = pairwise_result.get("pairwise_bind_bundle_path")
 
                     # self-binding and cross-class tests expect flat latent from model(x),
                     # but per-token model returns (B, T, D) mu — skip for now
