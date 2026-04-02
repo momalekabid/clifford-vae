@@ -953,7 +953,7 @@ if __name__ == "__main__":
         "--latent_dims",
         type=int,
         nargs="+",
-        default=[64, 256, 1024, 4096],
+        default=[256, 1024, 4096],
     )
     p.add_argument(
         "--distributions",
