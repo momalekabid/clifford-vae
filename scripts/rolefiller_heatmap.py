@@ -88,8 +88,8 @@ if __name__ == "__main__":
     k_range = list(range(2, 52, 4))
 
     init_fns = {
-        "HRR": lambda n, d, dev=args.device: hrr_init(n, d, device=dev),
-        "Unitary (FHRR)": lambda n, d, dev=args.device: unitary_init(n, d, device=dev),
+        "HRR": lambda n, d, device=args.device: hrr_init(n, d, device=device),
+        "Unitary (FHRR)": lambda n, d, device=args.device: unitary_init(n, d, device=device),
     }
 
     results = {}

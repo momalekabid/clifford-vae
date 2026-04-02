@@ -100,8 +100,8 @@ if __name__ == "__main__":
 
     dims = [4, 16, 64, 144, 256, 484, 512, 1024]
     init_fns = {
-        "HRR": lambda n, d, dev=args.device: hrr_init(n, d, device=dev),
-        "Unitary (FHRR)": lambda n, d, dev=args.device: unitary_init(n, d, device=dev),
+        "HRR": lambda n, d, device=args.device: hrr_init(n, d, device=device),
+        "Unitary (FHRR)": lambda n, d, device=args.device: unitary_init(n, d, device=device),
     }
 
     results = {}

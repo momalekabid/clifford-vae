@@ -116,8 +116,8 @@ if __name__ == "__main__":
     k_range = list(range(3, 52, 4))  # 3, 7, 11, ..., 51
 
     init_fns = {
-        "HRR": lambda n, d, dev=device: hrr_init(n, d, device=dev),
-        "Unitary (FHRR)": lambda n, d, dev=device: unitary_init(n, d, device=dev),
+        "HRR": lambda n, d, device=device: hrr_init(n, d, device=device),
+        "Unitary (FHRR)": lambda n, d, device=device: unitary_init(n, d, device=device),
     }
 
     results = {}
