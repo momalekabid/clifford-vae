@@ -56,7 +56,7 @@ def load_model(ckpt_path, distribution, latent_dim, arch, dataset, device):
             img_size=img_size,
         )
     elif arch == "cnn":
-        from cnn.models import CNNVAE
+        from cnn.models import VAE as CNNVAE
         in_ch = 3 if dataset == "cifar10" else 1
         model = CNNVAE(
             latent_dim=latent_dim,
