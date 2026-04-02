@@ -20,7 +20,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cnn.models import VAE as CNNVAE
-from cnn.cliffordar_model import CliffordARVAE as ViTVAE
+from cnn.cliffordar_model import CliffordARVAE as ViTVAE, HybridVAE
 from utils.wandb_utils import (
     WandbLogger,
     test_self_binding,
@@ -520,236 +520,6 @@ def plot_decoded_bundles(model, loader, device, save_path, class_names=None,
     return save_path
 
 
-def plot_decoded_bindings(model, loader, device, save_path, class_names=None,
-                         n_samples=500, n_pairs=8):
-    """
-    bind pairs of items from different classes via circular convolution,
-    decode the bound vector, and show what it looks like in pixel space.
-    also shows the individual items and the unbound recoveries for comparison.
-    columns: item A, item B, decode(A⊛B), decode(unbind(A⊛B, B)), decode(unbind(A⊛B, A))
-    """
-    model.eval()
-    dist = getattr(model, "distribution", "gaussian")
-
-    all_z = []
-    all_labels = []
-    all_imgs = []
-    with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device)
-            # get decoder-ready z, not mu (for clifford mu is angles, z is bivector)
-            mu, params = model.encoder(x)
-            z, _, _ = model.reparameterize(mu, params)
-            all_z.append(z)
-            all_labels.append(y)
-            all_imgs.append(x.cpu())
-            if sum(t.shape[0] for t in all_z) >= n_samples:
-                break
-    all_z = torch.cat(all_z, 0)[:n_samples]
-    all_labels = torch.cat(all_labels, 0)[:n_samples]
-    all_imgs = torch.cat(all_imgs, 0)[:n_samples]
-
-    unique_classes = torch.unique(all_labels).tolist()
-    rng = np.random.RandomState(42)
-
-    fig, axes = plt.subplots(n_pairs, 5, figsize=(12, 2.2 * n_pairs))
-    col_titles = ["A", "B", "decode(A⊛B)", "unbind B→A'", "unbind A→B'"]
-    for j, t in enumerate(col_titles):
-        axes[0, j].set_title(t, fontsize=9)
-
-    with torch.no_grad():
-        for row in range(n_pairs):
-            # pick two items from different classes; use first item per class for 1:1 comparability
-            c1, c2 = rng.choice(unique_classes, size=2, replace=False)
-            idx1 = torch.where(all_labels == c1)[0][0].item()
-            idx2 = torch.where(all_labels == c2)[0][0].item()
-
-            z1 = all_z[idx1].unsqueeze(0)
-            z2 = all_z[idx2].unsqueeze(0)
-
-            # bind via circular convolution
-            bound = torch.fft.ifft(
-                torch.fft.fft(z1, dim=-1) * torch.fft.fft(z2, dim=-1), dim=-1
-            ).real
-
-            # unbind: correlate (convolve with involution)
-            z2_inv = torch.roll(z2.flip(-1), 1, dims=-1)
-            z1_inv = torch.roll(z1.flip(-1), 1, dims=-1)
-            unbound_a = torch.fft.ifft(
-                torch.fft.fft(bound, dim=-1) * torch.fft.fft(z2_inv, dim=-1), dim=-1
-            ).real
-            unbound_b = torch.fft.ifft(
-                torch.fft.fft(bound, dim=-1) * torch.fft.fft(z1_inv, dim=-1), dim=-1
-            ).real
-
-            # decode everything
-            imgs = [
-                all_imgs[idx1],
-                all_imgs[idx2],
-                model.decoder(bound)[0].cpu(),
-                model.decoder(unbound_a)[0].cpu(),
-                model.decoder(unbound_b)[0].cpu(),
-            ]
-
-            for j, img in enumerate(imgs):
-                if img.shape[0] == 1:
-                    axes[row, j].imshow(img[0].clamp(0, 1), cmap="gray")
-                else:
-                    img = (img * 0.5 + 0.5).clamp(0, 1)
-                    axes[row, j].imshow(img.permute(1, 2, 0))
-                axes[row, j].axis("off")
-
-            # row label
-            if class_names:
-                label = f"{class_names[c1]}⊛{class_names[c2]}"
-            else:
-                label = f"{c1}⊛{c2}"
-            axes[row, 0].set_ylabel(label, fontsize=7, rotation=0, labelpad=50, va="center")
-
-    fig.suptitle(f"{dist}: decoded bindings (circular convolution)", fontsize=11)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    return save_path
-
-
-def visualize_bundle_misclassifications(model, item_memory, item_labels, item_images,
-                                        device, save_path, k=20, class_names=None):
-    """
-    run one bundle capacity trial at given k, show misclassified items:
-    target item, closest-match item, their labels and similarities.
-    helps verify whether errors are semantically close classes.
-    """
-    from utils.vsa import bundle, normalize_vectors, hrr_init
-    import torch.nn.functional as F
-
-    n_items = item_memory.shape[0]
-    d = item_memory.shape[-1]
-    mem = normalize_vectors(item_memory.to(device))
-
-    # deterministic selection for reproducibility
-    torch.manual_seed(0)
-    indices = torch.randperm(n_items, device=device)[:2 * k]
-    X = mem[indices[:k]]
-    Xp = mem[indices[k:2*k]]
-
-    C1 = bundle(X, normalize=True)
-    C2 = bundle(Xp, normalize=True)
-
-    sim_to_C1 = F.cosine_similarity(X, C1.unsqueeze(0).expand(k, -1), dim=-1)
-    sim_to_C2 = F.cosine_similarity(X, C2.unsqueeze(0).expand(k, -1), dim=-1)
-
-    misses = (sim_to_C1 <= sim_to_C2).nonzero(as_tuple=True)[0]
-    if len(misses) == 0:
-        print(f"  no misclassifications at k={k}, skipping visualization")
-        return None
-
-    n_show = min(8, len(misses))
-    fig, axes = plt.subplots(n_show, 3, figsize=(6, 2 * n_show))
-    if n_show == 1:
-        axes = axes.reshape(1, -1)
-    axes[0, 0].set_title("target item", fontsize=9)
-    axes[0, 1].set_title("sim to own bundle", fontsize=9)
-    axes[0, 2].set_title("sim to other bundle", fontsize=9)
-
-    for row, mi in enumerate(misses[:n_show]):
-        idx = indices[mi].item()
-        img = item_images[idx]
-        label = item_labels[idx].item()
-        name = class_names[label] if class_names else str(label)
-
-        # show original image
-        if img.shape[0] == 1:
-            axes[row, 0].imshow(img[0].cpu().clamp(0, 1), cmap="gray")
-        else:
-            axes[row, 0].imshow((img * 0.5 + 0.5).clamp(0, 1).permute(1, 2, 0).cpu())
-        axes[row, 0].set_ylabel(name, fontsize=7, rotation=0, labelpad=30, va="center")
-        axes[row, 0].axis("off")
-
-        # show sims
-        s1 = sim_to_C1[mi].item()
-        s2 = sim_to_C2[mi].item()
-        axes[row, 1].text(0.5, 0.5, f"{s1:.4f}", ha="center", va="center", fontsize=11)
-        axes[row, 1].axis("off")
-        axes[row, 2].text(0.5, 0.5, f"{s2:.4f}", ha="center", va="center", fontsize=11)
-        axes[row, 2].axis("off")
-
-    fig.suptitle(f"bundle capacity misclassifications (k={k})", fontsize=11)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    return save_path
-
-
-def visualize_rolefiller_misclassifications(model, item_memory, item_labels, item_images,
-                                            device, save_path, k=10, class_names=None):
-    """
-    run one role-filler trial at given k, show misclassified items:
-    target filler vs what was actually retrieved, decoded to pixel space.
-    helps verify whether retrieval errors are semantically close.
-    """
-    from utils.vsa import bind, unbind, bundle, normalize_vectors, unitary_init, similarity
-    import torch.nn.functional as F
-
-    n_items = item_memory.shape[0]
-    d = item_memory.shape[-1]
-    mem = normalize_vectors(item_memory.to(device))
-
-    torch.manual_seed(0)
-    indices = torch.randperm(n_items, device=device)[:k]
-    fillers = mem[indices]
-    roles = unitary_init(k, d, device=device)
-    roles = normalize_vectors(roles)
-
-    pairs = bind(roles, fillers)
-    bundled = bundle(pairs, normalize=True)
-
-    misses = []
-    for i in range(k):
-        recovered = unbind(bundled.unsqueeze(0), roles[i].unsqueeze(0), method="inv").squeeze()
-        sims = similarity(recovered, mem)
-        best_idx = torch.argmax(sims).item()
-        target_idx = indices[i].item()
-        if best_idx != target_idx:
-            misses.append((target_idx, best_idx, sims[target_idx].item(), sims[best_idx].item()))
-
-    if not misses:
-        print(f"  no role-filler misclassifications at k={k}, skipping visualization")
-        return None
-
-    n_show = min(8, len(misses))
-    fig, axes = plt.subplots(n_show, 2, figsize=(5, 2 * n_show))
-    if n_show == 1:
-        axes = axes.reshape(1, -1)
-    axes[0, 0].set_title("target filler", fontsize=9)
-    axes[0, 1].set_title("retrieved (closest)", fontsize=9)
-
-    for row, (target_idx, retrieved_idx, target_sim, retrieved_sim) in enumerate(misses[:n_show]):
-        target_label = item_labels[target_idx].item()
-        retrieved_label = item_labels[retrieved_idx].item()
-        target_name = class_names[target_label] if class_names else str(target_label)
-        retrieved_name = class_names[retrieved_label] if class_names else str(retrieved_label)
-
-        for col, (idx, name, sim) in enumerate([
-            (target_idx, target_name, target_sim),
-            (retrieved_idx, retrieved_name, retrieved_sim),
-        ]):
-            img = item_images[idx]
-            if img.shape[0] == 1:
-                axes[row, col].imshow(img[0].cpu().clamp(0, 1), cmap="gray")
-            else:
-                axes[row, col].imshow((img * 0.5 + 0.5).clamp(0, 1).permute(1, 2, 0).cpu())
-            axes[row, col].set_xlabel(f"{name} (sim={sim:.3f})", fontsize=7)
-            axes[row, col].set_xticks([])
-            axes[row, col].set_yticks([])
-
-    fig.suptitle(f"role-filler retrieval errors (k={k})", fontsize=11)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    return save_path
-
-
 def filter_dataset_by_class(dataset, exclude_class):
     """filter dataset to exclude a specific class"""
     if exclude_class < 0:
@@ -1026,6 +796,19 @@ def main(args):
                             use_learnable_beta=args.use_learnable_beta,
                             img_size=32,
                         )
+                    elif args.arch == "hybrid":
+                        model_latent_dim = max(4, latent_dim // 16)
+                        model = HybridVAE(
+                            latent_dim=model_latent_dim,
+                            in_channels=in_channels,
+                            distribution=actual_dist,
+                            device=DEVICE,
+                            recon_loss_type=args.recon_loss,
+                            l1_weight=args.l1_weight,
+                            l2_normalize=l2_norm,
+                            use_learnable_beta=args.use_learnable_beta,
+                            img_size=32,
+                        )
                     else:
                         model = ViTVAE(
                             latent_dim=latent_dim,
@@ -1204,25 +987,6 @@ def main(args):
                         role_filler_raw = rf_res
                         print(f"  role-filler completed in {time.time() - t0:.2f}s")
 
-                        # visualize misclassified examples for bundle and role-filler tests
-                        t0 = time.time()
-                        print(f"visualizing bundle/role-filler misclassifications...")
-                        bundle_miss_path = visualize_bundle_misclassifications(
-                            model, item_memory, item_labels, item_images,
-                            DEVICE, f"{output_dir}/bundle_misclassifications.png",
-                            k=20, class_names=class_names,
-                        )
-                        rf_miss_path = visualize_rolefiller_misclassifications(
-                            model, item_memory, item_labels, item_images,
-                            DEVICE, f"{output_dir}/rolefiller_misclassifications.png",
-                            k=10, class_names=class_names,
-                        )
-                        if bundle_miss_path:
-                            images["bundle_misclassifications"] = bundle_miss_path
-                        if rf_miss_path:
-                            images["rolefiller_misclassifications"] = rf_miss_path
-                        print(f"  completed in {time.time() - t0:.2f}s")
-
                         t0 = time.time()
                         print(f"running self-binding test ({dist_name})...")
                         fourier_star = test_self_binding(
@@ -1294,20 +1058,6 @@ def main(args):
                             class_names=class_names,
                             n_samples=500,
                             max_bundle_size=5,
-                        )
-                        print(f"  completed in {time.time() - t0:.2f}s")
-
-                        # decoded binding visualization
-                        t0 = time.time()
-                        print(f"generating decoded binding visualization...")
-                        binding_viz_path = plot_decoded_bindings(
-                            model,
-                            test_loader,
-                            DEVICE,
-                            f"{output_dir}/decoded_bindings.png",
-                            class_names=class_names,
-                            n_samples=500,
-                            n_pairs=8,
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
@@ -1386,7 +1136,6 @@ def main(args):
                                 "tsne": tsne_path,
                                 "latent_interpolation": interp_path,
                                 "decoded_bundles": bundle_viz_path,
-                                "decoded_bindings": binding_viz_path,
                             }
                         )
 
@@ -1738,7 +1487,7 @@ if __name__ == "__main__":
         "--arch",
         type=str,
         default="cnn",
-        choices=["cnn", "vit"],
+        choices=["cnn", "vit", "hybrid"],
         help="backbone: cnn (plain conv) or vit (hybrid cnn+vit)",
     )
     args = p.parse_args()

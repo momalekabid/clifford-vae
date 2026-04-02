@@ -168,7 +168,7 @@ def test_self_binding(
                 b_depth_sims[m].append(sim)
         b_means = [np.mean(b_depth_sims[m]) for m in depths]
         b_stds = [np.std(b_depth_sims[m]) for m in depths]
-        ax.plot(depths, b_means, f"{marker}-", markersize=3, label=bname, color=color,
+        ax.plot(depths, b_means, marker=marker, markersize=3, label=bname, color=color,
                 linestyle="--", alpha=0.7)
         ax.fill_between(depths,
                         [m - s for m, s in zip(b_means, b_stds)],

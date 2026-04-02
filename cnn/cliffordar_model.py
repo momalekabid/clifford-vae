@@ -602,3 +602,247 @@ class CliffordARVAE(nn.Module):
         """CliffordAR-compatible: L2 normalize and scale by R=sqrt(d)."""
         x = F.normalize(x, p=2, dim=-1)
         return x * (self.latent_dim ** 0.5)
+
+
+# ---- hybrid CNN-only per-token VAE (old sphereAR architecture) ----
+# no transformer attention, just CNN encoder → per-token latents → CNN decoder.
+# this was the architecture used in the march 27 cifar runs.
+
+class HybridResDownBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.GroupNorm(min(32, max(1, in_ch // 4)), in_ch, eps=1e-6, affine=True),
+            nn.SiLU(),
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.GroupNorm(min(32, max(1, out_ch // 4)), out_ch, eps=1e-6, affine=True),
+            nn.SiLU(),
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
+        )
+        self.shortcut = nn.Conv2d(in_ch, out_ch, kernel_size=2, stride=2, padding=0, bias=False)
+
+    def forward(self, x):
+        return self.shortcut(x) + self.block(x)
+
+
+class HybridResUpBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        num_groups = min(32, max(1, out_ch // 4))
+        self.block = nn.Sequential(
+            nn.GroupNorm(min(32, max(1, in_ch // 4)), in_ch, eps=1e-6, affine=True),
+            nn.SiLU(),
+            nn.ConvTranspose2d(in_ch, out_ch, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.GroupNorm(num_groups, out_ch, eps=1e-6, affine=True),
+            nn.SiLU(),
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
+        )
+        self.shortcut = nn.ConvTranspose2d(in_ch, out_ch, kernel_size=2, stride=2, bias=False)
+        self.block2 = nn.Sequential(
+            nn.GroupNorm(num_groups, out_ch, eps=1e-6, affine=True),
+            nn.SiLU(),
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False),
+        )
+
+    def forward(self, x):
+        x = self.shortcut(x) + self.block(x)
+        x = x + self.block2(x)
+        return x
+
+
+class HybridEncoder(nn.Module):
+    def __init__(self, latent_dim, in_channels, distribution, cnn_chs=None, concentration_floor=0.03):
+        super().__init__()
+        self.distribution = distribution
+        self.concentration_floor = concentration_floor
+        if cnn_chs is None:
+            cnn_chs = [64, 128, 256]
+        self.input_conv = nn.Conv2d(in_channels, cnn_chs[0], kernel_size=3, stride=1, padding=1, bias=False)
+        self.down_blocks = nn.Sequential(*[HybridResDownBlock(cnn_chs[i], cnn_chs[i+1]) for i in range(len(cnn_chs)-1)])
+        self.fc_mu = nn.Conv2d(cnn_chs[-1], latent_dim, kernel_size=1, bias=True)
+        if distribution == "gaussian":
+            self.fc_logvar = nn.Conv2d(cnn_chs[-1], latent_dim, kernel_size=1, bias=True)
+        else:
+            self.fc_kappa = nn.Conv2d(cnn_chs[-1], 1, kernel_size=1, bias=True)
+
+    def forward(self, x):
+        x = self.input_conv(x)
+        x = self.down_blocks(x)
+        mu_map = self.fc_mu(x)
+        B, D, H, W = mu_map.shape
+        mu = mu_map.permute(0, 2, 3, 1).reshape(B, H * W, D)
+        if self.distribution == "gaussian":
+            logvar = self.fc_logvar(x).permute(0, 2, 3, 1).reshape(B, H * W, D)
+            return mu, logvar
+        elif self.distribution == "powerspherical":
+            mu = F.normalize(mu, p=2, dim=-1)
+            kappa = self.fc_kappa(x).permute(0, 2, 3, 1).reshape(B, H * W)
+            kappa = torch.clamp(F.softplus(kappa) + 0.8, max=10.0)
+            return mu, kappa
+        elif self.distribution == "clifford":
+            kappa = self.fc_kappa(x).permute(0, 2, 3, 1).reshape(B, H * W)
+            kappa = torch.clamp(F.softplus(kappa) + self.concentration_floor, max=10.0)
+            return mu, kappa
+
+
+class HybridDecoder(nn.Module):
+    def __init__(self, latent_dim, out_channels, cnn_chs=None, spatial_size=4):
+        super().__init__()
+        if cnn_chs is None:
+            cnn_chs = [256, 128, 64]
+        self.spatial_size = spatial_size
+        self.input_proj = nn.Linear(latent_dim, cnn_chs[0], bias=False)
+        self.up_blocks = nn.Sequential(*[HybridResUpBlock(cnn_chs[i], cnn_chs[i+1]) for i in range(len(cnn_chs)-1)])
+        self.output_conv = nn.Sequential(
+            nn.GroupNorm(min(32, max(1, cnn_chs[-1] // 4)), cnn_chs[-1], eps=1e-6),
+            nn.SiLU(),
+            nn.Conv2d(cnn_chs[-1], out_channels, kernel_size=3, stride=1, padding=1),
+            nn.Tanh(),
+        )
+
+    def forward(self, z):
+        B, L, D = z.shape
+        H = W = self.spatial_size
+        x = self.input_proj(z)
+        x = x.reshape(B, H, W, -1).permute(0, 3, 1, 2)
+        x = self.up_blocks(x)
+        return self.output_conv(x)
+
+
+class HybridVAE(nn.Module):
+    """CNN-only per-token VAE (no transformer attention).
+    each spatial token gets its own latent vector. lighter than the full ViT.
+    """
+
+    def __init__(
+        self,
+        latent_dim=16,
+        in_channels=3,
+        distribution="clifford",
+        device="cpu",
+        recon_loss_type="l1",
+        l1_weight=1.0,
+        encoder_chs=None,
+        decoder_chs=None,
+        use_learnable_beta=False,
+        l2_normalize=False,
+        concentration_floor=0.03,
+        img_size=32,
+    ):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.distribution = distribution
+        self.device = device
+        self.recon_loss_type = recon_loss_type
+        self.l1_weight = l1_weight
+        self.use_learnable_beta = use_learnable_beta
+        self.l2_normalize = l2_normalize
+
+        if encoder_chs is None:
+            if img_size == 64:
+                encoder_chs = [64, 128, 256, 512]
+            else:
+                encoder_chs = [64, 128, 256]
+        if decoder_chs is None:
+            decoder_chs = encoder_chs[::-1]
+
+        num_down = len(encoder_chs) - 1
+        self.token_spatial_size = img_size // (2 ** num_down)
+        self.num_tokens = self.token_spatial_size ** 2
+
+        self.encoder = HybridEncoder(
+            latent_dim=latent_dim,
+            in_channels=in_channels,
+            distribution=distribution,
+            cnn_chs=encoder_chs,
+            concentration_floor=concentration_floor,
+        )
+
+        dec_in_dim = 2 * latent_dim if distribution == "clifford" else latent_dim
+        self.decoder = HybridDecoder(
+            latent_dim=dec_in_dim,
+            out_channels=in_channels,
+            cnn_chs=decoder_chs,
+            spatial_size=self.token_spatial_size,
+        )
+
+        if use_learnable_beta:
+            self.log_sigma_0 = nn.Parameter(torch.zeros(1))
+            self.log_sigma_1 = nn.Parameter(torch.zeros(1))
+
+        self.to(device)
+
+    def reparameterize(self, mu, params):
+        B, T, D = mu.shape
+        if self.distribution == "gaussian":
+            q_z = torch.distributions.Normal(mu, torch.exp(0.5 * params) + 1e-6)
+            p_z = torch.distributions.Normal(torch.zeros_like(mu), torch.ones_like(params))
+            z = q_z.rsample()
+            if self.l2_normalize:
+                z = F.normalize(z, p=2, dim=-1)
+            return z, q_z, p_z
+        elif self.distribution == "powerspherical":
+            mu_flat = mu.reshape(B * T, D)
+            kappa_flat = params.reshape(B * T)
+            q_z = PowerSpherical(mu_flat, kappa_flat)
+            p_z = HypersphericalUniform(D, device=mu.device, validate_args=False)
+            z = q_z.rsample().reshape(B, T, D)
+            return z, q_z, p_z
+        elif self.distribution == "clifford":
+            mu_flat = mu.reshape(B * T, D)
+            kappa_flat = params.reshape(B * T).unsqueeze(-1).expand_as(mu_flat)
+            q_z = CliffordPowerSphericalDistribution(mu_flat, kappa_flat)
+            p_z = CliffordTorusUniform(D, device=mu.device, validate_args=False)
+            z = q_z.rsample().reshape(B, T, 2 * D)
+            return z, q_z, p_z
+
+    def forward(self, x):
+        mu, params = self.encoder(x)
+        z, q_z, p_z = self.reparameterize(mu, params)
+        x_recon = self.decoder(z)
+        return x_recon, q_z, p_z, mu
+
+    def compute_loss(self, x, x_recon, q_z, p_z, beta=1.0):
+        B = x.size(0)
+        if self.distribution == "gaussian":
+            kld = torch.distributions.kl.kl_divergence(q_z, p_z).sum(dim=-1).mean()
+        else:
+            kld = torch.distributions.kl.kl_divergence(q_z, p_z).mean()
+
+        if self.recon_loss_type == "l1":
+            recon_loss = self.l1_weight * (F.l1_loss(x_recon, x, reduction="sum") / B)
+        elif self.recon_loss_type == "mse":
+            recon_loss = F.mse_loss(x_recon, x, reduction="sum") / B
+        else:
+            raise ValueError(f"unknown recon loss: {self.recon_loss_type}")
+
+        if self.use_learnable_beta:
+            sigma_0 = torch.exp(self.log_sigma_0)
+            sigma_1 = torch.exp(self.log_sigma_1)
+            total_loss = (1.0 / (sigma_0 ** 2)) * recon_loss + (1.0 / (sigma_1 ** 2)) * kld + sigma_0 ** 2 + sigma_1 ** 2
+            effective_beta = (sigma_0 / sigma_1) ** 2
+        else:
+            total_loss = recon_loss + beta * kld
+            effective_beta = beta
+
+        try:
+            entropy = q_z.entropy().mean()
+        except (NotImplementedError, AttributeError):
+            entropy = torch.tensor(0.0, device=x.device)
+
+        result = {
+            "total_loss": total_loss,
+            "recon_loss": recon_loss,
+            "kld_loss": kld,
+            "entropy": entropy,
+            "effective_beta": effective_beta,
+        }
+        if self.use_learnable_beta:
+            result["sigma_0"] = sigma_0.item()
+            result["sigma_1"] = sigma_1.item()
+        return result
+
+    def get_flat_latent(self, x):
+        mu, params = self.encoder(x)
+        z, _, _ = self.reparameterize(mu, params)
+        return z.reshape(z.size(0), -1)

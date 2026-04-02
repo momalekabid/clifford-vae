@@ -22,7 +22,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cnn.cliffordar_model import CliffordARVAE
+from cnn.cliffordar_model import CliffordARVAE, HybridVAE
 from cnn.models import VAE as CNNVAE
 from utils.wandb_utils import (
     WandbLogger,
@@ -459,7 +459,7 @@ def main(args):
 
             if args.arch == "vit":
                 model_latent_dim = max(4, latent_dim // 64)
-                print(f"  {dist_name}: 64 tokens x {model_latent_dim}d = {64 * model_latent_dim}d total (hybrid CNN+ViT)")
+                print(f"  {dist_name}: 64 tokens x {model_latent_dim}d = {64 * model_latent_dim}d total (CNN+ViT)")
                 model = CliffordARVAE(
                     latent_dim=model_latent_dim,
                     image_size=64,
@@ -470,6 +470,20 @@ def main(args):
                     l1_weight=args.l1_weight,
                     use_learnable_beta=args.use_learnable_beta,
                     l2_normalize=(dist_name == "gaussian" and args.l2_norm),
+                )
+            elif args.arch == "hybrid":
+                model_latent_dim = max(4, latent_dim // 16)
+                print(f"  {dist_name}: per-token CNN, d={model_latent_dim} per token (hybrid)")
+                model = HybridVAE(
+                    latent_dim=model_latent_dim,
+                    in_channels=1,
+                    distribution=dist_name,
+                    device=DEVICE,
+                    recon_loss_type=args.recon_loss,
+                    l1_weight=args.l1_weight,
+                    use_learnable_beta=args.use_learnable_beta,
+                    l2_normalize=(dist_name == "gaussian" and args.l2_norm),
+                    img_size=64,
                 )
             else:
                 print(f"  {dist_name}: flat z, d={latent_dim} (CNN w/ residual)")
@@ -705,8 +719,8 @@ def main(args):
                 **fourier_metrics,
                 "best_test_total_loss": best,
                 "mean_vector_cosine_acc": float(mean_vector_acc),
-                "approx_inv_depth_star": fourier_star["max_recoverable_depth"],
-                "approx_inv_depth_deconv": fourier_deconv["max_recoverable_depth"],
+                "approx_inv_depth_star": next((d for d, s in zip(fourier_star.get("k_values", []), fourier_star.get("k_sims", [])) if s < 0.5), fourier_star.get("k_values", [0])[-1] if fourier_star.get("k_values") else 0),
+                "approx_inv_depth_deconv": next((d for d, s in zip(fourier_deconv.get("k_values", []), fourier_deconv.get("k_sims", [])) if s < 0.5), fourier_deconv.get("k_values", [0])[-1] if fourier_deconv.get("k_values") else 0),
             })
             logger.log_summary({
                 **knn_results,
@@ -772,7 +786,7 @@ if __name__ == "__main__":
     p.add_argument("--cycle_epochs", type=int, default=100)
     p.add_argument("--latent_dims", type=int, nargs="+", default=[64, 256, 1024, 4096])
     p.add_argument("--distributions", type=str, nargs="+", default=None)
-    p.add_argument("--arch", type=str, default="cnn", choices=["cnn", "vit"],
+    p.add_argument("--arch", type=str, default="cnn", choices=["cnn", "vit", "hybrid"],
                    help="backbone: cnn (flat latent w/ residual) or vit (hybrid cnn+vit, per-token)")
 
     args = p.parse_args()

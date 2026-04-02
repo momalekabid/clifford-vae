@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
     init_fns = {
         "HRR": lambda n, d, device=args.device: hrr_init(n, d, device=device),
-        "Unitary (FHRR)": lambda n, d, device=args.device: unitary_init(n, d, device=device),
+        "Unitary": lambda n, d, device=args.device: unitary_init(n, d, device=device),
     }
 
     results = {}

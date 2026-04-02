@@ -17,7 +17,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cnn.cliffordar_model import CliffordARVAE
+from cnn.cliffordar_model import CliffordARVAE, HybridVAE
 from utils.wandb_utils import (
     WandbLogger,
     test_self_binding,
@@ -560,76 +560,6 @@ def plot_decoded_bundles_by_attr(model, loader, device, save_path,
     return save_path
 
 
-def plot_decoded_bindings_celeba(model, loader, device, save_path,
-                                n_samples=500, n_pairs=8):
-    """
-    bind pairs of celeba images via circular convolution, decode the
-    bound vector, and show what it looks like. also decode unbindings.
-    columns: A, B, decode(A⊛B), unbind B→A', unbind A→B'
-    """
-    model.eval()
-    dist = getattr(model, "distribution", "gaussian")
-
-    all_z = []
-    all_imgs = []
-    with torch.no_grad():
-        for x, _ in loader:
-            x = x.to(device)
-            # use flat latent (B, T*latent_dim) for fft binding ops
-            z = model.get_flat_latent(x)
-            all_z.append(z)
-            all_imgs.append(x.cpu())
-            if sum(t.shape[0] for t in all_z) >= n_samples:
-                break
-    all_z = torch.cat(all_z, 0)[:n_samples]
-    all_imgs = torch.cat(all_imgs, 0)[:n_samples]
-
-    rng = np.random.RandomState(42)
-
-    fig, axes = plt.subplots(n_pairs, 5, figsize=(12, 2.2 * n_pairs))
-    col_titles = ["A", "B", "decode(A⊛B)", "unbind B→A'", "unbind A→B'"]
-    for j, t in enumerate(col_titles):
-        axes[0, j].set_title(t, fontsize=9)
-
-    with torch.no_grad():
-        for row in range(n_pairs):
-            idx1, idx2 = rng.choice(len(all_z), size=2, replace=False)
-            z1 = all_z[idx1].unsqueeze(0)
-            z2 = all_z[idx2].unsqueeze(0)
-
-            bound = torch.fft.ifft(
-                torch.fft.fft(z1, dim=-1) * torch.fft.fft(z2, dim=-1), dim=-1
-            ).real
-
-            z2_inv = torch.roll(z2.flip(-1), 1, dims=-1)
-            z1_inv = torch.roll(z1.flip(-1), 1, dims=-1)
-            unbound_a = torch.fft.ifft(
-                torch.fft.fft(bound, dim=-1) * torch.fft.fft(z2_inv, dim=-1), dim=-1
-            ).real
-            unbound_b = torch.fft.ifft(
-                torch.fft.fft(bound, dim=-1) * torch.fft.fft(z1_inv, dim=-1), dim=-1
-            ).real
-
-            imgs = [
-                all_imgs[idx1],
-                all_imgs[idx2],
-                model.decoder(bound)[0].cpu(),
-                model.decoder(unbound_a)[0].cpu(),
-                model.decoder(unbound_b)[0].cpu(),
-            ]
-
-            for j, img in enumerate(imgs):
-                img = (img * 0.5 + 0.5).clamp(0, 1)
-                axes[row, j].imshow(img.permute(1, 2, 0))
-                axes[row, j].axis("off")
-
-    fig.suptitle(f"{dist}: decoded bindings (circular convolution)", fontsize=11)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    return save_path
-
-
 def sample_prior_z(dist_name, latent_dim, n, device, l2_normalize=False):
     if dist_name == "clifford":
         angles = torch.rand(n, latent_dim, device=device) * (2 * math.pi)
@@ -740,17 +670,31 @@ def main(args):
                 else:
                     actual_dist = dist_name
                     l2_norm = False
-                model = CliffordARVAE(
-                    latent_dim=latent_dim,
-                    image_size=IMG_SIZE,
-                    in_channels=IN_CHANNELS,
-                    distribution=actual_dist,
-                    device=DEVICE,
-                    recon_loss_type=args.recon_loss,
-                    l1_weight=args.l1_weight,
-                    l2_normalize=l2_norm,
-                    use_learnable_beta=args.use_learnable_beta,
-                )
+                if args.arch == "hybrid":
+                    model_latent_dim = max(4, latent_dim // 16)
+                    model = HybridVAE(
+                        latent_dim=model_latent_dim,
+                        in_channels=IN_CHANNELS,
+                        distribution=actual_dist,
+                        device=DEVICE,
+                        recon_loss_type=args.recon_loss,
+                        l1_weight=args.l1_weight,
+                        l2_normalize=l2_norm,
+                        use_learnable_beta=args.use_learnable_beta,
+                        img_size=IMG_SIZE,
+                    )
+                else:
+                    model = CliffordARVAE(
+                        latent_dim=latent_dim,
+                        image_size=IMG_SIZE,
+                        in_channels=IN_CHANNELS,
+                        distribution=actual_dist,
+                        device=DEVICE,
+                        recon_loss_type=args.recon_loss,
+                        l1_weight=args.l1_weight,
+                        l2_normalize=l2_norm,
+                        use_learnable_beta=args.use_learnable_beta,
+                    )
                 logger.watch_model(model)
                 if args.use_learnable_beta:
                     sigma_ids = {id(model.log_sigma_0), id(model.log_sigma_1)}
@@ -865,16 +809,6 @@ def main(args):
                         f"{output_dir}/decoded_bundles.png",
                         attr_names=attr_names,
                         n_samples=2000,
-                    )
-                    print(f"  completed in {time.time() - t0:.2f}s")
-
-                    # decoded binding visualization
-                    t0 = time.time()
-                    print(f"generating decoded binding visualization...")
-                    binding_path = plot_decoded_bindings_celeba(
-                        model, test_loader, DEVICE,
-                        f"{output_dir}/decoded_bindings.png",
-                        n_samples=500, n_pairs=8,
                     )
                     print(f"  completed in {time.time() - t0:.2f}s")
 
@@ -1024,7 +958,6 @@ def main(args):
                             "latent_distributions": latent_dist_path,
                             "latent_interpolation": interp_path,
                             "decoded_bundles": bundle_path,
-                            "decoded_bindings": binding_path,
                         }
                     )
 
@@ -1267,5 +1200,7 @@ if __name__ == "__main__":
         default=[256, 512, 1024, 2048],
         help="latent dims to test",
     )
+    p.add_argument("--arch", type=str, default="vit", choices=["vit", "hybrid"],
+                    help="architecture: vit (CNN+ViT) or hybrid (CNN-only per-token)")
     args = p.parse_args()
     main(args)

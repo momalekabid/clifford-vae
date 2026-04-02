@@ -71,7 +71,7 @@ def plot_heatmaps(results, dims, depths, save_path=None):
 # also generate 1D curves (schlegel fig 6 style) at a fixed d
 def plot_curves(results_at_d, depths, d, save_path=None):
     fig, ax = plt.subplots(figsize=(8, 4))
-    colors = {"HRR": "tab:gray", "Unitary (FHRR)": "tab:green", "Clifford": "tab:purple"}
+    colors = {"HRR": "tab:gray", "Unitary": "tab:green", "Clifford": "tab:purple"}
     for name, sims in results_at_d.items():
         ax.plot(depths, sims, "o-", markersize=3, label=name, color=colors.get(name, None))
     ax.set_xlabel("binding depth $m$")
@@ -101,7 +101,7 @@ if __name__ == "__main__":
     dims = [4, 16, 64, 144, 256, 484, 512, 1024]
     init_fns = {
         "HRR": lambda n, d, device=args.device: hrr_init(n, d, device=device),
-        "Unitary (FHRR)": lambda n, d, device=args.device: unitary_init(n, d, device=device),
+        "Unitary": lambda n, d, device=args.device: unitary_init(n, d, device=device),
     }
 
     results = {}
