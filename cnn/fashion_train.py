@@ -32,7 +32,7 @@ from utils.wandb_utils import (
     plot_gaussian_manifold_visualization,
     plot_cross_dist_comparison_dim,
     plot_across_dims_comparison,
-    test_pairwise_bind_bundle_decode,
+    test_cross_class_bind_unbind,
 )
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
@@ -1151,22 +1151,22 @@ def main(args):
                         if os.path.exists(rf_plot):
                             images["role_filler_capacity"] = rf_plot
 
-                        # pairwise bind/bundle decode test
-                        t0 = time.time()
-                        print(f"running pairwise bind/bundle decode test...")
-                        pairwise_result = test_pairwise_bind_bundle_decode(
-                            model,
-                            test_loader,
-                            DEVICE,
-                            output_dir,
-                            class_names=class_names,
-                            img_shape=IMG_SHAPE,
-                            n_classes=10,
+                        # cross-class bind/unbind test (shirt=6 vs sandal=5)
+                        print(f"running cross-class bind/unbind test...")
+                        cross_class_star = test_cross_class_bind_unbind(
+                            model, test_loader, DEVICE, output_dir,
+                            unbind_method="*", img_shape=IMG_SHAPE,
+                            class_a=5, class_b=6,
                         )
-                        print(f"  completed in {time.time() - t0:.2f}s")
-                        pairwise_bind_bundle_path = pairwise_result.get("pairwise_bind_bundle_path")
-                        if pairwise_bind_bundle_path and os.path.exists(pairwise_bind_bundle_path):
-                            images["pairwise_bind_bundle_decode"] = pairwise_bind_bundle_path
+                        cross_class_deconv = test_cross_class_bind_unbind(
+                            model, test_loader, DEVICE, output_dir,
+                            unbind_method="†", img_shape=IMG_SHAPE,
+                            class_a=5, class_b=6,
+                        )
+                        if cross_class_star.get("cross_class_bind_unbind_plot_path"):
+                            images["cross_class_binding_star"] = cross_class_star["cross_class_bind_unbind_plot_path"]
+                        if cross_class_deconv.get("cross_class_bind_unbind_plot_path"):
+                            images["cross_class_binding_deconv"] = cross_class_deconv["cross_class_bind_unbind_plot_path"]
 
                         sp = fourier_star.get("similarity_after_k_binds_plot_path")
                         sd = fourier_perp.get("similarity_after_k_binds_plot_path")

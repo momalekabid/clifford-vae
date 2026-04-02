@@ -1387,6 +1387,126 @@ def test_pairwise_bind_bundle_decode(
     }
 
 
+def test_cross_class_bind_unbind(
+    model,
+    loader,
+    device,
+    output_dir,
+    unbind_method: str = "*",
+    img_shape=(1, 28, 28),
+    class_a: int = None,
+    class_b: int = None,
+):
+    """cross-class bind/unbind with decoded reconstructions.
+    columns: A | B | bind(A,B) | bundle(A,B) | recovered_A | recovered_B
+    if class_a/class_b not specified, uses first two classes found.
+    """
+    try:
+        model.eval()
+        with torch.no_grad():
+            all_z = []
+            all_labels = []
+            all_x = []
+            for x, y in loader:
+                x = x.to(device)
+                z = _get_flat_z(model, x)
+                all_z.append(z.detach())
+                all_labels.append(y)
+                all_x.append(x.cpu())
+                if len(torch.cat(all_z, 0)) >= 200:
+                    break
+
+            if not all_z:
+                return {"cross_class_bind_unbind_similarity": 0.0, "cross_class_bind_unbind_plot_path": None}
+
+            all_z = torch.cat(all_z, 0)
+            all_labels = torch.cat(all_labels, 0)
+
+            unique_labels = torch.unique(all_labels)
+            if len(unique_labels) < 2:
+                return {"cross_class_bind_unbind_similarity": 0.0, "cross_class_bind_unbind_plot_path": None}
+
+            if class_a is not None and class_b is not None:
+                class_a_label = torch.tensor(class_a)
+                class_b_label = torch.tensor(class_b)
+            else:
+                class_a_label = unique_labels[0]
+                class_b_label = unique_labels[1]
+
+            a_mask = all_labels == class_a_label
+            b_mask = all_labels == class_b_label
+            if a_mask.sum() == 0 or b_mask.sum() == 0:
+                return {"cross_class_bind_unbind_similarity": 0.0, "cross_class_bind_unbind_plot_path": None}
+
+            a_idx = torch.where(a_mask)[0][0:1]
+            b_idx = torch.where(b_mask)[0][0:1]
+
+            a = all_z[a_idx]
+            b = all_z[b_idx]
+
+    except Exception:
+        return {"cross_class_bind_unbind_similarity": 0.0, "cross_class_bind_unbind_plot_path": None}
+
+    if getattr(model, "distribution", None) == "gaussian":
+        a = torch.nn.functional.normalize(a, p=2, dim=-1)
+        b = torch.nn.functional.normalize(b, p=2, dim=-1)
+
+    ab = bind(a, b)
+    ab_bundle = (a + b) / math.sqrt(2)
+    recovered_a = unbind(ab, b, method=unbind_method)
+    recovered_b = unbind(ab, a, method=unbind_method)
+
+    sim_a = torch.nn.functional.cosine_similarity(recovered_a, a, dim=-1).mean().item()
+    sim_b = torch.nn.functional.cosine_similarity(recovered_b, b, dim=-1).mean().item()
+    avg_sim = (sim_a + sim_b) / 2.0
+
+    plot_path = None
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        plot_path = os.path.join(output_dir, f"cross_class_bind_unbind_{unbind_method}.png")
+
+        # decode all 6 vectors
+        vectors = torch.cat([a, b, ab, ab_bundle, recovered_a, recovered_b], dim=0)
+        imgs = _decode_vectors(model, vectors, img_shape)
+
+        C, h, w = img_shape
+        n_cols = 6
+        canvas = torch.zeros(C, h, n_cols * w)
+        for i in range(n_cols):
+            canvas[:, :, i * w:(i + 1) * w] = imgs[i]
+
+        col_labels = [
+            f"A (cls {class_a_label.item()})",
+            f"B (cls {class_b_label.item()})",
+            "bind(A,B)",
+            "bundle(A,B)",
+            f"unbind→A ({sim_a:.3f})",
+            f"unbind→B ({sim_b:.3f})",
+        ]
+
+        plt.figure(figsize=(16, 3))
+        if C == 1:
+            plt.imshow(canvas.squeeze(0), cmap="gray")
+        else:
+            plt.imshow(canvas.permute(1, 2, 0))
+
+        plt.xticks([w // 2 + i * w for i in range(n_cols)], col_labels, fontsize=9)
+        plt.yticks([])
+        plt.title(f"Cross-Class Bind/Unbind Test (Avg Sim: {avg_sim:.3f})")
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=200, bbox_inches="tight")
+        plt.close()
+
+    except Exception as e:
+        print(f"  cross-class plot error: {e}")
+        plot_path = None
+
+    return {
+        "cross_class_bind_unbind_similarity": avg_sim,
+        "cross_class_bind_unbind_plot_path": plot_path,
+    }
+
+
 def sample_prior_z(dist_name, latent_dim, n, device, l2_normalize=False):
     """sample n latent vectors from the prior."""
     if dist_name == "clifford":

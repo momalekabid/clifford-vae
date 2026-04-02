@@ -31,6 +31,7 @@ from utils.wandb_utils import (
     plot_across_dims_comparison,
     test_pairwise_bind_bundle_decode,
     test_self_binding,
+    test_cross_class_bind_unbind,
 )
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
@@ -668,6 +669,17 @@ def main(args):
                     )
                     pairwise_bind_bundle_path = pairwise_result.get(
                         "pairwise_bind_bundle_path"
+                    )
+
+                    # cross-class bind/unbind test
+                    print(f"running cross-class bind/unbind test ({dist_name})...")
+                    cross_class_star = test_cross_class_bind_unbind(
+                        model, test_loader, DEVICE, output_dir,
+                        unbind_method="*", img_shape=(3, 32, 32),
+                    )
+                    cross_class_deconv = test_cross_class_bind_unbind(
+                        model, test_loader, DEVICE, output_dir,
+                        unbind_method="†", img_shape=(3, 32, 32),
                     )
 
                     # self-binding: bind z with itself k times, unbind k times, measure similarity
