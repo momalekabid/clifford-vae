@@ -80,6 +80,8 @@ if __name__ == "__main__":
     p.add_argument("--device", default="cpu")
     p.add_argument("--n_trials", type=int, default=10)
     p.add_argument("--n_items", type=int, default=1000)
+    p.add_argument("--no_wandb", action="store_true")
+    p.add_argument("--wandb_project", type=str, default="vsa-heatmaps")
     args = p.parse_args()
 
     dims = [4, 16, 64, 144, 256, 484, 512, 1024]
@@ -97,4 +99,18 @@ if __name__ == "__main__":
                                               n_items=args.n_items, n_trials=args.n_trials,
                                               device=args.device)
 
-    plot_heatmaps(results, dims, k_range, save_path="figures/rolefiller_heatmap.png")
+    save_path = "figures/rolefiller_heatmap.png"
+    plot_heatmaps(results, dims, k_range, save_path=save_path)
+
+    if not args.no_wandb:
+        import wandb
+        run = wandb.init(project=args.wandb_project, name="rolefiller-heatmap",
+                         config={"n_trials": args.n_trials, "n_items": args.n_items,
+                                 "dims": dims, "k_range": k_range})
+        wandb.log({"rolefiller_heatmap": wandb.Image(save_path)})
+        for name, mat in results.items():
+            for i, d in enumerate(dims):
+                for j, k in enumerate(k_range):
+                    if not np.isnan(mat[i, j]):
+                        wandb.log({f"{name}/d{d}_k{k}": mat[i, j]})
+        wandb.finish()

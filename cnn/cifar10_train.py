@@ -24,6 +24,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cnn.cliffordar_model import CliffordARVAE
+from cnn.models import VAE as CNNVAE
 from utils.wandb_utils import (
     WandbLogger,
     plot_cross_dist_comparison_dim,
@@ -427,21 +428,33 @@ def main(args):
                 exp_start_time = time.time()
                 logger.start_run(exp_name, args)
 
-                # vit: per-token architecture, 64 tokens for 32x32 images
-                model_latent_dim = max(4, latent_dim // 64)
-                print(f"  {dist_name}: 64 tokens x {model_latent_dim}d = {64 * model_latent_dim}d total (hybrid CNN+ViT)")
-
-                model = CliffordARVAE(
-                    latent_dim=model_latent_dim,
-                    image_size=32,
-                    in_channels=3,
-                    distribution=dist_name,
-                    device=DEVICE,
-                    recon_loss_type=args.recon_loss,
-                    l1_weight=args.l1_weight,
-                    use_learnable_beta=args.use_learnable_beta,
-                    l2_normalize=(dist_name == "gaussian" and args.l2_norm),
-                )
+                if args.arch == "vit":
+                    model_latent_dim = max(4, latent_dim // 64)
+                    print(f"  {dist_name}: 64 tokens x {model_latent_dim}d = {64 * model_latent_dim}d total (hybrid CNN+ViT)")
+                    model = CliffordARVAE(
+                        latent_dim=model_latent_dim,
+                        image_size=32,
+                        in_channels=3,
+                        distribution=dist_name,
+                        device=DEVICE,
+                        recon_loss_type=args.recon_loss,
+                        l1_weight=args.l1_weight,
+                        use_learnable_beta=args.use_learnable_beta,
+                        l2_normalize=(dist_name == "gaussian" and args.l2_norm),
+                    )
+                else:
+                    print(f"  {dist_name}: flat z, d={latent_dim} (CNN w/ residual)")
+                    model = CNNVAE(
+                        latent_dim=latent_dim,
+                        in_channels=3,
+                        distribution=dist_name,
+                        device=DEVICE,
+                        recon_loss_type=args.recon_loss,
+                        l1_weight=args.l1_weight,
+                        use_learnable_beta=args.use_learnable_beta,
+                        l2_normalize=(dist_name == "gaussian" and args.l2_norm),
+                        img_size=32,
+                    )
 
                 logger.watch_model(model)
                 cur_lr = dist_lr.get(dist_name, args.lr)
@@ -936,5 +949,7 @@ if __name__ == "__main__":
         default=None,
         help="distributions to test (default: spherear clifford powerspherical gaussian)",
     )
+    p.add_argument("--arch", type=str, default="cnn", choices=["cnn", "vit"],
+                   help="backbone: cnn (flat latent w/ residual) or vit (hybrid cnn+vit, per-token)")
     args = p.parse_args()
     main(args)

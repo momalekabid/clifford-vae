@@ -94,6 +94,8 @@ if __name__ == "__main__":
     p.add_argument("--device", default="cpu")
     p.add_argument("--n_trials", type=int, default=10)
     p.add_argument("--max_depth", type=int, default=40)
+    p.add_argument("--no_wandb", action="store_true")
+    p.add_argument("--wandb_project", type=str, default="vsa-heatmaps")
     args = p.parse_args()
 
     dims = [4, 16, 64, 144, 256, 484, 512, 1024]
@@ -109,9 +111,26 @@ if __name__ == "__main__":
                                        n_trials=args.n_trials, device=args.device)
         results[name] = mat
 
-    plot_heatmaps(results, dims, depths, save_path="figures/binding_depth_heatmap.png")
+    heatmap_path = "figures/binding_depth_heatmap.png"
+    curves_path = "figures/binding_depth_curves_d1024.png"
+
+    plot_heatmaps(results, dims, depths, save_path=heatmap_path)
 
     # 1D curves at d=1024
     d_idx = dims.index(1024)
     curves = {name: mat[d_idx].tolist() for name, mat in results.items()}
-    plot_curves(curves, depths, d=1024, save_path="figures/binding_depth_curves_d1024.png")
+    plot_curves(curves, depths, d=1024, save_path=curves_path)
+
+    if not args.no_wandb:
+        import wandb
+        run = wandb.init(project=args.wandb_project, name="binding-depth-heatmap",
+                         config={"n_trials": args.n_trials, "max_depth": args.max_depth,
+                                 "dims": dims})
+        wandb.log({"binding_depth_heatmap": wandb.Image(heatmap_path),
+                    "binding_depth_curves_d1024": wandb.Image(curves_path)})
+        for name, mat in results.items():
+            for i, d in enumerate(dims):
+                for j, m in enumerate(depths):
+                    if not np.isnan(mat[i, j]):
+                        wandb.log({f"{name}/d{d}_depth{m}": mat[i, j]})
+        wandb.finish()
