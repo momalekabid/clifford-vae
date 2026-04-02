@@ -4,6 +4,7 @@
 
 import argparse
 import os
+import random
 import numpy as np
 import torch
 import torch.optim as optim
@@ -29,7 +30,6 @@ from utils.wandb_utils import (
     WandbLogger,
     plot_cross_dist_comparison_dim,
     plot_across_dims_comparison,
-    test_pairwise_bind_bundle_decode,
     test_self_binding,
     test_cross_class_bind_unbind,
 )
@@ -656,30 +656,18 @@ def main(args):
                     rf_results["role_filler_capacity"] = rf_res
                     role_filler_raw = rf_res
 
-                    # pairwise bind-bundle-decode test
-                    print(f"running pairwise bind-bundle-decode test ({dist_name})...")
-                    pairwise_result = test_pairwise_bind_bundle_decode(
-                        model,
-                        test_loader,
-                        DEVICE,
-                        output_dir,
-                        class_names=CLASS_NAMES,
+                    # cross-class bind/unbind test (two random pairs)
+                    pair_classes = random.sample(range(10), 4)
+                    print(f"running cross-class bind/unbind test ({dist_name}): pairs {pair_classes[:2]}, {pair_classes[2:]}...")
+                    cross_class_1 = test_cross_class_bind_unbind(
+                        model, test_loader, DEVICE, output_dir,
                         img_shape=(3, 32, 32),
-                        n_classes=10,
+                        class_a=pair_classes[0], class_b=pair_classes[1],
                     )
-                    pairwise_bind_bundle_path = pairwise_result.get(
-                        "pairwise_bind_bundle_path"
-                    )
-
-                    # cross-class bind/unbind test
-                    print(f"running cross-class bind/unbind test ({dist_name})...")
-                    cross_class_star = test_cross_class_bind_unbind(
-                        model, test_loader, DEVICE, output_dir,
-                        unbind_method="*", img_shape=(3, 32, 32),
-                    )
-                    cross_class_deconv = test_cross_class_bind_unbind(
-                        model, test_loader, DEVICE, output_dir,
-                        unbind_method="†", img_shape=(3, 32, 32),
+                    cross_class_2 = test_cross_class_bind_unbind(
+                        model, test_loader, DEVICE, os.path.join(output_dir, "pair2"),
+                        img_shape=(3, 32, 32),
+                        class_a=pair_classes[2], class_b=pair_classes[3],
                     )
 
                     # self-binding: bind z with itself k times, unbind k times, measure similarity
@@ -761,12 +749,10 @@ def main(args):
                         rp = fr.get("recon_after_k_binds_plot_path")
                         if rp:
                             images[f"recon_after_k_binds_{tag}"] = rp
-                    if pairwise_bind_bundle_path and os.path.exists(
-                        pairwise_bind_bundle_path
-                    ):
-                        images["pairwise_bind_bundle_decode"] = (
-                            pairwise_bind_bundle_path
-                        )
+                    for cc, tag in [(cross_class_1, "pair1"), (cross_class_2, "pair2")]:
+                        ccp = cc.get("cross_class_bind_unbind_plot_path")
+                        if ccp and os.path.exists(ccp):
+                            images[f"cross_class_binding_{tag}"] = ccp
 
                     summary = {
                         "final_best_total_loss": best,

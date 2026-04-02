@@ -448,15 +448,10 @@ def run(args):
                     )
                     pairwise_bind_bundle_path = pairwise_result.get("pairwise_bind_bundle_path")
 
-                    # cross-class bind/unbind test
-                    cross_class_star = test_cross_class_bind_unbind(
+                    # cross-class bind/unbind test (6 vs 9)
+                    cross_class_result = test_cross_class_bind_unbind(
                         model, test_subset_loader, device, vis_dir,
-                        unbind_method="*", img_shape=(1, 28, 28),
-                        class_a=6, class_b=9,
-                    )
-                    cross_class_deconv = test_cross_class_bind_unbind(
-                        model, test_subset_loader, device, vis_dir,
-                        unbind_method="†", img_shape=(1, 28, 28),
+                        img_shape=(1, 28, 28),
                         class_a=6, class_b=9,
                     )
 

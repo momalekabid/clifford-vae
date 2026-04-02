@@ -1153,20 +1153,14 @@ def main(args):
 
                         # cross-class bind/unbind test (shirt=6 vs sandal=5)
                         print(f"running cross-class bind/unbind test...")
-                        cross_class_star = test_cross_class_bind_unbind(
+                        cross_class_result = test_cross_class_bind_unbind(
                             model, test_loader, DEVICE, output_dir,
-                            unbind_method="*", img_shape=IMG_SHAPE,
+                            img_shape=IMG_SHAPE,
                             class_a=5, class_b=6,
                         )
-                        cross_class_deconv = test_cross_class_bind_unbind(
-                            model, test_loader, DEVICE, output_dir,
-                            unbind_method="†", img_shape=IMG_SHAPE,
-                            class_a=5, class_b=6,
-                        )
-                        if cross_class_star.get("cross_class_bind_unbind_plot_path"):
-                            images["cross_class_binding_star"] = cross_class_star["cross_class_bind_unbind_plot_path"]
-                        if cross_class_deconv.get("cross_class_bind_unbind_plot_path"):
-                            images["cross_class_binding_deconv"] = cross_class_deconv["cross_class_bind_unbind_plot_path"]
+                        ccp = cross_class_result.get("cross_class_bind_unbind_plot_path")
+                        if ccp and os.path.exists(ccp):
+                            images["cross_class_binding"] = ccp
 
                         sp = fourier_star.get("similarity_after_k_binds_plot_path")
                         sd = fourier_perp.get("similarity_after_k_binds_plot_path")
