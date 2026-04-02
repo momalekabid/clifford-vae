@@ -62,6 +62,7 @@ def load_model(ckpt_path, distribution, latent_dim, arch, dataset, device):
             latent_dim=latent_dim,
             in_channels=in_ch,
             distribution=distribution,
+            device=str(device),
         )
     else:
         raise ValueError(f"unsupported arch: {arch}")
