@@ -32,7 +32,7 @@ from utils.wandb_utils import (
     plot_gaussian_manifold_visualization,
     plot_cross_dist_comparison_dim,
     plot_across_dims_comparison,
-    test_pairwise_bind_bundle_decode,
+    test_cross_class_bind_unbind,
 )
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
@@ -931,7 +931,7 @@ def main(args):
                             f"running 1-item-per-class test ({dist_name}, no braiding)..."
                         )
                         two_per_class_res = test_per_class_bundle_capacity_k_items(
-                            d=item_memory.shape[-1],
+                            d=latent_dim,
                             n_items=1000,
                             n_classes=10,
                             items_per_class=1,
@@ -962,6 +962,7 @@ def main(args):
                             save_dir=output_dir,
                             item_memory=item_memory,
                             use_braiding=False,
+                            baseline_d=latent_dim,
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
@@ -982,6 +983,7 @@ def main(args):
                             save_dir=output_dir,
                             item_memory=item_memory,
                             bind_with_random=True,
+                            baseline_d=latent_dim,
                         )
                         rf_results["role_filler_capacity"] = rf_res
                         role_filler_raw = rf_res
@@ -1151,22 +1153,16 @@ def main(args):
                         if os.path.exists(rf_plot):
                             images["role_filler_capacity"] = rf_plot
 
-                        # pairwise bind/bundle decode test
-                        t0 = time.time()
-                        print(f"running pairwise bind/bundle decode test...")
-                        pairwise_result = test_pairwise_bind_bundle_decode(
-                            model,
-                            test_loader,
-                            DEVICE,
-                            output_dir,
-                            class_names=class_names,
+                        # cross-class bind/unbind test (shirt=6 vs sandal=5)
+                        print(f"running cross-class bind/unbind test...")
+                        cross_class_result = test_cross_class_bind_unbind(
+                            model, test_loader, DEVICE, output_dir,
                             img_shape=IMG_SHAPE,
-                            n_classes=10,
+                            class_a=5, class_b=6,
                         )
-                        print(f"  completed in {time.time() - t0:.2f}s")
-                        pairwise_bind_bundle_path = pairwise_result.get("pairwise_bind_bundle_path")
-                        if pairwise_bind_bundle_path and os.path.exists(pairwise_bind_bundle_path):
-                            images["pairwise_bind_bundle_decode"] = pairwise_bind_bundle_path
+                        ccp = cross_class_result.get("cross_class_bind_unbind_plot_path")
+                        if ccp and os.path.exists(ccp):
+                            images["cross_class_binding"] = ccp
 
                         sp = fourier_star.get("similarity_after_k_binds_plot_path")
                         sd = fourier_perp.get("similarity_after_k_binds_plot_path")
@@ -1452,7 +1448,7 @@ if __name__ == "__main__":
         default="clifford-experiments-CNN",
         help="wandb project name",
     )
-    p.add_argument("--patience", type=int, default=50, help="early stopping patience")
+    p.add_argument("--patience", type=int, default=100, help="early stopping patience")
     p.add_argument(
         "--cycle_epochs",
         type=int,

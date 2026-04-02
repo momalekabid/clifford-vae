@@ -24,6 +24,7 @@ from utils.wandb_utils import (
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
     test_pairwise_bind_bundle_decode,
+    test_cross_class_bind_unbind,
     compute_class_means,
     evaluate_mean_vector_cosine,
 )
@@ -446,6 +447,13 @@ def run(args):
                         n_classes=10,
                     )
                     pairwise_bind_bundle_path = pairwise_result.get("pairwise_bind_bundle_path")
+
+                    # cross-class bind/unbind test (6 vs 9)
+                    cross_class_result = test_cross_class_bind_unbind(
+                        model, test_subset_loader, device, vis_dir,
+                        img_shape=(1, 28, 28),
+                        class_a=6, class_b=9,
+                    )
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)

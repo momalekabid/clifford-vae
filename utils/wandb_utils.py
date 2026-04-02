@@ -34,6 +34,14 @@ def _get_flat_z(model, x):
     return z
 
 
+def _decode(model, z):
+    """wrapper around model.decoder() that reshapes flat vectors for per-token models."""
+    if z.dim() == 2 and hasattr(model, "num_tokens"):
+        dec_dim = 2 * model.latent_dim if model.distribution == "clifford" else model.latent_dim
+        z = z.view(z.size(0), model.num_tokens, dec_dim)
+    return model.decoder(z)
+
+
 def test_self_binding(
     model,
     loader,
@@ -134,20 +142,20 @@ def test_self_binding(
     os.makedirs(output_dir, exist_ok=True)
     fig, ax = plt.subplots(figsize=(8, 4))
 
-    ax.plot(depths, self_means, "o-", markersize=3, label="self-binding", color="tab:blue")
+    ax.plot(depths, self_means, "o-", markersize=5, label="self-binding", color="tab:blue", linewidth=2)
     ax.fill_between(depths,
                     [m - s for m, s in zip(self_means, self_stds)],
                     [m + s for m, s in zip(self_means, self_stds)],
                     alpha=0.15, color="tab:blue")
 
-    ax.plot(depths, rand_means, "s-", markersize=3, label="random latent partners", color="tab:orange")
+    ax.plot(depths, rand_means, "s-", markersize=5, label="random latent partners", color="tab:orange", linewidth=2)
     ax.fill_between(depths,
                     [m - s for m, s in zip(rand_means, rand_stds)],
                     [m + s for m, s in zip(rand_means, rand_stds)],
                     alpha=0.15, color="tab:orange")
 
-    # baselines: HRR and unitary vectors at same dimensionality
-    d = all_z.shape[-1]
+    # baselines: use encoder dim (not bivector dim) so clifford compares fairly
+    d = getattr(model, "latent_dim", all_z.shape[-1])
     for bname, init_fn, color, marker in [
         ("HRR", hrr_init, "tab:gray", "^"),
         ("unitary (FHRR)", unitary_init, "tab:green", "v"),
@@ -169,23 +177,23 @@ def test_self_binding(
                 b_depth_sims[m].append(sim)
         b_means = [np.mean(b_depth_sims[m]) for m in depths]
         b_stds = [np.std(b_depth_sims[m]) for m in depths]
-        ax.plot(depths, b_means, marker=marker, markersize=3, label=bname, color=color,
-                linestyle="--", alpha=0.7)
+        ax.plot(depths, b_means, marker=marker, markersize=5, label=bname, color=color,
+                linestyle="--", alpha=0.8)
         ax.fill_between(depths,
                         [m - s for m, s in zip(b_means, b_stds)],
                         [m + s for m, s in zip(b_means, b_stds)],
                         alpha=0.08, color=color)
 
     ax.set_ylim(-0.1, 1.05)
-    ax.set_xlabel("binding depth $m$")
-    ax.set_ylabel("cosine similarity to original")
+    ax.set_xlabel("Binding Depth $m$")
+    ax.set_ylabel("Cosine Similarity to Original")
     # use model's latent_dim if available (avoids showing 2*d for clifford bivectors)
     display_d = getattr(model, "latent_dim", all_z.shape[-1])
-    ax.set_title(f"approximate inverse binding depth (d={display_d})")
+    ax.set_title(f"Approximate Inverse Binding Depth ($d={display_d}$)")
     ax.legend()
     ax.grid(alpha=0.3)
     plt.tight_layout()
-    plt.savefig(path_bind_curve, dpi=200, bbox_inches="tight")
+    plt.savefig(path_bind_curve, dpi=500, bbox_inches="tight")
     plt.close()
 
     # decode reconstructions at selected depths for a few example vectors
@@ -234,7 +242,7 @@ def test_self_binding(
                 flat_vecs.extend(row)
 
             with torch.no_grad():
-                imgs = model.decoder(torch.stack(flat_vecs, 0))
+                imgs = _decode(model, torch.stack(flat_vecs, 0))
                 if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
                     if model.decoder.output_activation == "sigmoid":
                         imgs = torch.sigmoid(imgs)
@@ -267,9 +275,9 @@ def test_self_binding(
             ax.set_xticklabels(col_labels, fontsize=8)
             ax.set_yticks([h * i + h // 2 for i in range(n_rows)])
             ax.set_yticklabels([f"class {l}" for l in example_labels], fontsize=9)
-            ax.set_title("decoded recovery after m sequential bind-unbind cycles")
+            ax.set_title("Decoded Recovery After $m$ Sequential Bind-Unbind Cycles")
             plt.tight_layout()
-            plt.savefig(recon_paths, dpi=200, bbox_inches="tight")
+            plt.savefig(recon_paths, dpi=500, bbox_inches="tight")
             plt.close()
 
     except Exception as e:
@@ -490,7 +498,7 @@ def plot_clifford_torus_latent_scatter(
     plt.ylabel(f"Phase Angle $\\theta_{{{ax1}}}$")
     plt.title("Clifford Torus Latent Phase Angles")
     plt.tight_layout()
-    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.savefig(path, dpi=500, bbox_inches="tight")
     plt.close()
     return path
 
@@ -532,7 +540,7 @@ def plot_clifford_torus_recon_grid(
     Z = _angles_to_clifford_vector(A, normalize_ifft=True)
 
     model.eval()
-    imgs = model.decoder(Z).detach().cpu()
+    imgs = _decode(model, Z).detach().cpu()
     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
     H = n_grid
     W = n_grid
@@ -551,7 +559,7 @@ def plot_clifford_torus_recon_grid(
     plt.yticks([])
     plt.title("Decoder Reconstructions over Clifford Torus Grid")
     plt.tight_layout()
-    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.savefig(path, dpi=500, bbox_inches="tight")
     plt.close()
     return path
 
@@ -615,7 +623,7 @@ def test_vsa_operations(
             )
             plt.figure(figsize=(10, 4))
             plt.subplot(1, 2, 1)
-            plt.hist(single_bind_sims, bins=20, alpha=0.7, edgecolor="black")
+            plt.hist(single_bind_sims, bins=20, alpha=0.8, edgecolor="black")
             plt.axvline(
                 np.mean(single_bind_sims),
                 color="red",
@@ -629,7 +637,7 @@ def test_vsa_operations(
             plt.grid(alpha=0.3)
 
             plt.subplot(1, 2, 2)
-            plt.plot(single_bind_sims, "o-", alpha=0.7, markersize=4)
+            plt.plot(single_bind_sims, "o-", alpha=0.8, markersize=5)
             plt.axhline(
                 np.mean(single_bind_sims), color="red", linestyle="--", alpha=0.8
             )
@@ -638,7 +646,7 @@ def test_vsa_operations(
             plt.title("Per-Test Cosine Similarity")
             plt.grid(alpha=0.3)
             plt.tight_layout()
-            plt.savefig(path_vsa_test, dpi=200, bbox_inches="tight")
+            plt.savefig(path_vsa_test, dpi=500, bbox_inches="tight")
             plt.close()
     except Exception as e:
         print(f"Warning: VSA bind/unbind plotting failed: {e}")
@@ -680,7 +688,7 @@ def _plot_clifford_manifold_original(model, device, output_dir, n_grid=12, dims=
 
         Z = _angles_to_clifford_vector(A, normalize_ifft=True)
 
-        x_recon = model.decoder(Z)
+        x_recon = _decode(model, Z)
 
         if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
             if model.decoder.output_activation == "sigmoid":
@@ -716,7 +724,7 @@ def _plot_clifford_manifold_original(model, device, output_dir, n_grid=12, dims=
         f"Clifford Torus Manifold Traversal (Dimensions {dims[0]}, {dims[1]})"
     )
     plt.tight_layout()
-    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.savefig(path, dpi=500, bbox_inches="tight")
     plt.close()
 
     return path
@@ -748,7 +756,7 @@ def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=
     with torch.no_grad():
         z = torch.randn(n_samples, latent_dim, device=device)
         z = torch.nn.functional.normalize(z, p=2, dim=-1)
-        x_recon = model.decoder(z)
+        x_recon = _decode(model, z)
         x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
         x_recon = x_recon.view(-1, *img_shape).cpu()
     x_recon_grid = x_recon[: grid_size * grid_size]
@@ -773,7 +781,7 @@ def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=
     plt.yticks([])
     plt.title("Power Spherical Manifold Reconstructions")
     plt.tight_layout()
-    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.savefig(path, dpi=500, bbox_inches="tight")
     plt.close()
 
     return path
@@ -805,7 +813,7 @@ def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=144, i
     model.eval()
     with torch.no_grad():
         z = torch.randn(n_samples, latent_dim, device=device)
-        x_recon = model.decoder(z)
+        x_recon = _decode(model, z)
         x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
         x_recon = x_recon.view(-1, *img_shape)
 
@@ -831,7 +839,7 @@ def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=144, i
     plt.yticks([])
     plt.title("Gaussian Manifold Random Sample Reconstructions")
     plt.tight_layout()
-    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.savefig(path, dpi=500, bbox_inches="tight")
     plt.close()
 
     return path
@@ -867,24 +875,25 @@ def plot_cross_dist_comparison_dim(dim_results, latent_dim, dataset_name, output
         if metrics is None:
             continue
         ls = "--" if dist_name == "random_hrr" else "-"
+        lw = 1 if dist_name == "random_hrr" else 2
         color = COLORS.get(dist_name, "black")
         label = LABELS.get(dist_name, dist_name)
 
         bc = metrics.get("bundle_cap")
         if bc and bc.get("k") and bc.get("accuracy"):
-            axes[0].plot(bc["k"], bc["accuracy"], marker="o", markersize=3,
-                         color=color, linestyle=ls, label=label)
+            axes[0].plot(bc["k"], bc["accuracy"], marker="o", markersize=5,
+                         color=color, linestyle=ls, label=label, linewidth=lw)
 
         k_sims = metrics.get("self_binding_k_sims", [])
         k_vals = metrics.get("self_binding_k_values", [])
         if k_sims and k_vals:
-            axes[1].plot(k_vals, k_sims, marker="o", markersize=3,
-                         color=color, linestyle=ls, label=label)
+            axes[1].plot(k_vals, k_sims, marker="o", markersize=5,
+                         color=color, linestyle=ls, label=label, linewidth=lw)
 
         rf = metrics.get("role_filler")
         if rf and rf.get("k") and rf.get("accuracy"):
-            axes[2].plot(rf["k"], rf["accuracy"], marker="s", markersize=3,
-                         color=color, linestyle=ls, label=label)
+            axes[2].plot(rf["k"], rf["accuracy"], marker="s", markersize=5,
+                         color=color, linestyle=ls, label=label, linewidth=lw)
 
     axes[0].set_xlabel("Number of Bundled Vectors ($k$)")
     axes[0].set_ylabel("Retrieval Accuracy")
@@ -907,11 +916,11 @@ def plot_cross_dist_comparison_dim(dim_results, latent_dim, dataset_name, output
     axes[2].grid(alpha=0.3)
     axes[2].set_ylim(0, 1.05)
 
-    fig.suptitle(f"{dataset_name} — VSA comparison (d={latent_dim})", fontsize=13)
+    fig.suptitle(f"{dataset_name} — VSA Comparison ($d={latent_dim}$)", fontsize=13)
     plt.tight_layout()
     os.makedirs(output_dir, exist_ok=True)
     save_path = os.path.join(output_dir, f"vsa_comparison_d{latent_dim}.png")
-    plt.savefig(save_path, dpi=150)
+    plt.savefig(save_path, dpi=500)
     plt.close()
     return save_path
 
@@ -1177,7 +1186,7 @@ def plot_latent_dimension_exploration(
                 z = _angles_to_clifford_vector(modified_latent, normalize_ifft=True)
             else:
                 z = modified_latent
-            x_recon = model.decoder(z)
+            x_recon = _decode(model, z)
 
             if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
                 if model.decoder.output_activation == "sigmoid":
@@ -1232,7 +1241,7 @@ def plot_latent_dimension_exploration(
         f"Each Row Shows Variations Along One Latent Dimension {range_str}"
     )
     plt.tight_layout()
-    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.savefig(path, dpi=500, bbox_inches="tight")
     plt.close()
 
     return path
@@ -1241,7 +1250,7 @@ def plot_latent_dimension_exploration(
 def _decode_vectors(model, vectors, img_shape):
     """decode latent vectors to images, handling different model types."""
     with torch.no_grad():
-        imgs = model.decoder(vectors)
+        imgs = _decode(model, vectors)
         if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
             if model.decoder.output_activation == "sigmoid":
                 imgs = torch.sigmoid(imgs)
@@ -1279,19 +1288,16 @@ def test_pairwise_bind_bundle_decode(
             x = x.to(device)
 
             # get decoder-ready z depending on model type
-            if hasattr(model, 'encode') and not hasattr(model, 'get_flat_latent'):
-                # mlp vae: encode() expects flat input
+            if hasattr(model, 'get_flat_latent'):
+                z = model.get_flat_latent(x)
+            elif hasattr(model, 'encode'):
                 x_in = x if x.dim() == 2 else x.view(x.size(0), -1)
                 out = model(x_in)
                 if isinstance(out, (tuple, list)) and len(out) == 4 and isinstance(out[0], tuple):
-                    (_, _), _, z, _ = out  # z is decoder-ready sampled latent
+                    (_, _), _, z, _ = out
                 else:
                     z_mean, _ = model.encode(x_in)
                     z = z_mean
-            elif hasattr(model, 'reparameterize') and hasattr(model, 'encoder'):
-                # cnn vae, sphereAR, cliffordar: encoder(x) returns (mu, params)
-                mu, params = model.encoder(x)
-                z, _, _ = model.reparameterize(mu, params)
             else:
                 out = model(x)
                 z = out[-1] if isinstance(out, (tuple, list)) else out
@@ -1372,11 +1378,11 @@ def test_pairwise_bind_bundle_decode(
     ax.set_xticks([W * i + W // 2 for i in range(n_cols)])
     ax.set_xticklabels(["A", "B", "bind(A,B)", "bundle(A,B)", "unbind→A", "unbind→B"], fontsize=8)
     avg_sim = (sum(sims_a) + sum(sims_b)) / (2 * len(sims_a)) if sims_a else 0
-    ax.set_title(f"pairwise bind, bundle & unbind recovery (avg cosine sim: {avg_sim:.3f})")
+    ax.set_title(f"Pairwise Bind, Bundle & Unbind Recovery (Avg Cosine Sim: {avg_sim:.3f})")
     plt.tight_layout()
 
     path = os.path.join(output_dir, "pairwise_bind_bundle_decode.png")
-    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.savefig(path, dpi=500, bbox_inches="tight")
     plt.close()
 
     avg_unbind_sim = (sum(sims_a) + sum(sims_b)) / (2 * len(sims_a)) if sims_a else 0
@@ -1384,6 +1390,143 @@ def test_pairwise_bind_bundle_decode(
         "pairwise_bind_bundle_path": path,
         "n_pairs": len(pairs),
         "avg_unbind_similarity": avg_unbind_sim,
+    }
+
+
+def test_cross_class_bind_unbind(
+    model,
+    loader,
+    device,
+    output_dir,
+    img_shape=(1, 28, 28),
+    class_a: int = None,
+    class_b: int = None,
+):
+    """cross-class bind/unbind with decoded reconstructions.
+    2x4 grid:
+      row 1: A | B | decode(bind(A,B)) | decode(bundle(A,B))
+      row 2: recovered A (*) | recovered B (*) | recovered A (†) | recovered B (†)
+    if class_a/class_b not specified, uses first two classes found.
+    """
+    empty = {"cross_class_bind_unbind_similarity": 0.0, "cross_class_bind_unbind_plot_path": None}
+    try:
+        model.eval()
+        with torch.no_grad():
+            all_z = []
+            all_labels = []
+            for x, y in loader:
+                x = x.to(device)
+                z = _get_flat_z(model, x)
+                all_z.append(z.detach())
+                all_labels.append(y)
+                if len(torch.cat(all_z, 0)) >= 200:
+                    break
+
+            if not all_z:
+                return empty
+
+            all_z = torch.cat(all_z, 0)
+            all_labels = torch.cat(all_labels, 0)
+
+            unique_labels = torch.unique(all_labels)
+            if len(unique_labels) < 2:
+                return empty
+
+            if class_a is not None and class_b is not None:
+                class_a_label = torch.tensor(class_a)
+                class_b_label = torch.tensor(class_b)
+            else:
+                class_a_label = unique_labels[0]
+                class_b_label = unique_labels[1]
+
+            a_mask = all_labels == class_a_label
+            b_mask = all_labels == class_b_label
+            if a_mask.sum() == 0 or b_mask.sum() == 0:
+                return empty
+
+            a = all_z[torch.where(a_mask)[0][0:1]]
+            b = all_z[torch.where(b_mask)[0][0:1]]
+
+    except Exception:
+        return empty
+
+    if getattr(model, "distribution", None) == "gaussian":
+        a = torch.nn.functional.normalize(a, p=2, dim=-1)
+        b = torch.nn.functional.normalize(b, p=2, dim=-1)
+
+    ab = bind(a, b)
+    ab_bundle = (a + b) / math.sqrt(2)
+
+    # both unbind methods
+    rec_a_star = unbind(ab, b, method="*")
+    rec_b_star = unbind(ab, a, method="*")
+    rec_a_dag = unbind(ab, b, method="†")
+    rec_b_dag = unbind(ab, a, method="†")
+
+    sim_star = (
+        torch.nn.functional.cosine_similarity(rec_a_star, a, dim=-1).mean().item()
+        + torch.nn.functional.cosine_similarity(rec_b_star, b, dim=-1).mean().item()
+    ) / 2.0
+    sim_dag = (
+        torch.nn.functional.cosine_similarity(rec_a_dag, a, dim=-1).mean().item()
+        + torch.nn.functional.cosine_similarity(rec_b_dag, b, dim=-1).mean().item()
+    ) / 2.0
+
+    plot_path = None
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        plot_path = os.path.join(output_dir, "cross_class_bind_unbind.png")
+
+        # row 1: A, B, bind(A,B), bundle(A,B)
+        # row 2: rec_a_star, rec_b_star, rec_a_dag, rec_b_dag
+        vectors = torch.cat([a, b, ab, ab_bundle, rec_a_star, rec_b_star, rec_a_dag, rec_b_dag], dim=0)
+        imgs = _decode_vectors(model, vectors, img_shape)
+
+        C, h, w = img_shape
+        n_cols = 4
+        n_rows = 2
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 6))
+
+        row1_labels = [
+            f"A (cls {class_a_label.item()})",
+            f"B (cls {class_b_label.item()})",
+            "decode bind(A,B)",
+            "decode bundle(A,B)",
+        ]
+        row2_labels = [
+            f"rec A (* {sim_star:.3f})",
+            f"rec B (* {sim_star:.3f})",
+            f"rec A (\u2020 {sim_dag:.3f})",
+            f"rec B (\u2020 {sim_dag:.3f})",
+        ]
+
+        for col in range(n_cols):
+            for row, labels in enumerate([row1_labels, row2_labels]):
+                idx = row * n_cols + col
+                img = imgs[idx]
+                ax = axes[row][col]
+                if C == 1:
+                    ax.imshow(img.squeeze(0), cmap="gray")
+                else:
+                    ax.imshow(img.permute(1, 2, 0).clamp(0, 1))
+                ax.set_title(labels[col], fontsize=9)
+                ax.axis("off")
+
+        dist_name = getattr(model, "distribution", "unknown")
+        fig.suptitle(f"Cross-Class Bind/Unbind ({dist_name})", fontsize=12, fontweight="bold")
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=500, bbox_inches="tight")
+        plt.close()
+
+    except Exception as e:
+        print(f"  cross-class plot error: {e}")
+        plot_path = None
+
+    return {
+        "cross_class_bind_unbind_similarity": (sim_star + sim_dag) / 2.0,
+        "cross_class_bind_unbind_similarity_star": sim_star,
+        "cross_class_bind_unbind_similarity_dag": sim_dag,
+        "cross_class_bind_unbind_plot_path": plot_path,
     }
 
 
@@ -1439,7 +1582,7 @@ def compute_fid(model, test_loader, device, dist_name, latent_dim,
         while n_done < n_samples:
             bs = min(batch_size, n_samples - n_done)
             z = sample_prior_z(dist_name, latent_dim, bs, device, l2_normalize=l2_norm)
-            imgs_01 = (model.decoder(z) * 0.5 + 0.5).clamp(0, 1)
+            imgs_01 = (_decode(model, z) * 0.5 + 0.5).clamp(0, 1)
             if in_channels == 1:
                 imgs_01 = imgs_01.repeat(1, 3, 1, 1)
             fid_metric.update(imgs_01, real=False)

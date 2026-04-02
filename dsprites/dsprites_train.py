@@ -1,4 +1,4 @@
-# dSprites training — learn HRR-compatible latent codes for compositional factor manipulation
+# dSprites training — MLP VAE with BCE loss for binary sprites
 # dataset: 64x64 binary sprites with 6 ground truth factors
 # (color, shape, scale, orientation, posX, posY)
 
@@ -22,8 +22,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cnn.cliffordar_model import CliffordARVAE, HybridVAE
-from cnn.models import VAE as CNNVAE
+from dsprites.mlp_model import DSpritesVAE
 from utils.wandb_utils import (
     WandbLogger,
     test_self_binding,
@@ -35,8 +34,6 @@ from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
     test_per_class_bundle_capacity_k_items,
-    bind as vsa_bind,
-    unbind as vsa_unbind,
     normalize_vectors as vsa_normalize,
 )
 
@@ -50,6 +47,13 @@ DEVICE = (
 # dSprites factor names and metadata
 FACTOR_NAMES = ["color", "shape", "scale", "orientation", "posX", "posY"]
 SHAPE_NAMES = ["square", "ellipse", "heart"]
+
+
+def decode_to_img(model, z):
+    """decode latent vector, applying sigmoid and reshaping to image."""
+    out = model.decoder(z)
+    out = torch.sigmoid(out)
+    return out.view(z.size(0), model.in_channels, model.img_size, model.img_size)
 
 
 class DSpritesDataset(Dataset):
@@ -98,6 +102,7 @@ def get_factor_subsets(dataset, factor_idx, n_per_value=100):
 def train_epoch(model, loader, optimizer, device, beta):
     model.train()
     sums = {"total": 0.0, "recon": 0.0, "kld": 0.0, "entropy": 0.0}
+    concentration_stats = []
     effective_beta_vals = []
 
     for x, _ in loader:
@@ -115,17 +120,41 @@ def train_epoch(model, loader, optimizer, device, beta):
         eb = losses["effective_beta"]
         effective_beta_vals.append(eb if isinstance(eb, float) else eb.item())
 
+        if hasattr(model, "distribution") and model.distribution in [
+            "powerspherical",
+            "clifford",
+        ]:
+            if hasattr(q_z, "concentration"):
+                concentration_stats.append(q_z.concentration.detach())
+
     n = len(loader.dataset)
     result = {f"train/{k}_loss": v / n for k, v in sums.items() if k != "entropy"}
     result["train/entropy"] = sums["entropy"] / n
     if effective_beta_vals:
         result["train/effective_beta"] = np.mean(effective_beta_vals)
+
+    if concentration_stats and hasattr(model, "distribution"):
+        all_concentrations = torch.cat(concentration_stats, dim=0)
+        result[f"train/{model.distribution}_concentration_mean"] = (
+            all_concentrations.mean().item()
+        )
+        result[f"train/{model.distribution}_concentration_std"] = (
+            all_concentrations.std().item()
+        )
+        result[f"train/{model.distribution}_concentration_max"] = (
+            all_concentrations.max().item()
+        )
+        result[f"train/{model.distribution}_concentration_min"] = (
+            all_concentrations.min().item()
+        )
+
     return result
 
 
 def test_epoch(model, loader, device):
     model.eval()
     sums = {"total": 0.0, "recon": 0.0, "kld": 0.0, "entropy": 0.0}
+    concentration_stats = []
     effective_beta_vals = []
 
     with torch.no_grad():
@@ -139,11 +168,34 @@ def test_epoch(model, loader, device):
             eb = losses["effective_beta"]
             effective_beta_vals.append(eb if isinstance(eb, float) else eb.item())
 
+            if hasattr(model, "distribution") and model.distribution in [
+                "powerspherical",
+                "clifford",
+            ]:
+                if hasattr(q_z, "concentration"):
+                    concentration_stats.append(q_z.concentration.detach())
+
     n = len(loader.dataset)
     result = {f"test/{k}_loss": v / n for k, v in sums.items() if k != "entropy"}
     result["test/entropy"] = sums["entropy"] / n
     if effective_beta_vals:
         result["test/effective_beta"] = np.mean(effective_beta_vals)
+
+    if concentration_stats and hasattr(model, "distribution"):
+        all_concentrations = torch.cat(concentration_stats, dim=0)
+        result[f"test/{model.distribution}_concentration_mean"] = (
+            all_concentrations.mean().item()
+        )
+        result[f"test/{model.distribution}_concentration_std"] = (
+            all_concentrations.std().item()
+        )
+        result[f"test/{model.distribution}_concentration_max"] = (
+            all_concentrations.max().item()
+        )
+        result[f"test/{model.distribution}_concentration_min"] = (
+            all_concentrations.min().item()
+        )
+
     return result
 
 
@@ -195,106 +247,133 @@ def get_latents_with_factors(model, dataset, device, indices):
     return z, factor_values, factor_classes, x.cpu()
 
 
-def factor_swap_experiment(model, dataset, device, save_dir, n_pairs=5):
-    """the big one: encode two sprites, unbind a factor, rebind with the other's factor, decode.
-
-    for each pair of sprites that differ in exactly one factor:
-    1. encode both -> z_a, z_b
-    2. bind z_a with a role vector for the differing factor
-    3. unbind the factor, rebind with z_b's factor value
-    4. decode and compare
-
-    this tests whether clifford binding can manipulate individual factors in pixel space.
+def beta_vae_disentanglement_metric(model, dataset, device, n_trials=5000, batch_size=64):
+    """beta-VAE disentanglement metric (Higgins et al. 2017).
+    for each trial:
+      1. pick a fixed factor k
+      2. sample two datapoints that share the same value for factor k
+         but differ in all other factors
+      3. encode both, compute |z1 - z2|
+      4. record (argmax |z1 - z2|, k)
+    then train a majority-vote classifier on the argmax -> factor mapping.
+    returns accuracy (higher = more disentangled).
     """
-    os.makedirs(save_dir, exist_ok=True)
+    from collections import Counter
 
-    # for each non-trivial factor (shape, scale, orientation, posX, posY)
-    for factor_idx in range(1, 6):
-        factor_name = FACTOR_NAMES[factor_idx]
-        factor_classes = dataset.latents_classes[:, factor_idx]
-        unique_vals = np.unique(factor_classes)
+    model.eval()
+    all_classes = dataset.latents_classes  # (N, 6)
+    n_factors = all_classes.shape[1]
 
-        if len(unique_vals) < 2:
-            continue
+    # precompute indices per factor value
+    factor_indices = {}
+    for f in range(1, n_factors):  # skip color (always 1)
+        vals = np.unique(all_classes[:, f])
+        factor_indices[f] = {int(v): np.where(all_classes[:, f] == v)[0] for v in vals}
 
-        print(f"  factor swap: {factor_name} ({len(unique_vals)} values)")
+    votes = []  # list of (argmax_dim, true_factor)
 
-        fig, axes = plt.subplots(n_pairs, 5, figsize=(12, 2.5 * n_pairs))
-        if n_pairs == 1:
-            axes = axes[np.newaxis, :]
+    with torch.no_grad():
+        for _ in range(n_trials):
+            # pick a random factor to hold fixed
+            k = np.random.randint(1, n_factors)
+            vals = list(factor_indices[k].keys())
+            v = vals[np.random.randint(len(vals))]
+            pool = factor_indices[k][v]
 
-        for pair_idx in range(n_pairs):
-            # pick two different factor values
-            v1, v2 = np.random.choice(unique_vals, 2, replace=False)
+            if len(pool) < 2:
+                continue
 
-            # find sprites that match on all OTHER factors but differ on this one
-            mask_v1 = factor_classes == v1
-            mask_v2 = factor_classes == v2
-            idx_v1 = np.where(mask_v1)[0]
-            idx_v2 = np.where(mask_v2)[0]
+            # sample two indices with same factor k value
+            pair = np.random.choice(pool, 2, replace=False)
+            img1, _ = dataset[pair[0]]
+            img2, _ = dataset[pair[1]]
+            x = torch.stack([img1, img2]).to(device)
+            z = model.get_flat_latent(x)
+            diff = torch.abs(z[0] - z[1])
+            top_dim = diff.argmax().item()
+            votes.append((top_dim, k))
 
-            # pick a random sprite from v1
-            src_idx = np.random.choice(idx_v1)
-            src_factors = dataset.latents_classes[src_idx].copy()
+    if not votes:
+        return {"disentanglement_accuracy": 0.0}
 
-            # find a sprite in v2 that matches on all other factors
-            target_mask = mask_v2.copy()
-            for f in range(6):
-                if f == factor_idx:
-                    continue
-                target_mask &= (dataset.latents_classes[:, f] == src_factors[f])
-            target_indices = np.where(target_mask)[0]
+    # majority vote classifier: for each latent dim, what factor does it vote for?
+    dim_to_factor_counts = {}
+    for dim, factor in votes:
+        if dim not in dim_to_factor_counts:
+            dim_to_factor_counts[dim] = Counter()
+        dim_to_factor_counts[dim][factor] += 1
 
-            if len(target_indices) == 0:
-                # fallback: just use any sprite with v2
-                target_indices = idx_v2
+    # assign each dim to its majority factor
+    dim_to_factor = {}
+    for dim, counts in dim_to_factor_counts.items():
+        dim_to_factor[dim] = counts.most_common(1)[0][0]
 
-            tgt_idx = np.random.choice(target_indices)
+    # compute accuracy
+    correct = sum(1 for dim, factor in votes if dim_to_factor.get(dim) == factor)
+    acc = correct / len(votes)
 
-            # encode both
+    print(f"  disentanglement metric: {acc:.4f} ({len(votes)} trials)")
+    return {"disentanglement_accuracy": acc}
+
+
+def plot_latent_traversals(model, dataset, device, save_path, n_latents=10, n_steps=8):
+    """traverse individual latent dimensions and decode, beta-VAE style.
+    picks a reference image, then sweeps each latent dim across [-3, 3] std.
+    """
+    model.eval()
+    # pick a reference image
+    ref_idx = np.random.randint(len(dataset))
+    ref_img, _ = dataset[ref_idx]
+    ref_x = ref_img.unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        z_ref = model.get_flat_latent(ref_x)  # (1, d)
+
+    d = z_ref.shape[-1]
+    n_show = min(n_latents, d)
+
+    # find the latent dims with highest variance across a sample
+    with torch.no_grad():
+        sample_zs = []
+        for i in range(0, min(1000, len(dataset)), 1):
+            img, _ = dataset[i]
+            z = model.get_flat_latent(img.unsqueeze(0).to(device))
+            sample_zs.append(z.cpu())
+        sample_zs = torch.cat(sample_zs, 0)
+        var = sample_zs.var(dim=0)
+        top_dims = var.argsort(descending=True)[:n_show].numpy()
+
+    # sweep values
+    sweep = torch.linspace(-3, 3, n_steps)
+
+    fig, axes = plt.subplots(n_show, n_steps + 1, figsize=(2 * (n_steps + 1), 2 * n_show))
+    if n_show == 1:
+        axes = axes[np.newaxis, :]
+
+    for row, dim in enumerate(top_dims):
+        # show reference
+        axes[row, 0].imshow(ref_img.squeeze(), cmap="gray")
+        axes[row, 0].set_title(f"ref", fontsize=8)
+        axes[row, 0].axis("off")
+
+        for col, val in enumerate(sweep):
+            z_mod = z_ref.clone()
+            z_mod[0, dim] = val.item()
             with torch.no_grad():
-                src_img, _ = dataset[src_idx]
-                tgt_img, _ = dataset[tgt_idx]
-                src_x = src_img.unsqueeze(0).to(device)
-                tgt_x = tgt_img.unsqueeze(0).to(device)
+                recon = decode_to_img(model, z_mod.to(device)).cpu()
+            axes[row, col + 1].imshow(recon.squeeze().clamp(0, 1), cmap="gray")
+            axes[row, col + 1].set_title(f"z[{dim}]={val:.1f}", fontsize=7)
+            axes[row, col + 1].axis("off")
 
-                z_src = model.get_flat_latent(src_x)  # (1, flat_dim)
-                z_tgt = model.get_flat_latent(tgt_x)
+        axes[row, 0].set_ylabel(f"dim {dim}\nvar={var[dim]:.3f}", fontsize=8)
 
-                # bind src with tgt, then unbind src -> should recover tgt-like
-                bound = vsa_bind(z_src.cpu(), z_tgt.cpu())
-                recovered_src = vsa_unbind(bound, z_tgt.cpu(), method="*")
-                recovered_tgt = vsa_unbind(bound, z_src.cpu(), method="*")
+    plt.suptitle("Latent Traversals (Top Variance Dims)", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=500, bbox_inches="tight")
+    plt.close()
+    print(f"  saved latent traversals to {save_path}")
+    return save_path
 
-                # decode
-                src_recon = model.decoder(z_src).cpu()
-                tgt_recon = model.decoder(z_tgt).cpu()
-                # decode the recovered vectors
-                recovered_src_recon = model.decoder(recovered_src.to(device)).cpu()
-
-            # compute similarities
-            sim_src = F.cosine_similarity(z_src.cpu(), recovered_src, dim=-1).item()
-
-            # plot: [source, target, bound_decoded, recovered_src, recovered_tgt]
-            for ax in axes[pair_idx]:
-                ax.axis("off")
-
-            axes[pair_idx, 0].imshow(src_img.squeeze(), cmap="gray")
-            axes[pair_idx, 0].set_title(f"src ({factor_name}={v1})")
-            axes[pair_idx, 1].imshow(tgt_img.squeeze(), cmap="gray")
-            axes[pair_idx, 1].set_title(f"tgt ({factor_name}={v2})")
-            axes[pair_idx, 2].imshow(src_recon.squeeze().clamp(0, 1), cmap="gray")
-            axes[pair_idx, 2].set_title("src recon")
-            axes[pair_idx, 3].imshow(tgt_recon.squeeze().clamp(0, 1), cmap="gray")
-            axes[pair_idx, 3].set_title("tgt recon")
-            axes[pair_idx, 4].imshow(recovered_src_recon.squeeze().clamp(0, 1), cmap="gray")
-            axes[pair_idx, 4].set_title(f"unbind(bind(s,t),t)\nsim={sim_src:.3f}")
-
-        plt.suptitle(f"factor swap: {factor_name}", fontsize=14)
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, f"factor_swap_{factor_name}.png"), dpi=200)
-        plt.close()
-        print(f"    saved factor_swap_{factor_name}.png")
 
 
 def bundle_by_factor(model, dataset, device, save_dir, factor_idx=1, n_per_class=10):
@@ -325,7 +404,7 @@ def bundle_by_factor(model, dataset, device, save_dir, factor_idx=1, n_per_class
 
             # bundle via addition
             bundled = z.mean(dim=0, keepdim=True)  # (1, flat_dim)
-            bundled_recon = model.decoder(bundled).cpu()
+            bundled_recon = decode_to_img(model, bundled).cpu()
 
         # plot individual sprites
         for col, i in enumerate(chosen):
@@ -341,9 +420,9 @@ def bundle_by_factor(model, dataset, device, save_dir, factor_idx=1, n_per_class
         axes[row, -1].set_title("bundle")
         axes[row, -1].axis("off")
 
-    plt.suptitle(f"bundled prototypes by {factor_name}", fontsize=14)
+    plt.suptitle(f"Bundled Prototypes by {factor_name.capitalize()}", fontsize=14)
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f"bundle_by_{factor_name}.png"), dpi=200)
+    plt.savefig(os.path.join(save_dir, f"bundle_by_{factor_name}.png"), dpi=500)
     plt.close()
     print(f"  saved bundle_by_{factor_name}.png")
 
@@ -406,9 +485,9 @@ def plot_tsne(model, loader, device, save_path, n_samples=2000):
         mask = Y == cls_idx
         ax.scatter(emb[mask, 0], emb[mask, 1], s=5, alpha=0.5, label=name)
     ax.legend()
-    ax.set_title("t-SNE of latent codes (colored by shape)")
+    ax.set_title("t-SNE of Latent Codes (Colored by Shape)")
     plt.tight_layout()
-    plt.savefig(save_path, dpi=200)
+    plt.savefig(save_path, dpi=500)
     plt.close()
     print(f"  saved t-SNE plot to {save_path}")
     return save_path
@@ -457,47 +536,19 @@ def main(args):
             print(f"\n== {exp_name} ==")
             logger.start_run(exp_name, args)
 
-            if args.arch == "vit":
-                model_latent_dim = max(4, latent_dim // 64)
-                print(f"  {dist_name}: 64 tokens x {model_latent_dim}d = {64 * model_latent_dim}d total (CNN+ViT)")
-                model = CliffordARVAE(
-                    latent_dim=model_latent_dim,
-                    image_size=64,
-                    in_channels=1,
-                    distribution=dist_name,
-                    device=DEVICE,
-                    recon_loss_type=args.recon_loss,
-                    l1_weight=args.l1_weight,
-                    use_learnable_beta=args.use_learnable_beta,
-                    l2_normalize=(dist_name == "gaussian" and args.l2_norm),
-                )
-            elif args.arch == "hybrid":
-                model_latent_dim = max(4, latent_dim // 16)
-                print(f"  {dist_name}: per-token CNN, d={model_latent_dim} per token (hybrid)")
-                model = HybridVAE(
-                    latent_dim=model_latent_dim,
-                    in_channels=1,
-                    distribution=dist_name,
-                    device=DEVICE,
-                    recon_loss_type=args.recon_loss,
-                    l1_weight=args.l1_weight,
-                    use_learnable_beta=args.use_learnable_beta,
-                    l2_normalize=(dist_name == "gaussian" and args.l2_norm),
-                    img_size=64,
-                )
-            else:
-                print(f"  {dist_name}: flat z, d={latent_dim} (CNN w/ residual)")
-                model = CNNVAE(
-                    latent_dim=latent_dim,
-                    in_channels=1,
-                    distribution=dist_name,
-                    device=DEVICE,
-                    recon_loss_type=args.recon_loss,
-                    l1_weight=args.l1_weight,
-                    use_learnable_beta=args.use_learnable_beta,
-                    l2_normalize=(dist_name == "gaussian" and args.l2_norm),
-                    img_size=64,
-                )
+            print(f"  {dist_name}: flat z, d={latent_dim} (MLP, BCE)")
+            model = DSpritesVAE(
+                latent_dim=latent_dim,
+                distribution=dist_name,
+                device=DEVICE,
+                img_size=64,
+                in_channels=1,
+                hidden_dim=1200,
+                recon_loss_type=args.recon_loss,
+                l1_weight=args.l1_weight,
+                use_learnable_beta=args.use_learnable_beta,
+                l2_normalize=(dist_name == "gaussian" and args.l2_norm),
+            )
 
             logger.watch_model(model)
             optimizer = optim.AdamW(model.parameters(), lr=args.lr)
@@ -568,10 +619,6 @@ def main(args):
                 sample_sizes=[100, 600, 1000],
             )
 
-            # factor swap experiment — the main event
-            print("running factor swap experiments...")
-            factor_swap_experiment(model, full_dataset, DEVICE, f"{output_dir}/factor_swaps", n_pairs=5)
-
             # bundle by shape
             print("running bundle-by-shape experiment...")
             bundle_by_factor(model, full_dataset, DEVICE, output_dir, factor_idx=1, n_per_class=8)
@@ -591,11 +638,12 @@ def main(args):
                 plot=True,
                 save_dir=output_dir,
                 item_memory=item_memory,
+                baseline_d=latent_dim,
             )
 
             # per-class bundle similarity (by shape)
             test_per_class_bundle_capacity_k_items(
-                d=item_memory.shape[-1],
+                d=latent_dim,
                 n_items=1000,
                 n_classes=3,
                 items_per_class=1,
@@ -624,6 +672,7 @@ def main(args):
                 save_dir=output_dir,
                 item_memory=item_memory,
                 bind_with_random=True,
+                baseline_d=latent_dim,
             )
 
             # pairwise bind-bundle-decode test
@@ -678,6 +727,20 @@ def main(args):
             )
             print(f"  mean_vector_cosine_acc: {mean_vector_acc}")
 
+            # beta-VAE disentanglement metric
+            print("running beta-VAE disentanglement metric...")
+            disent_results = beta_vae_disentanglement_metric(
+                model, full_dataset, DEVICE, n_trials=5000,
+            )
+
+            # latent traversals
+            print("running latent traversals...")
+            traversal_path = plot_latent_traversals(
+                model, full_dataset, DEVICE,
+                f"{output_dir}/latent_traversals.png",
+                n_latents=10, n_steps=8,
+            )
+
             all_run_metrics.append({
                 "d": latent_dim, "dist": dist_name,
                 "knn_acc_100": knn_results.get("knn_acc_100", 0.0) * 100,
@@ -687,6 +750,7 @@ def main(args):
                 "knn_f1_600": knn_results.get("knn_f1_600", 0.0) * 100,
                 "knn_f1_1000": knn_results.get("knn_f1_1000", 0.0) * 100,
                 "mvc": float(mean_vector_acc) * 100,
+                "disentanglement": disent_results.get("disentanglement_accuracy", 0.0) * 100,
                 "best_loss": best,
             })
 
@@ -717,6 +781,7 @@ def main(args):
             logger.log_metrics({
                 **knn_results,
                 **fourier_metrics,
+                **disent_results,
                 "best_test_total_loss": best,
                 "mean_vector_cosine_acc": float(mean_vector_acc),
                 "approx_inv_depth_star": next((d for d, s in zip(fourier_star.get("k_values", []), fourier_star.get("k_sims", [])) if s < 0.5), fourier_star.get("k_values", [0])[-1] if fourier_star.get("k_values") else 0),
@@ -725,6 +790,7 @@ def main(args):
             logger.log_summary({
                 **knn_results,
                 **fourier_metrics,
+                **disent_results,
                 "best_test_total_loss": best,
                 "final_best_total_loss": best,
                 "mean_vector_cosine_acc": float(mean_vector_acc),
@@ -734,9 +800,6 @@ def main(args):
             images_to_log = {}
             if os.path.exists(recon_path):
                 images_to_log["reconstructions"] = recon_path
-            for fname in os.listdir(f"{output_dir}/factor_swaps"):
-                if fname.endswith(".png"):
-                    images_to_log[fname.replace(".png", "")] = os.path.join(output_dir, "factor_swaps", fname)
             bundle_path = os.path.join(output_dir, f"bundle_by_shape.png")
             if os.path.exists(bundle_path):
                 images_to_log["bundle_by_shape"] = bundle_path
@@ -744,6 +807,8 @@ def main(args):
                 images_to_log["pairwise_bind_bundle"] = pairwise_bind_bundle_path
             if os.path.exists(tsne_path):
                 images_to_log["tsne"] = tsne_path
+            if os.path.exists(traversal_path):
+                images_to_log["latent_traversals"] = traversal_path
             if images_to_log:
                 logger.log_images(images_to_log)
 
@@ -771,23 +836,21 @@ if __name__ == "__main__":
 
     p.add_argument("--data_path", type=str, default="data/dsprites_ndarray_co1sh3sc6or40x32y32_64x64.npz")
     p.add_argument("--epochs", type=int, default=1000)
-    p.add_argument("--warmup_epochs", type=int, default=100)
+    p.add_argument("--warmup_epochs", type=int, default=25)
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--recon_loss", type=str, default="l1", choices=["mse", "l1", "bce"])
+    p.add_argument("--recon_loss", type=str, default="bce", choices=["mse", "l1", "bce"])
     p.add_argument("--l1_weight", type=float, default=1.0)
-    p.add_argument("--max_beta", type=float, default=1.0)
+    p.add_argument("--max_beta", type=float, default=2.0)
     p.add_argument("--min_beta", type=float, default=0.1)
     p.add_argument("--use_learnable_beta", action="store_true")
     p.add_argument("--l2_norm", action="store_true", default=True)
     p.add_argument("--no_wandb", action="store_true")
-    p.add_argument("--wandb_project", type=str, default="dsprites-clifford")
-    p.add_argument("--patience", type=int, default=50)
-    p.add_argument("--cycle_epochs", type=int, default=100)
-    p.add_argument("--latent_dims", type=int, nargs="+", default=[64, 256, 1024, 4096])
+    p.add_argument("--wandb_project", type=str, default="april-experiments-dsprites")
+    p.add_argument("--patience", type=int, default=75)
+    p.add_argument("--cycle_epochs", type=int, default=200)
+    p.add_argument("--latent_dims", type=int, nargs="+", default=[256, 1024, 4096])
     p.add_argument("--distributions", type=str, nargs="+", default=None)
-    p.add_argument("--arch", type=str, default="cnn", choices=["cnn", "vit", "hybrid"],
-                   help="backbone: cnn (flat latent w/ residual) or vit (hybrid cnn+vit, per-token)")
 
     args = p.parse_args()
     main(args)

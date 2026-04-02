@@ -40,7 +40,7 @@ ax1.plot(mdims_short, sa_sphere_short, 'b-', linewidth=2,
 ax1.axvline(x=6, color='gray', linestyle='--', alpha=0.5, label='$d=6$ (peak)')
 ax1.set_xlabel('manifold dimension $d$')
 ax1.set_ylabel('surface area')
-ax1.set_title('hypersphere surface area collapse')
+ax1.set_title('Hypersphere Surface Area Collapse')
 ax1.legend(fontsize=9)
 ax1.set_xlim(1, 39)
 
@@ -58,14 +58,14 @@ ax2.semilogy(mdims_comp, sa_sphere_comp, 'b-', linewidth=2,
              label=r'Power Spherical')
 ax2.set_xlabel('manifold dimension $d$')
 ax2.set_ylabel('surface area (log scale)')
-ax2.set_title('surface area comparison across geometries')
+ax2.set_title('Surface Area Comparison Across Geometries')
 ax2.legend(fontsize=9)
 ax2.set_xlim(1, 64)
 
 plt.tight_layout()
 import os
 os.makedirs('figures', exist_ok=True)
-plt.savefig('figures/surface_area_comparison.png', dpi=300, bbox_inches='tight')
+plt.savefig('figures/surface_area_comparison.png', dpi=500, bbox_inches='tight')
 plt.savefig('figures/surface_area_comparison.pdf', bbox_inches='tight')
 print("saved to figures/")
 plt.close()
