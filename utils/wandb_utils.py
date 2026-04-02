@@ -15,13 +15,14 @@ from .vsa import bind, unbind, invert, hrr_init, unitary_init, normalize_vectors
 
 def _get_flat_z(model, x):
     """extract decoder-ready z from model, flattened to (B, flat_dim)."""
-    if hasattr(model, 'reparameterize') and hasattr(model, 'encoder'):
+    if hasattr(model, 'encode') and not hasattr(model, 'get_flat_latent'):
+        # mlp vae: encode() expects flat input
+        x_in = x if x.dim() == 2 else x.view(x.size(0), -1)
+        z, _ = model.encode(x_in)
+    elif hasattr(model, 'reparameterize') and hasattr(model, 'encoder'):
         # vit/rescnn models: encoder -> reparameterize gives (B, T, D) or (B, T, 2*D)
         mu, params = model.encoder(x)
         z, _, _ = model.reparameterize(mu, params)
-    elif hasattr(model, 'encode'):
-        x_in = x if x.dim() == 2 else x.view(x.size(0), -1)
-        z, _ = model.encode(x_in)
     else:
         out = model(x)
         z = out[-1] if isinstance(out, (tuple, list)) else out
@@ -178,7 +179,9 @@ def test_self_binding(
     ax.set_ylim(-0.1, 1.05)
     ax.set_xlabel("binding depth $m$")
     ax.set_ylabel("cosine similarity to original")
-    ax.set_title(f"approximate inverse binding depth (d={all_z.shape[-1]})")
+    # use model's latent_dim if available (avoids showing 2*d for clifford bivectors)
+    display_d = getattr(model, "latent_dim", all_z.shape[-1])
+    ax.set_title(f"approximate inverse binding depth (d={display_d})")
     ax.legend()
     ax.grid(alpha=0.3)
     plt.tight_layout()
@@ -1276,13 +1279,8 @@ def test_pairwise_bind_bundle_decode(
             x = x.to(device)
 
             # get decoder-ready z depending on model type
-            if hasattr(model, 'reparameterize') and hasattr(model, 'encoder'):
-                # cnn vae, sphereAR, cliffordar: encoder(x) returns (mu, params)
-                # must check before 'encode' since cliffordar has both
-                mu, params = model.encoder(x)
-                z, _, _ = model.reparameterize(mu, params)
-            elif hasattr(model, 'encode'):
-                # mlp vae: has encode() method, forward returns ((mu, p), (q,p), z, recon)
+            if hasattr(model, 'encode') and not hasattr(model, 'get_flat_latent'):
+                # mlp vae: encode() expects flat input
                 x_in = x if x.dim() == 2 else x.view(x.size(0), -1)
                 out = model(x_in)
                 if isinstance(out, (tuple, list)) and len(out) == 4 and isinstance(out[0], tuple):
@@ -1290,6 +1288,10 @@ def test_pairwise_bind_bundle_decode(
                 else:
                     z_mean, _ = model.encode(x_in)
                     z = z_mean
+            elif hasattr(model, 'reparameterize') and hasattr(model, 'encoder'):
+                # cnn vae, sphereAR, cliffordar: encoder(x) returns (mu, params)
+                mu, params = model.encoder(x)
+                z, _, _ = model.reparameterize(mu, params)
             else:
                 out = model(x)
                 z = out[-1] if isinstance(out, (tuple, list)) else out
