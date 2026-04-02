@@ -922,7 +922,7 @@ if __name__ == "__main__":
     )
     p.add_argument("--epochs", type=int, default=1000, help="training epochs")
     p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs")
-    p.add_argument("--batch_size", type=int, default=128, help="batch size")
+    p.add_argument("--batch_size", type=int, default=256, help="batch size")
     p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
     p.add_argument(
         "--no-l2_norm",
@@ -933,15 +933,15 @@ if __name__ == "__main__":
     p.set_defaults(l2_norm=True)
     p.add_argument("--recon_loss", type=str, default="l1", choices=["mse", "l1"])
     p.add_argument("--l1_weight", type=float, default=1.0)
-    p.add_argument("--max_beta", type=float, default=1.0)
-    p.add_argument("--min_beta", type=float, default=0.1)
+    p.add_argument("--max_beta", type=float, default=2.0)
+    p.add_argument("--min_beta", type=float, default=0.001)
     p.add_argument("--use_learnable_beta", action="store_true")
     p.add_argument("--no_wandb", action="store_true", help="disable wandb logging")
     p.add_argument(
         "--wandb_project", type=str, default="clifford-experiments-CNN-cifar10"
     )
-    p.add_argument("--patience", type=int, default=50, help="early stopping patience")
-    p.add_argument("--cycle_epochs", type=int, default=100)
+    p.add_argument("--patience", type=int, default=75, help="early stopping patience")
+    p.add_argument("--cycle_epochs", type=int, default=200)
     p.add_argument("--n_trials", type=int, default=1)
     p.add_argument(
         "--exclude_class",

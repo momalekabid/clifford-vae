@@ -195,6 +195,134 @@ def get_latents_with_factors(model, dataset, device, indices):
     return z, factor_values, factor_classes, x.cpu()
 
 
+def beta_vae_disentanglement_metric(model, dataset, device, n_trials=5000, batch_size=64):
+    """beta-VAE disentanglement metric (Higgins et al. 2017).
+    for each trial:
+      1. pick a fixed factor k
+      2. sample two datapoints that share the same value for factor k
+         but differ in all other factors
+      3. encode both, compute |z1 - z2|
+      4. record (argmax |z1 - z2|, k)
+    then train a majority-vote classifier on the argmax -> factor mapping.
+    returns accuracy (higher = more disentangled).
+    """
+    from collections import Counter
+
+    model.eval()
+    all_classes = dataset.latents_classes  # (N, 6)
+    n_factors = all_classes.shape[1]
+
+    # precompute indices per factor value
+    factor_indices = {}
+    for f in range(1, n_factors):  # skip color (always 1)
+        vals = np.unique(all_classes[:, f])
+        factor_indices[f] = {int(v): np.where(all_classes[:, f] == v)[0] for v in vals}
+
+    votes = []  # list of (argmax_dim, true_factor)
+
+    with torch.no_grad():
+        for _ in range(n_trials):
+            # pick a random factor to hold fixed
+            k = np.random.randint(1, n_factors)
+            vals = list(factor_indices[k].keys())
+            v = vals[np.random.randint(len(vals))]
+            pool = factor_indices[k][v]
+
+            if len(pool) < 2:
+                continue
+
+            # sample two indices with same factor k value
+            pair = np.random.choice(pool, 2, replace=False)
+            img1, _ = dataset[pair[0]]
+            img2, _ = dataset[pair[1]]
+            x = torch.stack([img1, img2]).to(device)
+            z = model.get_flat_latent(x)
+            diff = torch.abs(z[0] - z[1])
+            top_dim = diff.argmax().item()
+            votes.append((top_dim, k))
+
+    if not votes:
+        return {"disentanglement_accuracy": 0.0}
+
+    # majority vote classifier: for each latent dim, what factor does it vote for?
+    dim_to_factor_counts = {}
+    for dim, factor in votes:
+        if dim not in dim_to_factor_counts:
+            dim_to_factor_counts[dim] = Counter()
+        dim_to_factor_counts[dim][factor] += 1
+
+    # assign each dim to its majority factor
+    dim_to_factor = {}
+    for dim, counts in dim_to_factor_counts.items():
+        dim_to_factor[dim] = counts.most_common(1)[0][0]
+
+    # compute accuracy
+    correct = sum(1 for dim, factor in votes if dim_to_factor.get(dim) == factor)
+    acc = correct / len(votes)
+
+    print(f"  disentanglement metric: {acc:.4f} ({len(votes)} trials)")
+    return {"disentanglement_accuracy": acc}
+
+
+def plot_latent_traversals(model, dataset, device, save_path, n_latents=10, n_steps=8):
+    """traverse individual latent dimensions and decode, beta-VAE style.
+    picks a reference image, then sweeps each latent dim across [-3, 3] std.
+    """
+    model.eval()
+    # pick a reference image
+    ref_idx = np.random.randint(len(dataset))
+    ref_img, _ = dataset[ref_idx]
+    ref_x = ref_img.unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        z_ref = model.get_flat_latent(ref_x)  # (1, d)
+
+    d = z_ref.shape[-1]
+    n_show = min(n_latents, d)
+
+    # find the latent dims with highest variance across a sample
+    with torch.no_grad():
+        sample_zs = []
+        for i in range(0, min(1000, len(dataset)), 1):
+            img, _ = dataset[i]
+            z = model.get_flat_latent(img.unsqueeze(0).to(device))
+            sample_zs.append(z.cpu())
+        sample_zs = torch.cat(sample_zs, 0)
+        var = sample_zs.var(dim=0)
+        top_dims = var.argsort(descending=True)[:n_show].numpy()
+
+    # sweep values
+    sweep = torch.linspace(-3, 3, n_steps)
+
+    fig, axes = plt.subplots(n_show, n_steps + 1, figsize=(2 * (n_steps + 1), 2 * n_show))
+    if n_show == 1:
+        axes = axes[np.newaxis, :]
+
+    for row, dim in enumerate(top_dims):
+        # show reference
+        axes[row, 0].imshow(ref_img.squeeze(), cmap="gray")
+        axes[row, 0].set_title(f"ref", fontsize=8)
+        axes[row, 0].axis("off")
+
+        for col, val in enumerate(sweep):
+            z_mod = z_ref.clone()
+            z_mod[0, dim] = val.item()
+            with torch.no_grad():
+                recon = model.decoder(z_mod.to(device)).cpu()
+            axes[row, col + 1].imshow(recon.squeeze().clamp(0, 1), cmap="gray")
+            axes[row, col + 1].set_title(f"z[{dim}]={val:.1f}", fontsize=7)
+            axes[row, col + 1].axis("off")
+
+        axes[row, 0].set_ylabel(f"dim {dim}\nvar={var[dim]:.3f}", fontsize=8)
+
+    plt.suptitle("Latent Traversals (top variance dims)", fontsize=12)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  saved latent traversals to {save_path}")
+    return save_path
+
+
 def factor_swap_experiment(model, dataset, device, save_dir, n_pairs=5):
     """the big one: encode two sprites, unbind a factor, rebind with the other's factor, decode.
 
@@ -678,6 +806,20 @@ def main(args):
             )
             print(f"  mean_vector_cosine_acc: {mean_vector_acc}")
 
+            # beta-VAE disentanglement metric
+            print("running beta-VAE disentanglement metric...")
+            disent_results = beta_vae_disentanglement_metric(
+                model, full_dataset, DEVICE, n_trials=5000,
+            )
+
+            # latent traversals
+            print("running latent traversals...")
+            traversal_path = plot_latent_traversals(
+                model, full_dataset, DEVICE,
+                f"{output_dir}/latent_traversals.png",
+                n_latents=10, n_steps=8,
+            )
+
             all_run_metrics.append({
                 "d": latent_dim, "dist": dist_name,
                 "knn_acc_100": knn_results.get("knn_acc_100", 0.0) * 100,
@@ -687,6 +829,7 @@ def main(args):
                 "knn_f1_600": knn_results.get("knn_f1_600", 0.0) * 100,
                 "knn_f1_1000": knn_results.get("knn_f1_1000", 0.0) * 100,
                 "mvc": float(mean_vector_acc) * 100,
+                "disentanglement": disent_results.get("disentanglement_accuracy", 0.0) * 100,
                 "best_loss": best,
             })
 
@@ -717,6 +860,7 @@ def main(args):
             logger.log_metrics({
                 **knn_results,
                 **fourier_metrics,
+                **disent_results,
                 "best_test_total_loss": best,
                 "mean_vector_cosine_acc": float(mean_vector_acc),
                 "approx_inv_depth_star": next((d for d, s in zip(fourier_star.get("k_values", []), fourier_star.get("k_sims", [])) if s < 0.5), fourier_star.get("k_values", [0])[-1] if fourier_star.get("k_values") else 0),
@@ -725,6 +869,7 @@ def main(args):
             logger.log_summary({
                 **knn_results,
                 **fourier_metrics,
+                **disent_results,
                 "best_test_total_loss": best,
                 "final_best_total_loss": best,
                 "mean_vector_cosine_acc": float(mean_vector_acc),
@@ -744,6 +889,8 @@ def main(args):
                 images_to_log["pairwise_bind_bundle"] = pairwise_bind_bundle_path
             if os.path.exists(tsne_path):
                 images_to_log["tsne"] = tsne_path
+            if os.path.exists(traversal_path):
+                images_to_log["latent_traversals"] = traversal_path
             if images_to_log:
                 logger.log_images(images_to_log)
 
@@ -772,18 +919,18 @@ if __name__ == "__main__":
     p.add_argument("--data_path", type=str, default="data/dsprites_ndarray_co1sh3sc6or40x32y32_64x64.npz")
     p.add_argument("--epochs", type=int, default=1000)
     p.add_argument("--warmup_epochs", type=int, default=100)
-    p.add_argument("--batch_size", type=int, default=128)
+    p.add_argument("--batch_size", type=int, default=256)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--recon_loss", type=str, default="l1", choices=["mse", "l1", "bce"])
     p.add_argument("--l1_weight", type=float, default=1.0)
-    p.add_argument("--max_beta", type=float, default=1.0)
-    p.add_argument("--min_beta", type=float, default=0.005)
+    p.add_argument("--max_beta", type=float, default=2.0)
+    p.add_argument("--min_beta", type=float, default=0.001)
     p.add_argument("--use_learnable_beta", action="store_true")
     p.add_argument("--l2_norm", action="store_true", default=True)
     p.add_argument("--no_wandb", action="store_true")
     p.add_argument("--wandb_project", type=str, default="dsprites-clifford")
-    p.add_argument("--patience", type=int, default=50)
-    p.add_argument("--cycle_epochs", type=int, default=100)
+    p.add_argument("--patience", type=int, default=75)
+    p.add_argument("--cycle_epochs", type=int, default=200)
     p.add_argument("--latent_dims", type=int, nargs="+", default=[256, 1024, 4096])
     p.add_argument("--distributions", type=str, nargs="+", default=None)
     p.add_argument("--arch", type=str, default="cnn", choices=["cnn", "vit", "hybrid"],
