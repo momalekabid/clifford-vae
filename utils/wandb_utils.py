@@ -34,6 +34,14 @@ def _get_flat_z(model, x):
     return z
 
 
+def _decode(model, z):
+    """wrapper around model.decoder() that reshapes flat vectors for per-token models."""
+    if z.dim() == 2 and hasattr(model, "num_tokens"):
+        dec_dim = 2 * model.latent_dim if model.distribution == "clifford" else model.latent_dim
+        z = z.view(z.size(0), model.num_tokens, dec_dim)
+    return model.decoder(z)
+
+
 def test_self_binding(
     model,
     loader,
@@ -234,7 +242,7 @@ def test_self_binding(
                 flat_vecs.extend(row)
 
             with torch.no_grad():
-                imgs = model.decoder(torch.stack(flat_vecs, 0))
+                imgs = _decode(model, torch.stack(flat_vecs, 0))
                 if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
                     if model.decoder.output_activation == "sigmoid":
                         imgs = torch.sigmoid(imgs)
@@ -532,7 +540,7 @@ def plot_clifford_torus_recon_grid(
     Z = _angles_to_clifford_vector(A, normalize_ifft=True)
 
     model.eval()
-    imgs = model.decoder(Z).detach().cpu()
+    imgs = _decode(model, Z).detach().cpu()
     imgs = (imgs * 0.5 + 0.5).clamp(0, 1)
     H = n_grid
     W = n_grid
@@ -680,7 +688,7 @@ def _plot_clifford_manifold_original(model, device, output_dir, n_grid=12, dims=
 
         Z = _angles_to_clifford_vector(A, normalize_ifft=True)
 
-        x_recon = model.decoder(Z)
+        x_recon = _decode(model, Z)
 
         if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
             if model.decoder.output_activation == "sigmoid":
@@ -748,7 +756,7 @@ def _plot_powerspherical_manifold_original(model, device, output_dir, n_samples=
     with torch.no_grad():
         z = torch.randn(n_samples, latent_dim, device=device)
         z = torch.nn.functional.normalize(z, p=2, dim=-1)
-        x_recon = model.decoder(z)
+        x_recon = _decode(model, z)
         x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
         x_recon = x_recon.view(-1, *img_shape).cpu()
     x_recon_grid = x_recon[: grid_size * grid_size]
@@ -805,7 +813,7 @@ def _plot_gaussian_manifold_original(model, device, output_dir, n_samples=144, i
     model.eval()
     with torch.no_grad():
         z = torch.randn(n_samples, latent_dim, device=device)
-        x_recon = model.decoder(z)
+        x_recon = _decode(model, z)
         x_recon = (x_recon * 0.5 + 0.5).clamp(0, 1)
         x_recon = x_recon.view(-1, *img_shape)
 
@@ -1177,7 +1185,7 @@ def plot_latent_dimension_exploration(
                 z = _angles_to_clifford_vector(modified_latent, normalize_ifft=True)
             else:
                 z = modified_latent
-            x_recon = model.decoder(z)
+            x_recon = _decode(model, z)
 
             if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
                 if model.decoder.output_activation == "sigmoid":
@@ -1241,11 +1249,7 @@ def plot_latent_dimension_exploration(
 def _decode_vectors(model, vectors, img_shape):
     """decode latent vectors to images, handling different model types."""
     with torch.no_grad():
-        # per-token models (hybrid/vit) expect (B, T, D) not flat (B, T*D)
-        if vectors.dim() == 2 and hasattr(model, "num_tokens"):
-            dec_dim = 2 * model.latent_dim if model.distribution == "clifford" else model.latent_dim
-            vectors = vectors.view(vectors.size(0), model.num_tokens, dec_dim)
-        imgs = model.decoder(vectors)
+        imgs = _decode(model, vectors)
         if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
             if model.decoder.output_activation == "sigmoid":
                 imgs = torch.sigmoid(imgs)
@@ -1580,7 +1584,7 @@ def compute_fid(model, test_loader, device, dist_name, latent_dim,
         while n_done < n_samples:
             bs = min(batch_size, n_samples - n_done)
             z = sample_prior_z(dist_name, latent_dim, bs, device, l2_normalize=l2_norm)
-            imgs_01 = (model.decoder(z) * 0.5 + 0.5).clamp(0, 1)
+            imgs_01 = (_decode(model, z) * 0.5 + 0.5).clamp(0, 1)
             if in_channels == 1:
                 imgs_01 = imgs_01.repeat(1, 3, 1, 1)
             fid_metric.update(imgs_01, real=False)
