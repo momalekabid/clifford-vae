@@ -1,4 +1,4 @@
-# dSprites training — learn HRR-compatible latent codes for compositional factor manipulation
+# dSprites training — MLP VAE with BCE loss for binary sprites
 # dataset: 64x64 binary sprites with 6 ground truth factors
 # (color, shape, scale, orientation, posX, posY)
 
@@ -22,7 +22,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cnn.models import VAE as CNNVAE
+from dsprites.mlp_model import DSpritesVAE
 from utils.wandb_utils import (
     WandbLogger,
     test_self_binding,
@@ -49,6 +49,13 @@ DEVICE = (
 # dSprites factor names and metadata
 FACTOR_NAMES = ["color", "shape", "scale", "orientation", "posX", "posY"]
 SHAPE_NAMES = ["square", "ellipse", "heart"]
+
+
+def decode_to_img(model, z):
+    """decode latent vector, applying sigmoid and reshaping to image."""
+    out = model.decoder(z)
+    out = torch.sigmoid(out)
+    return out.view(z.size(0), model.in_channels, model.img_size, model.img_size)
 
 
 class DSpritesDataset(Dataset):
@@ -355,7 +362,7 @@ def plot_latent_traversals(model, dataset, device, save_path, n_latents=10, n_st
             z_mod = z_ref.clone()
             z_mod[0, dim] = val.item()
             with torch.no_grad():
-                recon = model.decoder(z_mod.to(device)).cpu()
+                recon = decode_to_img(model, z_mod.to(device)).cpu()
             axes[row, col + 1].imshow(recon.squeeze().clamp(0, 1), cmap="gray")
             axes[row, col + 1].set_title(f"z[{dim}]={val:.1f}", fontsize=7)
             axes[row, col + 1].axis("off")
@@ -442,10 +449,10 @@ def factor_swap_experiment(model, dataset, device, save_dir, n_pairs=5):
                 recovered_tgt = vsa_unbind(bound, z_src.cpu(), method="*")
 
                 # decode
-                src_recon = model.decoder(z_src).cpu()
-                tgt_recon = model.decoder(z_tgt).cpu()
+                src_recon = decode_to_img(model, z_src).cpu()
+                tgt_recon = decode_to_img(model, z_tgt).cpu()
                 # decode the recovered vectors
-                recovered_src_recon = model.decoder(recovered_src.to(device)).cpu()
+                recovered_src_recon = decode_to_img(model, recovered_src.to(device)).cpu()
 
             # compute similarities
             sim_src = F.cosine_similarity(z_src.cpu(), recovered_src, dim=-1).item()
@@ -500,7 +507,7 @@ def bundle_by_factor(model, dataset, device, save_dir, factor_idx=1, n_per_class
 
             # bundle via addition
             bundled = z.mean(dim=0, keepdim=True)  # (1, flat_dim)
-            bundled_recon = model.decoder(bundled).cpu()
+            bundled_recon = decode_to_img(model, bundled).cpu()
 
         # plot individual sprites
         for col, i in enumerate(chosen):
@@ -632,17 +639,18 @@ def main(args):
             print(f"\n== {exp_name} ==")
             logger.start_run(exp_name, args)
 
-            print(f"  {dist_name}: flat z, d={latent_dim} (CNN w/ residual)")
-            model = CNNVAE(
+            print(f"  {dist_name}: flat z, d={latent_dim} (MLP, BCE)")
+            model = DSpritesVAE(
                 latent_dim=latent_dim,
-                in_channels=1,
                 distribution=dist_name,
                 device=DEVICE,
+                img_size=64,
+                in_channels=1,
+                hidden_dim=1200,
                 recon_loss_type=args.recon_loss,
                 l1_weight=args.l1_weight,
                 use_learnable_beta=args.use_learnable_beta,
                 l2_normalize=(dist_name == "gaussian" and args.l2_norm),
-                img_size=64,
             )
 
             logger.watch_model(model)
@@ -737,11 +745,12 @@ def main(args):
                 plot=True,
                 save_dir=output_dir,
                 item_memory=item_memory,
+                baseline_d=latent_dim,
             )
 
             # per-class bundle similarity (by shape)
             test_per_class_bundle_capacity_k_items(
-                d=item_memory.shape[-1],
+                d=latent_dim,
                 n_items=1000,
                 n_classes=3,
                 items_per_class=1,
@@ -770,6 +779,7 @@ def main(args):
                 save_dir=output_dir,
                 item_memory=item_memory,
                 bind_with_random=True,
+                baseline_d=latent_dim,
             )
 
             # pairwise bind-bundle-decode test
@@ -939,14 +949,14 @@ if __name__ == "__main__":
     p.add_argument("--warmup_epochs", type=int, default=25)
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--recon_loss", type=str, default="l1", choices=["mse", "l1", "bce"])
+    p.add_argument("--recon_loss", type=str, default="bce", choices=["mse", "l1", "bce"])
     p.add_argument("--l1_weight", type=float, default=1.0)
     p.add_argument("--max_beta", type=float, default=2.0)
     p.add_argument("--min_beta", type=float, default=0.1)
     p.add_argument("--use_learnable_beta", action="store_true")
     p.add_argument("--l2_norm", action="store_true", default=True)
     p.add_argument("--no_wandb", action="store_true")
-    p.add_argument("--wandb_project", type=str, default="dsprites-clifford")
+    p.add_argument("--wandb_project", type=str, default="april-experiments-dsprites")
     p.add_argument("--patience", type=int, default=75)
     p.add_argument("--cycle_epochs", type=int, default=200)
     p.add_argument("--latent_dims", type=int, nargs="+", default=[256, 1024, 4096])

@@ -610,12 +610,13 @@ def main(args):
                         save_dir=output_dir,
                         item_memory=item_memory,
                         use_braiding=False,
+                        baseline_d=latent_dim,
                     )
 
                     # 1-item-per-class similarity
                     print(f"running 1-item-per-class test ({dist_name})...")
                     test_per_class_bundle_capacity_k_items(
-                        d=item_memory.shape[-1],
+                        d=latent_dim,
                         n_items=1000,
                         n_classes=10,
                         items_per_class=1,
@@ -646,6 +647,7 @@ def main(args):
                         save_dir=output_dir,
                         item_memory=item_memory,
                         bind_with_random=True,
+                        baseline_d=latent_dim,
                     )
                     rf_results["role_filler_capacity"] = rf_res
                     role_filler_raw = rf_res

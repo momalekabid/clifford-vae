@@ -154,8 +154,8 @@ def test_self_binding(
                     [m + s for m, s in zip(rand_means, rand_stds)],
                     alpha=0.15, color="tab:orange")
 
-    # baselines: HRR and unitary vectors at same dimensionality
-    d = all_z.shape[-1]
+    # baselines: use encoder dim (not bivector dim) so clifford compares fairly
+    d = getattr(model, "latent_dim", all_z.shape[-1])
     for bname, init_fn, color, marker in [
         ("HRR", hrr_init, "tab:gray", "^"),
         ("unitary (FHRR)", unitary_init, "tab:green", "v"),

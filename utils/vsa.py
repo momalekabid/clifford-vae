@@ -109,6 +109,7 @@ def test_bundle_capacity(
     item_memory: Optional[torch.Tensor] = None,
     use_braiding: bool = False,
     bind_with_random: bool = False,
+    baseline_d: Optional[int] = None,
 ) -> Dict:
     """
     for each k:
@@ -168,10 +169,12 @@ def test_bundle_capacity(
     if plot:
         import os
 
-        # compute baselines with HRR and unitary vectors at same d
+        # compute baselines with HRR and unitary vectors
+        # use baseline_d (encoder dim) so clifford baselines match the conceptual dim
+        bd = baseline_d if baseline_d is not None else d
         baselines = {}
         for bname, init_fn in [("HRR", hrr_init), ("unitary", unitary_init)]:
-            bvecs = init_fn(n_items, d, device="cpu")
+            bvecs = init_fn(n_items, bd, device="cpu")
             if normalize:
                 bvecs = normalize_vectors(bvecs)
             b_res = {"k": [], "accuracy": [], "std": []}
@@ -193,6 +196,7 @@ def test_bundle_capacity(
                 b_res["std"].append(float(np.std(trial_accs)))
             baselines[bname] = b_res
 
+        display_d = baseline_d if baseline_d is not None else d
         plt.figure(figsize=(8, 5))
         plt.errorbar(results["k"], results["accuracy"], yerr=results["std"],
                      marker="o", capsize=3, label="learned latents", color="tab:blue")
@@ -204,7 +208,7 @@ def test_bundle_capacity(
                      label="unitary (FHRR)", color="tab:green", linestyle="--", alpha=0.7)
         plt.xlabel("Number of Bundled Vectors ($k$)")
         plt.ylabel("Retrieval Accuracy")
-        plt.title(f"Bundle Capacity ($d={d}$, $N={n_items}$)")
+        plt.title(f"Bundle Capacity ($d={display_d}$, $N={n_items}$)")
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.ylim(0, 1.05)
@@ -230,6 +234,7 @@ def test_binding_unbinding_pairs(
     item_memory: Optional[torch.Tensor] = None,
     use_braiding: bool = False,
     bind_with_random: bool = True,
+    baseline_d: Optional[int] = None,
 ) -> Dict:
     """
     test binding/unbinding with bundled pairs.
@@ -329,10 +334,11 @@ def test_binding_unbinding_pairs(
     if plot:
         import os
 
-        # compute baselines with HRR and unitary vectors at same d
+        # compute baselines with HRR and unitary vectors
+        bd = baseline_d if baseline_d is not None else d
         baselines = {}
         for bname, init_fn in [("HRR", hrr_init), ("unitary", unitary_init)]:
-            bvecs = init_fn(n_items, d, device="cpu")
+            bvecs = init_fn(n_items, bd, device="cpu")
             if normalize:
                 bvecs = normalize_vectors(bvecs)
             b_res = {"k": [], "accuracy": [], "std": []}
@@ -342,7 +348,7 @@ def test_binding_unbinding_pairs(
                     if bind_with_random:
                         idx = torch.randperm(n_items)[:k]
                         fillers = bvecs[idx]
-                        roles = unitary_init(k, d, device="cpu")
+                        roles = unitary_init(k, bd, device="cpu")
                         if normalize:
                             roles = normalize_vectors(roles)
                     else:
@@ -366,6 +372,7 @@ def test_binding_unbinding_pairs(
                 b_res["std"].append(float(np.std(trial_accs)))
             baselines[bname] = b_res
 
+        display_d = baseline_d if baseline_d is not None else d
         bind_label = " (Random Keys)" if bind_with_random else ""
         plt.figure(figsize=(8, 5))
         plt.errorbar(results["k"], results["accuracy"], yerr=results["std"],
@@ -378,7 +385,7 @@ def test_binding_unbinding_pairs(
                      label="unitary (FHRR)", color="tab:green", linestyle="--", alpha=0.7)
         plt.xlabel("Number of Bundled Role-Filler Pairs ($k$)")
         plt.ylabel("Unbinding Accuracy")
-        plt.title(f"Role-Filler Query Capacity{bind_label} ($d={d}$, $N={n_items}$)")
+        plt.title(f"Role-Filler Query Capacity{bind_label} ($d={display_d}$, $N={n_items}$)")
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.ylim(0, 1.05)
