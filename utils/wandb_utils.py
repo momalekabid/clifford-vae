@@ -1241,6 +1241,10 @@ def plot_latent_dimension_exploration(
 def _decode_vectors(model, vectors, img_shape):
     """decode latent vectors to images, handling different model types."""
     with torch.no_grad():
+        # per-token models (hybrid/vit) expect (B, T, D) not flat (B, T*D)
+        if vectors.dim() == 2 and hasattr(model, "num_tokens"):
+            dec_dim = 2 * model.latent_dim if model.distribution == "clifford" else model.latent_dim
+            vectors = vectors.view(vectors.size(0), model.num_tokens, dec_dim)
         imgs = model.decoder(vectors)
         if hasattr(model, "decoder") and hasattr(model.decoder, "output_activation"):
             if model.decoder.output_activation == "sigmoid":

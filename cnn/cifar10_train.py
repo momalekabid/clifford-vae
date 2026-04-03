@@ -328,6 +328,10 @@ def compute_generation_fid(model, dist_name, latent_dim, test_loader, device,
         while n_done < n_samples:
             bs = min(batch_size, n_samples - n_done)
             z = sample_prior_z(dist_name, z_dim, bs, device, l2_normalize=l2_norm, num_tokens=num_tokens)
+            # reshape flat z for per-token decoders
+            if z.dim() == 2 and hasattr(model, "num_tokens"):
+                dec_dim = 2 * model.latent_dim if model.distribution == "clifford" else model.latent_dim
+                z = z.view(z.size(0), model.num_tokens, dec_dim)
             imgs_01 = (model.decoder(z) * 0.5 + 0.5).clamp(0, 1)
             if in_channels == 1:
                 imgs_01 = imgs_01.repeat(1, 3, 1, 1)
