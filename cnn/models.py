@@ -47,7 +47,7 @@ class Encoder(nn.Module):
         in_channels: int,
         distribution: str,
         l2_normalize: bool = False,
-        concentration_floor: float = 0.03,
+        concentration_floor: float = 0.1,
         img_size: int = 32,
     ):
         super().__init__()
