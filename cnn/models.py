@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -153,6 +154,18 @@ class VAE(nn.Module):
         self.distribution = distribution
         self.device = device
         self.l2_normalize = l2_normalize
+        # scale floor with dim for clifford so kappa doesn't collapse at high d
+        if distribution == "clifford":
+            if latent_dim < 256:
+                concentration_floor = 0.04
+            elif latent_dim <= 512:
+                concentration_floor = 0.07
+            elif latent_dim <= 1024:
+                concentration_floor = 0.10
+            elif latent_dim <= 2048:
+                concentration_floor = 0.13
+            else:
+                concentration_floor = 0.16
         self.concentration_floor = concentration_floor
         self.use_learnable_beta = use_learnable_beta
 
