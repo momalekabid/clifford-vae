@@ -22,7 +22,6 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cnn.cliffordar_model import CliffordARVAE, HybridVAE
 from cnn.models import VAE as CNNVAE
 from utils.wandb_utils import (
     WandbLogger,
@@ -98,6 +97,7 @@ def get_factor_subsets(dataset, factor_idx, n_per_value=100):
 def train_epoch(model, loader, optimizer, device, beta):
     model.train()
     sums = {"total": 0.0, "recon": 0.0, "kld": 0.0, "entropy": 0.0}
+    concentration_stats = []
     effective_beta_vals = []
 
     for x, _ in loader:
@@ -115,17 +115,41 @@ def train_epoch(model, loader, optimizer, device, beta):
         eb = losses["effective_beta"]
         effective_beta_vals.append(eb if isinstance(eb, float) else eb.item())
 
+        if hasattr(model, "distribution") and model.distribution in [
+            "powerspherical",
+            "clifford",
+        ]:
+            if hasattr(q_z, "concentration"):
+                concentration_stats.append(q_z.concentration.detach())
+
     n = len(loader.dataset)
     result = {f"train/{k}_loss": v / n for k, v in sums.items() if k != "entropy"}
     result["train/entropy"] = sums["entropy"] / n
     if effective_beta_vals:
         result["train/effective_beta"] = np.mean(effective_beta_vals)
+
+    if concentration_stats and hasattr(model, "distribution"):
+        all_concentrations = torch.cat(concentration_stats, dim=0)
+        result[f"train/{model.distribution}_concentration_mean"] = (
+            all_concentrations.mean().item()
+        )
+        result[f"train/{model.distribution}_concentration_std"] = (
+            all_concentrations.std().item()
+        )
+        result[f"train/{model.distribution}_concentration_max"] = (
+            all_concentrations.max().item()
+        )
+        result[f"train/{model.distribution}_concentration_min"] = (
+            all_concentrations.min().item()
+        )
+
     return result
 
 
 def test_epoch(model, loader, device):
     model.eval()
     sums = {"total": 0.0, "recon": 0.0, "kld": 0.0, "entropy": 0.0}
+    concentration_stats = []
     effective_beta_vals = []
 
     with torch.no_grad():
@@ -139,11 +163,34 @@ def test_epoch(model, loader, device):
             eb = losses["effective_beta"]
             effective_beta_vals.append(eb if isinstance(eb, float) else eb.item())
 
+            if hasattr(model, "distribution") and model.distribution in [
+                "powerspherical",
+                "clifford",
+            ]:
+                if hasattr(q_z, "concentration"):
+                    concentration_stats.append(q_z.concentration.detach())
+
     n = len(loader.dataset)
     result = {f"test/{k}_loss": v / n for k, v in sums.items() if k != "entropy"}
     result["test/entropy"] = sums["entropy"] / n
     if effective_beta_vals:
         result["test/effective_beta"] = np.mean(effective_beta_vals)
+
+    if concentration_stats and hasattr(model, "distribution"):
+        all_concentrations = torch.cat(concentration_stats, dim=0)
+        result[f"test/{model.distribution}_concentration_mean"] = (
+            all_concentrations.mean().item()
+        )
+        result[f"test/{model.distribution}_concentration_std"] = (
+            all_concentrations.std().item()
+        )
+        result[f"test/{model.distribution}_concentration_max"] = (
+            all_concentrations.max().item()
+        )
+        result[f"test/{model.distribution}_concentration_min"] = (
+            all_concentrations.min().item()
+        )
+
     return result
 
 
@@ -585,47 +632,18 @@ def main(args):
             print(f"\n== {exp_name} ==")
             logger.start_run(exp_name, args)
 
-            if args.arch == "vit":
-                model_latent_dim = max(4, latent_dim // 64)
-                print(f"  {dist_name}: 64 tokens x {model_latent_dim}d = {64 * model_latent_dim}d total (CNN+ViT)")
-                model = CliffordARVAE(
-                    latent_dim=model_latent_dim,
-                    image_size=64,
-                    in_channels=1,
-                    distribution=dist_name,
-                    device=DEVICE,
-                    recon_loss_type=args.recon_loss,
-                    l1_weight=args.l1_weight,
-                    use_learnable_beta=args.use_learnable_beta,
-                    l2_normalize=(dist_name == "gaussian" and args.l2_norm),
-                )
-            elif args.arch == "hybrid":
-                model_latent_dim = max(4, latent_dim // 16)
-                print(f"  {dist_name}: per-token CNN, d={model_latent_dim} per token (hybrid)")
-                model = HybridVAE(
-                    latent_dim=model_latent_dim,
-                    in_channels=1,
-                    distribution=dist_name,
-                    device=DEVICE,
-                    recon_loss_type=args.recon_loss,
-                    l1_weight=args.l1_weight,
-                    use_learnable_beta=args.use_learnable_beta,
-                    l2_normalize=(dist_name == "gaussian" and args.l2_norm),
-                    img_size=64,
-                )
-            else:
-                print(f"  {dist_name}: flat z, d={latent_dim} (CNN w/ residual)")
-                model = CNNVAE(
-                    latent_dim=latent_dim,
-                    in_channels=1,
-                    distribution=dist_name,
-                    device=DEVICE,
-                    recon_loss_type=args.recon_loss,
-                    l1_weight=args.l1_weight,
-                    use_learnable_beta=args.use_learnable_beta,
-                    l2_normalize=(dist_name == "gaussian" and args.l2_norm),
-                    img_size=64,
-                )
+            print(f"  {dist_name}: flat z, d={latent_dim} (CNN w/ residual)")
+            model = CNNVAE(
+                latent_dim=latent_dim,
+                in_channels=1,
+                distribution=dist_name,
+                device=DEVICE,
+                recon_loss_type=args.recon_loss,
+                l1_weight=args.l1_weight,
+                use_learnable_beta=args.use_learnable_beta,
+                l2_normalize=(dist_name == "gaussian" and args.l2_norm),
+                img_size=64,
+            )
 
             logger.watch_model(model)
             optimizer = optim.AdamW(model.parameters(), lr=args.lr)
@@ -933,8 +951,6 @@ if __name__ == "__main__":
     p.add_argument("--cycle_epochs", type=int, default=200)
     p.add_argument("--latent_dims", type=int, nargs="+", default=[256, 1024, 4096])
     p.add_argument("--distributions", type=str, nargs="+", default=None)
-    p.add_argument("--arch", type=str, default="cnn", choices=["cnn", "vit", "hybrid"],
-                   help="backbone: cnn (flat latent w/ residual) or vit (hybrid cnn+vit, per-token)")
 
     args = p.parse_args()
     main(args)

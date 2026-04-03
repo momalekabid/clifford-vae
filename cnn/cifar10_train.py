@@ -1,6 +1,6 @@
-# cifar-10 training with cliffordAR-style per-token VAE architecture
+# cifar-10 training with flat-latent CNN VAE
 # compares clifford vs powerspherical vs gaussian distributions
-# all use the same per-token encoder/decoder with constant-norm latents
+# all use the same CNN encoder/decoder with constant-norm latents
 
 import argparse
 import os
@@ -24,7 +24,6 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cnn.cliffordar_model import CliffordARVAE, HybridVAE
 from cnn.models import VAE as CNNVAE
 from utils.wandb_utils import (
     WandbLogger,
@@ -66,6 +65,7 @@ CLASS_NAMES = [
 def train_epoch(model, loader, optimizer, device, beta):
     model.train()
     sums = {"total": 0.0, "recon": 0.0, "kld": 0.0, "entropy": 0.0}
+    concentration_stats = []
     effective_beta_vals = []
     sigma_0_vals = []
     sigma_1_vals = []
@@ -89,6 +89,13 @@ def train_epoch(model, loader, optimizer, device, beta):
         eb = losses["effective_beta"]
         effective_beta_vals.append(eb if isinstance(eb, float) else eb.item())
 
+        if hasattr(model, "distribution") and model.distribution in [
+            "powerspherical",
+            "clifford",
+        ]:
+            if hasattr(q_z, "concentration"):
+                concentration_stats.append(q_z.concentration.detach())
+
     n = len(loader.dataset)
     result = {f"train/{k}_loss": v / n for k, v in sums.items() if k != "entropy"}
     result["train/entropy"] = sums["entropy"] / n
@@ -99,12 +106,28 @@ def train_epoch(model, loader, optimizer, device, beta):
     if effective_beta_vals:
         result["train/effective_beta"] = np.mean(effective_beta_vals)
 
+    if concentration_stats and hasattr(model, "distribution"):
+        all_concentrations = torch.cat(concentration_stats, dim=0)
+        result[f"train/{model.distribution}_concentration_mean"] = (
+            all_concentrations.mean().item()
+        )
+        result[f"train/{model.distribution}_concentration_std"] = (
+            all_concentrations.std().item()
+        )
+        result[f"train/{model.distribution}_concentration_max"] = (
+            all_concentrations.max().item()
+        )
+        result[f"train/{model.distribution}_concentration_min"] = (
+            all_concentrations.min().item()
+        )
+
     return result
 
 
 def test_epoch(model, loader, device):
     model.eval()
     sums = {"total": 0.0, "recon": 0.0, "kld": 0.0, "entropy": 0.0}
+    concentration_stats = []
     effective_beta_vals = []
 
     with torch.no_grad():
@@ -118,11 +141,33 @@ def test_epoch(model, loader, device):
             eb = losses["effective_beta"]
             effective_beta_vals.append(eb if isinstance(eb, float) else eb.item())
 
+            if hasattr(model, "distribution") and model.distribution in [
+                "powerspherical",
+                "clifford",
+            ]:
+                if hasattr(q_z, "concentration"):
+                    concentration_stats.append(q_z.concentration.detach())
+
     n = len(loader.dataset)
     result = {f"test/{k}_loss": v / n for k, v in sums.items() if k != "entropy"}
     result["test/entropy"] = sums["entropy"] / n
     if effective_beta_vals:
         result["test/effective_beta"] = np.mean(effective_beta_vals)
+
+    if concentration_stats and hasattr(model, "distribution"):
+        all_concentrations = torch.cat(concentration_stats, dim=0)
+        result[f"test/{model.distribution}_concentration_mean"] = (
+            all_concentrations.mean().item()
+        )
+        result[f"test/{model.distribution}_concentration_std"] = (
+            all_concentrations.std().item()
+        )
+        result[f"test/{model.distribution}_concentration_max"] = (
+            all_concentrations.max().item()
+        )
+        result[f"test/{model.distribution}_concentration_min"] = (
+            all_concentrations.min().item()
+        )
 
     return result
 
@@ -261,28 +306,8 @@ def get_excluded_class_subset(dataset, exclude_class):
     return torch.utils.data.Subset(dataset, indices)
 
 
-def sample_prior_z(dist_name, latent_dim, n, device, l2_normalize=False, num_tokens=None):
-    """sample from the prior for each distribution type.
-    latent_dim: per-token latent dim when num_tokens is given, else total dim.
-    num_tokens: if set, produce flat z of shape (n, num_tokens * dec_dim).
-    """
-    if num_tokens is not None:
-        # per-token sampling for vit models
-        if dist_name == "clifford":
-            from dists.clifford import CliffordTorusUniform
-            prior = CliffordTorusUniform(latent_dim, device=device)
-            z = prior.rsample((n, num_tokens))  # (n, num_tokens, 2*latent_dim)
-            return z.view(n, -1)
-        elif dist_name == "powerspherical":
-            z = torch.randn(n, num_tokens, latent_dim, device=device)
-            z = F.normalize(z, dim=-1)
-            z = z * (latent_dim ** 0.5)
-            return z.view(n, -1)
-        elif dist_name == "gaussian":
-            return torch.randn(n, num_tokens * latent_dim, device=device)
-        else:
-            return torch.randn(n, num_tokens * latent_dim, device=device)
-
+def sample_prior_z(dist_name, latent_dim, n, device, l2_normalize=False):
+    """sample from the prior for each distribution type."""
     if dist_name == "clifford":
         from dists.clifford import CliffordTorusUniform
         prior = CliffordTorusUniform(latent_dim, device=device)
@@ -321,17 +346,12 @@ def compute_generation_fid(model, dist_name, latent_dim, test_loader, device,
                 break
 
     l2_norm = getattr(model, "l2_normalize", False)
-    num_tokens = getattr(model, "num_tokens", None)
     z_dim = getattr(model, "latent_dim", latent_dim)
     n_done = 0
     with torch.no_grad():
         while n_done < n_samples:
             bs = min(batch_size, n_samples - n_done)
-            z = sample_prior_z(dist_name, z_dim, bs, device, l2_normalize=l2_norm, num_tokens=num_tokens)
-            # reshape flat z for per-token decoders
-            if z.dim() == 2 and hasattr(model, "num_tokens"):
-                dec_dim = 2 * model.latent_dim if model.distribution == "clifford" else model.latent_dim
-                z = z.view(z.size(0), model.num_tokens, dec_dim)
+            z = sample_prior_z(dist_name, z_dim, bs, device, l2_normalize=l2_norm)
             imgs_01 = (model.decoder(z) * 0.5 + 0.5).clamp(0, 1)
             if in_channels == 1:
                 imgs_01 = imgs_01.repeat(1, 3, 1, 1)
@@ -433,48 +453,18 @@ def main(args):
                 exp_start_time = time.time()
                 logger.start_run(exp_name, args)
 
-                if args.arch == "vit":
-                    model_latent_dim = max(4, latent_dim // 64)
-                    print(f"  {dist_name}: 64 tokens x {model_latent_dim}d = {64 * model_latent_dim}d total (CNN+ViT)")
-                    model = CliffordARVAE(
-                        latent_dim=model_latent_dim,
-                        image_size=32,
-                        in_channels=3,
-                        distribution=dist_name,
-                        device=DEVICE,
-                        recon_loss_type=args.recon_loss,
-                        l1_weight=args.l1_weight,
-                        use_learnable_beta=args.use_learnable_beta,
-                        l2_normalize=(dist_name == "gaussian" and args.l2_norm),
-                    )
-                elif args.arch == "hybrid":
-                    model_latent_dim = max(4, latent_dim // 16)
-                    num_tokens = 16  # 32x32 with 2 downsamples -> 8x8=64, but default chs=[64,128,256] -> 3 stages not 2
-                    print(f"  {dist_name}: per-token CNN, d={model_latent_dim} per token (hybrid)")
-                    model = HybridVAE(
-                        latent_dim=model_latent_dim,
-                        in_channels=3,
-                        distribution=dist_name,
-                        device=DEVICE,
-                        recon_loss_type=args.recon_loss,
-                        l1_weight=args.l1_weight,
-                        use_learnable_beta=args.use_learnable_beta,
-                        l2_normalize=(dist_name == "gaussian" and args.l2_norm),
-                        img_size=32,
-                    )
-                else:
-                    print(f"  {dist_name}: flat z, d={latent_dim} (CNN w/ residual)")
-                    model = CNNVAE(
-                        latent_dim=latent_dim,
-                        in_channels=3,
-                        distribution=dist_name,
-                        device=DEVICE,
-                        recon_loss_type=args.recon_loss,
-                        l1_weight=args.l1_weight,
-                        use_learnable_beta=args.use_learnable_beta,
-                        l2_normalize=(dist_name == "gaussian" and args.l2_norm),
-                        img_size=32,
-                    )
+                print(f"  {dist_name}: flat z, d={latent_dim} (CNN w/ residual)")
+                model = CNNVAE(
+                    latent_dim=latent_dim,
+                    in_channels=3,
+                    distribution=dist_name,
+                    device=DEVICE,
+                    recon_loss_type=args.recon_loss,
+                    l1_weight=args.l1_weight,
+                    use_learnable_beta=args.use_learnable_beta,
+                    l2_normalize=(dist_name == "gaussian" and args.l2_norm),
+                    img_size=32,
+                )
 
                 logger.watch_model(model)
                 cur_lr = dist_lr.get(dist_name, args.lr)
@@ -966,7 +956,5 @@ if __name__ == "__main__":
         default=None,
         help="distributions to test (default: spherear clifford powerspherical gaussian)",
     )
-    p.add_argument("--arch", type=str, default="cnn", choices=["cnn", "vit", "hybrid"],
-                   help="backbone: cnn (flat latent w/ residual) or vit (hybrid cnn+vit, per-token)")
     args = p.parse_args()
     main(args)
