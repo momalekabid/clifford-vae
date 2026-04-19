@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,6 +15,30 @@ from dists.clifford import (
 )
 
 
+class ResBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.Conv2d(in_ch, out_ch, 4, 2, 1)
+        self.act = nn.LeakyReLU(0.2, inplace=True)
+        self.skip = nn.Conv2d(in_ch, out_ch, 1, 1, 0) if in_ch != out_ch else nn.Identity()
+        self.pool = nn.AvgPool2d(2)
+
+    def forward(self, x):
+        return self.act(self.conv(x)) + self.pool(self.skip(x))
+
+
+class ResUpBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.ConvTranspose2d(in_ch, out_ch, 4, 2, 1)
+        self.act = nn.LeakyReLU(0.2, inplace=True)
+        self.skip = nn.Conv2d(in_ch, out_ch, 1, 1, 0) if in_ch != out_ch else nn.Identity()
+        self.up = nn.Upsample(scale_factor=2, mode='nearest')
+
+    def forward(self, x):
+        return self.act(self.conv(x)) + self.up(self.skip(x))
+
+
 class Encoder(nn.Module):
     def __init__(
         self,
@@ -21,7 +46,7 @@ class Encoder(nn.Module):
         in_channels: int,
         distribution: str,
         l2_normalize: bool = False,
-        concentration_floor: float = 0.03,
+        concentration_floor: float = 0.1,
         img_size: int = 32,
     ):
         super().__init__()
@@ -29,31 +54,16 @@ class Encoder(nn.Module):
         self.l2_normalize = l2_normalize
         self.concentration_floor = concentration_floor
 
-        layers = [
-            nn.Conv2d(in_channels, 64, 4, 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, 128, 4, 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(128, 256, 4, 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(256, 512, 4, 2, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-        ]
-        # extra layer for 64x64 input: 64->32->16->8->4->2
         if img_size == 64:
-            layers = [
-                nn.Conv2d(in_channels, 64, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(64, 128, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(128, 256, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(256, 512, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(512, 512, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-            ]
-        self.main = nn.Sequential(*layers)
+            # 64->32->16->8->4->2
+            chs = [in_channels, 64, 128, 256, 512, 512]
+        else:
+            # 32->16->8->4->2
+            chs = [in_channels, 64, 128, 256, 512]
+
+        self.blocks = nn.ModuleList([
+            ResBlock(chs[i], chs[i+1]) for i in range(len(chs)-1)
+        ])
         self.flat_dim = 512 * 2 * 2
         self.fc_mu = nn.Linear(self.flat_dim, latent_dim)
         if distribution == "gaussian":
@@ -70,7 +80,9 @@ class Encoder(nn.Module):
         self.apply(init_weights)
 
     def forward(self, x):
-        x = self.main(x).flatten(start_dim=1)
+        for block in self.blocks:
+            x = block(x)
+        x = x.flatten(start_dim=1)
         mu = self.fc_mu(x)
         if self.distribution == "gaussian":
             if self.l2_normalize:
@@ -78,11 +90,10 @@ class Encoder(nn.Module):
             return mu, self.fc_log_var(x)
         elif self.distribution == "powerspherical":
             mu = F.normalize(mu, p=2, dim=-1)
-            kappa = F.softplus(self.fc_concentration(x)) + 1
-            kappa = torch.clamp(kappa, max=1.0)
+            kappa = torch.clamp(F.softplus(self.fc_concentration(x)) + 0.8, max=10.0)
             return mu, kappa
         elif self.distribution == "clifford":
-            kappa = F.softplus(self.fc_concentration(x)) + self.concentration_floor
+            kappa = torch.clamp(F.softplus(self.fc_concentration(x)) + self.concentration_floor, max=10.0)
             return mu, kappa
 
 
@@ -92,34 +103,21 @@ class Decoder(nn.Module):
         self.fc = nn.Linear(latent_dim, 512 * 2 * 2)
 
         if img_size == 64:
-            # 2->4->8->16->32->64
-            self.main = nn.Sequential(
-                nn.ConvTranspose2d(512, 512, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.ConvTranspose2d(512, 256, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.ConvTranspose2d(256, 128, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.ConvTranspose2d(128, 64, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.ConvTranspose2d(64, out_channels, 4, 2, 1),
-                nn.Tanh(),
-            )
+            chs = [512, 512, 256, 128, 64]
         else:
-            # 2->4->8->16->32
-            self.main = nn.Sequential(
-                nn.ConvTranspose2d(512, 256, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.ConvTranspose2d(256, 128, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.ConvTranspose2d(128, 64, 4, 2, 1),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.ConvTranspose2d(64, out_channels, 4, 2, 1),
-                nn.Tanh(),
-            )
+            chs = [512, 256, 128, 64]
+
+        self.blocks = nn.ModuleList([
+            ResUpBlock(chs[i], chs[i+1]) for i in range(len(chs)-1)
+        ])
+        # final layer: no skip, just project to output channels
+        self.final = nn.Sequential(
+            nn.ConvTranspose2d(chs[-1], out_channels, 4, 2, 1),
+            nn.Tanh(),
+        )
 
         def init_weights(m):
-            if isinstance(m, (nn.ConvTranspose2d, nn.Linear)):
+            if isinstance(m, (nn.ConvTranspose2d, nn.Conv2d, nn.Linear)):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
@@ -128,7 +126,9 @@ class Decoder(nn.Module):
 
     def forward(self, z):
         x = self.fc(z).view(z.size(0), 512, 2, 2)
-        return self.main(x)
+        for block in self.blocks:
+            x = block(x)
+        return self.final(x)
 
 
 class VAE(nn.Module):
@@ -152,6 +152,18 @@ class VAE(nn.Module):
         self.distribution = distribution
         self.device = device
         self.l2_normalize = l2_normalize
+        # scale floor with dim for clifford so kappa doesn't collapse at high d
+        if distribution == "clifford":
+            if latent_dim < 256:
+                concentration_floor = 0.04
+            elif latent_dim <= 512:
+                concentration_floor = 0.07
+            elif latent_dim <= 1024:
+                concentration_floor = 0.10
+            elif latent_dim <= 2048:
+                concentration_floor = 0.13
+            else:
+                concentration_floor = 0.16
         self.concentration_floor = concentration_floor
         self.use_learnable_beta = use_learnable_beta
 
@@ -219,6 +231,12 @@ class VAE(nn.Module):
             )
             z = q_z.rsample()  # shape (..., 2*latent_dim)
             return z, q_z, p_z
+
+    def get_flat_latent(self, x):
+        """encode and return flat latent vector (B, latent_dim or 2*latent_dim)."""
+        mu, params = self.encoder(x)
+        z, _, _ = self.reparameterize(mu, params)
+        return z
 
     def forward(self, x):
         mu, params = self.encoder(x)

@@ -19,25 +19,26 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cnn.models import VAE
+from cnn.models import VAE as CNNVAE
+from cnn.cliffordar_model import CliffordARVAE as ViTVAE, HybridVAE
 from utils.wandb_utils import (
     WandbLogger,
     test_self_binding,
-    test_cross_class_bind_unbind,
+
     compute_class_means,
     evaluate_mean_vector_cosine,
     plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
-    plot_latent_dimension_exploration,
     plot_cross_dist_comparison_dim,
     plot_across_dims_comparison,
+    test_cross_class_bind_unbind,
 )
 from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
     test_per_class_bundle_capacity_k_items,
-    # test_binding_unbinding_with_self_binding,
+
     bind as vsa_bind,
     unbind as vsa_unbind,
     normalize_vectors as vsa_normalize,
@@ -342,7 +343,8 @@ def plot_latent_distributions(model, loader, device, save_path, n_dims=50, n_sam
         for x, _ in loader:
             x = x.to(device)
             mu, _ = model.encoder(x)
-            all_mu.append(mu.cpu())
+            # flatten per-token mu to (B, num_tokens * latent_dim)
+            all_mu.append(mu.reshape(mu.size(0), -1).cpu())
             n_collected += len(x)
             if n_collected >= n_samples:
                 break
@@ -399,7 +401,9 @@ def plot_latent_tsne(model, loader, device, save_path, n_samples=2000):
         for x, y in loader:
             x = x.to(device)
             _, _, _, mu = model(x)
-            all_mu.append(mu.cpu())
+            # flatten per-token mu to (B, num_tokens * latent_dim)
+            mu_flat = mu.reshape(mu.size(0), -1)
+            all_mu.append(mu_flat.cpu())
             all_labels.append(y)
             n_collected += len(x)
             if n_collected >= n_samples:
@@ -441,6 +445,81 @@ def plot_latent_tsne(model, loader, device, save_path, n_samples=2000):
     return save_path
 
 
+def plot_decoded_bundles(model, loader, device, save_path, class_names=None,
+                        n_samples=500, max_bundle_size=5):
+    """
+    bundle (add) class prototypes and decode the result to see if
+    constituent class features are visible in the decoded image.
+    each column bundles an increasing number of classes together.
+    """
+    model.eval()
+    dist = getattr(model, "distribution", "gaussian")
+
+    all_z = []
+    all_labels = []
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device)
+            # get decoder-ready z (not mu — for clifford mu is angles, z is bivector)
+            mu, params = model.encoder(x)
+            z, _, _ = model.reparameterize(mu, params)
+            all_z.append(z)
+            all_labels.append(y.to(device))
+            if sum(t.shape[0] for t in all_z) >= n_samples:
+                break
+    all_z = torch.cat(all_z, 0)[:n_samples]
+    all_labels = torch.cat(all_labels, 0)[:n_samples]
+
+    # compute per-class mean latent vector
+    unique_classes = torch.unique(all_labels).cpu().tolist()
+    unique_classes.sort()
+    n_classes = len(unique_classes)
+    class_means = {}
+    for c in unique_classes:
+        mask = all_labels == c
+        class_means[c] = all_z[mask].mean(dim=0)
+
+    # pick a few bundle combinations of increasing size
+    bundle_sizes = list(range(2, min(max_bundle_size + 1, n_classes + 1)))
+    n_combos_per_size = 3
+
+    fig, axes = plt.subplots(
+        len(bundle_sizes), n_combos_per_size,
+        figsize=(3 * n_combos_per_size, 3 * len(bundle_sizes)),
+    )
+    if len(bundle_sizes) == 1:
+        axes = axes.reshape(1, -1)
+
+    rng = np.random.RandomState(42)
+    with torch.no_grad():
+        for row, k in enumerate(bundle_sizes):
+            for col in range(n_combos_per_size):
+                chosen = rng.choice(unique_classes, size=k, replace=False).tolist()
+                bundle = sum(class_means[c] for c in chosen)
+                decoded = model.decoder(bundle.unsqueeze(0))
+                img = decoded[0].cpu()
+
+                # handle different image formats
+                if img.shape[0] == 1:
+                    axes[row, col].imshow(img[0], cmap="gray")
+                else:
+                    img = (img * 0.5 + 0.5).clamp(0, 1)
+                    axes[row, col].imshow(img.permute(1, 2, 0))
+
+                if class_names:
+                    label = " + ".join(class_names[c] for c in chosen)
+                else:
+                    label = " + ".join(str(c) for c in chosen)
+                axes[row, col].set_title(label, fontsize=6)
+                axes[row, col].axis("off")
+
+    fig.suptitle(f"{dist}: decoded bundles of class prototypes", fontsize=11)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
 def filter_dataset_by_class(dataset, exclude_class):
     """filter dataset to exclude a specific class"""
     if exclude_class < 0:
@@ -460,19 +539,35 @@ def get_excluded_class_subset(dataset, exclude_class):
 
 
 
-def sample_prior_z(dist_name, latent_dim, n, device, l2_normalize=False):
+def sample_prior_z(dist_name, latent_dim, n, device, l2_normalize=False, num_tokens=None):
     """sample n latent vectors from the prior.
-    clifford: uniform on (S^1)^{d-1} via d-1 free angles (DC+Nyquist fixed at 0).
-    powerspherical: uniform on S^{d-1} (κ→0 limit).
-    gaussian: isotropic N(0,I), or unit sphere if l2_normalize.
+    latent_dim: per-token latent dim when num_tokens is given, else total dim.
+    num_tokens: if set, produce flat z of shape (n, num_tokens * dec_dim).
     """
+    if num_tokens is not None:
+        # per-token sampling for vit models
+        if dist_name == "clifford":
+            from dists.clifford import CliffordTorusUniform
+            prior = CliffordTorusUniform(latent_dim, device=device)
+            z = prior.rsample((n, num_tokens))  # (n, num_tokens, 2*latent_dim)
+            return z.view(n, -1)
+        elif dist_name == "powerspherical":
+            z = torch.randn(n, num_tokens, latent_dim, device=device)
+            z = F.normalize(z, dim=-1)
+            z = z * (latent_dim ** 0.5)
+            return z.view(n, -1)
+        elif dist_name == "gaussian":
+            z = torch.randn(n, num_tokens * latent_dim, device=device)
+            if l2_normalize:
+                z = F.normalize(z.view(n, num_tokens, latent_dim), dim=-1).view(n, -1)
+            return z
+        else:
+            return torch.randn(n, num_tokens * latent_dim, device=device)
+
     if dist_name == "clifford":
-        angles = torch.rand(n, latent_dim, device=device) * (2 * math.pi)
-        freq_dim = 2 * latent_dim
-        theta_s = torch.zeros(n, freq_dim, device=device)
-        theta_s[:, 1:latent_dim] = angles[:, 1:]
-        theta_s[:, -latent_dim + 1:] = -torch.flip(angles[:, 1:], dims=(-1,))
-        return torch.fft.ifft(torch.exp(1j * theta_s), dim=-1).real.float()
+        from dists.clifford import CliffordTorusUniform
+        prior = CliffordTorusUniform(latent_dim, device=device)
+        return prior.rsample((n,))  # (n, 2*latent_dim)
     elif dist_name == "powerspherical":
         z = torch.randn(n, latent_dim, device=device)
         return z / z.norm(dim=-1, keepdim=True).clamp(min=1e-8)
@@ -510,11 +605,13 @@ def compute_generation_fid(model, dist_name, latent_dim, test_loader, device,
                 break
 
     l2_norm = getattr(model, "l2_normalize", False)
+    num_tokens = getattr(model, "num_tokens", None)
+    z_dim = getattr(model, "latent_dim", latent_dim)
     n_done = 0
     with torch.no_grad():
         while n_done < n_samples:
             bs = min(batch_size, n_samples - n_done)
-            z = sample_prior_z(dist_name, latent_dim, bs, device, l2_normalize=l2_norm)
+            z = sample_prior_z(dist_name, z_dim, bs, device, l2_normalize=l2_norm, num_tokens=num_tokens)
             imgs_01 = (model.decoder(z) * 0.5 + 0.5).clamp(0, 1)
             if in_channels == 1:
                 imgs_01 = imgs_01.repeat(1, 3, 1, 1)
@@ -538,7 +635,8 @@ def perform_knn_evaluation(
         with torch.no_grad():
             for x, y in loader:
                 _, _, _, mu = model(x.to(device))
-                latents.append(mu.cpu().numpy())
+                # flatten per-token mu to (B, num_tokens * latent_dim)
+                latents.append(mu.reshape(mu.size(0), -1).cpu().numpy())
                 labels.append(y.numpy())
         return np.concatenate(latents), np.concatenate(labels)
 
@@ -585,26 +683,23 @@ def main(args):
 
     latent_dims = args.latent_dims if args.latent_dims else [2048, 4096]
     distributions = ["clifford", "powerspherical", "gaussian", "gaussian_nol2"]
-    datasets_to_test = ["fashionmnist", "cifar10"]
+    datasets_to_test = ["fashionmnist"]
 
     # per-distribution lr overrides
     dist_lr = {
         "clifford": args.lr,
-        "powerspherical": 1e-4,
+        "powerspherical": 5e-5,
         "gaussian": args.lr,
         "gaussian_nol2": args.lr,
     }
 
     dataset_map = {
         "fashionmnist": datasets.FashionMNIST,
-        "cifar10": datasets.CIFAR10,
     }
 
     class_names_map = {
         "fashionmnist": ["tshirt", "trouser", "pullover", "dress", "coat",
                          "sandal", "shirt", "sneaker", "bag", "boot"],
-        "cifar10": ["plane", "auto", "bird", "cat", "deer",
-                    "dog", "frog", "horse", "ship", "truck"],
     }
 
     for dataset_name in datasets_to_test:
@@ -660,7 +755,10 @@ def main(args):
         BC_K_RANGE = list(range(5, 51, 5))   # bundle capacity
         RF_K_RANGE = list(range(2, 21, 2))    # role-filler
 
-        across_dim_results = {d: {"knn_100": [], "knn_600": [], "knn_1000": [], "f1_100": [], "f1_600": [], "f1_1000": [], "dims": []} for d in distributions}
+        across_dim_results = {d: {"knn_100": [], "knn_600": [], "knn_1000": [], "f1_100": [], "f1_600": [], "f1_1000": [], "mean_cosine": [], "dims": []} for d in distributions}
+
+        # per-dim, per-dist, per-trial accumulator for csv table
+        trial_metrics = {}  # (latent_dim, dist_name) -> list of metric dicts
 
         for latent_dim in latent_dims:
             dim_results = {}  # dist_name -> metrics dict
@@ -686,17 +784,43 @@ def main(args):
                     else:
                         actual_dist = dist_name
                         l2_norm = False
-                    model = VAE(
-                        latent_dim=latent_dim,
-                        in_channels=in_channels,
-                        distribution=actual_dist,
-                        device=DEVICE,
-                        recon_loss_type=args.recon_loss,
-                        l1_weight=args.l1_weight,
-                        freq_weight=0.0,
-                        l2_normalize=l2_norm,
-                        use_learnable_beta=args.use_learnable_beta,
-                    )
+                    if args.arch == "cnn":
+                        model = CNNVAE(
+                            latent_dim=latent_dim,
+                            in_channels=in_channels,
+                            distribution=actual_dist,
+                            device=DEVICE,
+                            recon_loss_type=args.recon_loss,
+                            l1_weight=args.l1_weight,
+                            l2_normalize=l2_norm,
+                            use_learnable_beta=args.use_learnable_beta,
+                            img_size=32,
+                        )
+                    elif args.arch == "hybrid":
+                        model_latent_dim = max(4, latent_dim // 16)
+                        model = HybridVAE(
+                            latent_dim=model_latent_dim,
+                            in_channels=in_channels,
+                            distribution=actual_dist,
+                            device=DEVICE,
+                            recon_loss_type=args.recon_loss,
+                            l1_weight=args.l1_weight,
+                            l2_normalize=l2_norm,
+                            use_learnable_beta=args.use_learnable_beta,
+                            img_size=32,
+                        )
+                    else:
+                        model = ViTVAE(
+                            latent_dim=latent_dim,
+                            image_size=32,
+                            in_channels=in_channels,
+                            distribution=actual_dist,
+                            device=DEVICE,
+                            recon_loss_type=args.recon_loss,
+                            l1_weight=args.l1_weight,
+                            l2_normalize=l2_norm,
+                            use_learnable_beta=args.use_learnable_beta,
+                        )
                     logger.watch_model(model)
                     cur_lr = dist_lr.get(dist_name, args.lr)
                     if args.use_learnable_beta:
@@ -787,25 +911,27 @@ def main(args):
                         latents = []
                         labels_list = []
                         images_list = []
-                        for x, y in test_loader:
-                            x = x.to(DEVICE)
-                            _, _, _, mu = model(x)
-                            latents.append(mu.detach())
-                            labels_list.append(y)
-                            images_list.append(x.cpu())
-                            if len(torch.cat(latents, 0)) >= 1000:
-                                break
+                        model.eval()
+                        with torch.no_grad():
+                            for x, y in test_loader:
+                                x = x.to(DEVICE)
+                                z_flat = model.get_flat_latent(x)
+                                latents.append(z_flat.detach())
+                                labels_list.append(y)
+                                images_list.append(x.cpu())
+                                if len(torch.cat(latents, 0)) >= 1000:
+                                    break
                         item_memory = torch.cat(latents, 0)[:1000]
                         item_labels = torch.cat(labels_list, 0)[:1000].to(DEVICE)
                         item_images = torch.cat(images_list, 0)[:1000]
 
-                        # === test 1: 1-item-per-class similarity matrix (no braiding) ===
+                        # 1-item-per-class similarity matrix
                         t0 = time.time()
                         print(
                             f"running 1-item-per-class test ({dist_name}, no braiding)..."
                         )
                         two_per_class_res = test_per_class_bundle_capacity_k_items(
-                            d=item_memory.shape[-1],
+                            d=latent_dim,
                             n_items=1000,
                             n_classes=10,
                             items_per_class=1,
@@ -822,7 +948,7 @@ def main(args):
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # === test 2: bundle capacity (schlegel et al. sec 3.1) ===
+                        # bundle capacity
                         t0 = time.time()
                         print(f"running bundle capacity test ({dist_name})...")
                         bundle_cap_raw = vsa_bundle_capacity(
@@ -836,46 +962,32 @@ def main(args):
                             save_dir=output_dir,
                             item_memory=item_memory,
                             use_braiding=False,
+                            baseline_d=latent_dim,
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # === test 3: role-filler unbinding (schlegel et al. sec 3.3) ===
+                        # role-filler unbinding
                         t0 = time.time()
                         print(f"running role-filler unbinding test ({dist_name})...")
-                        # role-filler variants: (random_keys, braiding) combos
-                        rf_variants = [
-                            (True, False, "role_filler_capacity"),
-                            (False, False, "role_filler_no_random_keys"),
-                            (True, True, "role_filler_braided"),
-                            (False, True, "role_filler_no_random_keys_braided"),
-                        ]
                         rf_results = {}
-                        for bind_rand, braid, rf_name in rf_variants:
-                            label = f"bind_with_random={bind_rand}, braiding={braid}"
-                            print(f"  running role-filler ({label})...")
-                            rf_res = vsa_binding_unbinding(
-                                d=item_memory.shape[-1],
-                                n_items=1000,
-                                k_range=RF_K_RANGE,
-                                n_trials=20,
-                                normalize=normalize_vectors,
-                                device=DEVICE,
-                                plot=True,
-                                unbind_method="*",
-                                save_dir=output_dir,
-                                item_memory=item_memory,
-                                bind_with_random=bind_rand,
-                                use_braiding=braid,
-                            )
-                            rf_results[rf_name] = rf_res
-                            # rename saved plot to variant name
-                            default_plot = os.path.join(output_dir, "role_filler_capacity.png")
-                            variant_plot = os.path.join(output_dir, f"{rf_name}.png")
-                            if os.path.exists(default_plot) and rf_name != "role_filler_capacity":
-                                os.rename(default_plot, variant_plot)
-
-                        role_filler_raw = rf_results.get("role_filler_capacity", {})
-                        print(f"  all role-filler variants completed in {time.time() - t0:.2f}s")
+                        print(f"  running role-filler (bind_with_random=True)...")
+                        rf_res = vsa_binding_unbinding(
+                            d=item_memory.shape[-1],
+                            n_items=1000,
+                            k_range=RF_K_RANGE,
+                            n_trials=20,
+                            normalize=normalize_vectors,
+                            device=DEVICE,
+                            plot=True,
+                            unbind_method="*",
+                            save_dir=output_dir,
+                            item_memory=item_memory,
+                            bind_with_random=True,
+                            baseline_d=latent_dim,
+                        )
+                        rf_results["role_filler_capacity"] = rf_res
+                        role_filler_raw = rf_res
+                        print(f"  role-filler completed in {time.time() - t0:.2f}s")
 
                         t0 = time.time()
                         print(f"running self-binding test ({dist_name})...")
@@ -888,16 +1000,17 @@ def main(args):
                             img_shape=IMG_SHAPE,
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
-                        fourier_perp = {}
 
                         t0 = time.time()
-                        print(f"running cross-class bind/unbind test ({dist_name})...")
-                        cross_class_star = test_cross_class_bind_unbind(
+                        print(f"running self-binding test deconv ({dist_name})...")
+                        deconv_dir = f"{output_dir}/deconv"
+                        os.makedirs(deconv_dir, exist_ok=True)
+                        fourier_perp = test_self_binding(
                             model,
                             test_loader,
                             DEVICE,
-                            output_dir,
-                            unbind_method="*",  # O(d), only shifting
+                            deconv_dir,
+                            unbind_method="†",
                             img_shape=IMG_SHAPE,
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
@@ -936,6 +1049,20 @@ def main(args):
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
+                        # decoded bundle visualization
+                        t0 = time.time()
+                        print(f"generating decoded bundle visualization...")
+                        bundle_viz_path = plot_decoded_bundles(
+                            model,
+                            test_loader,
+                            DEVICE,
+                            f"{output_dir}/decoded_bundles.png",
+                            class_names=class_names,
+                            n_samples=500,
+                            max_bundle_size=5,
+                        )
+                        print(f"  completed in {time.time() - t0:.2f}s")
+
                         t0 = time.time()
                         print(f"generating latent interpolations...")
                         interp_path = plot_latent_interpolations(
@@ -970,13 +1097,13 @@ def main(args):
                         mean_metric_key = "mean_vector_cosine_acc"
                         print(f"{mean_metric_key}: ", mean_vector_acc)
 
-                        t0 = time.time()
-                        print(f"computing generation fid...")
+                        # compute fid between prior samples and test set
                         gen_fid = compute_generation_fid(
-                            model, dist_name, latent_dim, test_loader, DEVICE,
-                            in_channels, n_samples=2048,
+                            model, dist_name, latent_dim,
+                            test_loader, DEVICE, in_channels,
+                            n_samples=2048, batch_size=256
                         )
-                        print(f"  generation_fid={gen_fid:.2f}  ({time.time() - t0:.2f}s)")
+                        print(f"generation FID: {gen_fid:.2f}")
 
                         fourier_metrics = {}
                         fourier_metrics.update(
@@ -1000,10 +1127,7 @@ def main(args):
                                 **fourier_metrics,
                                 mean_metric_key: float(mean_vector_acc),
                                 "final_best_total_loss": best,
-                                "generation_fid": gen_fid,
-                                "cross_class_bind_unbind_similarity_star": cross_class_star.get(
-                                    "cross_class_bind_unbind_similarity", 0.0
-                                ),
+                                **({"generation_fid": gen_fid} if gen_fid is not None and not math.isnan(gen_fid) else {}),
                             }
                         )
 
@@ -1013,6 +1137,7 @@ def main(args):
                                 "latent_distributions": latent_dist_path,
                                 "tsne": tsne_path,
                                 "latent_interpolation": interp_path,
+                                "decoded_bundles": bundle_viz_path,
                             }
                         )
 
@@ -1024,11 +1149,20 @@ def main(args):
                         bc_plot = os.path.join(output_dir, "bundle_capacity.png")
                         if os.path.exists(bc_plot):
                             images["bundle_capacity"] = bc_plot
-                        for rf_name in ["role_filler_capacity", "role_filler_no_random_keys",
-                                        "role_filler_braided", "role_filler_no_random_keys_braided"]:
-                            rf_plot = os.path.join(output_dir, f"{rf_name}.png")
-                            if os.path.exists(rf_plot):
-                                images[rf_name] = rf_plot
+                        rf_plot = os.path.join(output_dir, "role_filler_capacity.png")
+                        if os.path.exists(rf_plot):
+                            images["role_filler_capacity"] = rf_plot
+
+                        # cross-class bind/unbind test (shirt=6 vs sandal=5)
+                        print(f"running cross-class bind/unbind test...")
+                        cross_class_result = test_cross_class_bind_unbind(
+                            model, test_loader, DEVICE, output_dir,
+                            img_shape=IMG_SHAPE,
+                            class_a=5, class_b=6,
+                        )
+                        ccp = cross_class_result.get("cross_class_bind_unbind_plot_path")
+                        if ccp and os.path.exists(ccp):
+                            images["cross_class_binding"] = ccp
 
                         sp = fourier_star.get("similarity_after_k_binds_plot_path")
                         sd = fourier_perp.get("similarity_after_k_binds_plot_path")
@@ -1044,12 +1178,7 @@ def main(args):
                         if rd:
                             images["recon_after_k_binds_†"] = rd
 
-                        if cross_class_star.get("cross_class_bind_unbind_plot_path"):
-                            images["cross_class_binding_star"] = cross_class_star[
-                                "cross_class_bind_unbind_plot_path"
-                            ]
-
-                        if dist_name == "clifford" and 2 <= model.latent_dim <= 8:
+                        if dist_name == "clifford" and 2 <= model.latent_dim <= 256:
                             cliff_viz = plot_clifford_manifold_visualization(
                                 model,
                                 DEVICE,
@@ -1062,7 +1191,7 @@ def main(args):
                                 images["clifford_manifold_visualization"] = cliff_viz
 
                         elif (
-                            dist_name == "powerspherical" and 2 <= model.latent_dim <= 8
+                            dist_name == "powerspherical" and 2 <= model.latent_dim <= 256
                         ):
                             pow_viz = plot_powerspherical_manifold_visualization(
                                 model,
@@ -1077,7 +1206,7 @@ def main(args):
                                     pow_viz
                                 )
 
-                        elif dist_name == "gaussian" and 2 <= model.latent_dim <= 8:
+                        elif dist_name == "gaussian" and 2 <= model.latent_dim <= 256:
                             gauss_viz = plot_gaussian_manifold_visualization(
                                 model,
                                 DEVICE,
@@ -1125,10 +1254,44 @@ def main(args):
                             **knn_metrics,
                             **excluded_metrics,
                             mean_metric_key: float(mean_vector_acc),
-                            "generation_fid": gen_fid,
                         }
                         logger.log_summary(summary)
                         logger.log_images(images)
+
+                        # log vsa curve data as wandb tables so we can reconstruct figures later
+                        try:
+                            import wandb as _wandb
+                            if _wandb.run is not None:
+                                # bundle capacity
+                                bc = bundle_cap_raw
+                                if bc and bc.get("k"):
+                                    _wandb.log({"bundle_capacity_data": _wandb.Table(
+                                        columns=["k", "accuracy", "std"],
+                                        data=list(zip(bc["k"], bc["accuracy"], bc["std"])),
+                                    )})
+
+                                # role-filler capacity
+                                rf = role_filler_raw
+                                if rf and rf.get("k"):
+                                    _wandb.log({"role_filler_data": _wandb.Table(
+                                        columns=["k", "accuracy", "std"],
+                                        data=list(zip(rf["k"], rf["accuracy"], rf["std"])),
+                                    )})
+
+                                # binding depth (* and †)
+                                for key_name, src in [
+                                    ("binding_depth_star", fourier_star),
+                                    ("binding_depth_dagger", fourier_perp),
+                                ]:
+                                    ks = src.get("k_values", [])
+                                    sims = src.get("k_sims", [])
+                                    if ks and sims:
+                                        _wandb.log({f"{key_name}_data": _wandb.Table(
+                                            columns=["m", "cosine_sim"],
+                                            data=list(zip(ks, sims)),
+                                        )})
+                        except Exception:
+                            pass
 
                         metrics_save_path = f"{output_dir}/metrics.json"
                         with open(metrics_save_path, "w") as f:
@@ -1155,8 +1318,23 @@ def main(args):
                             "self_binding_k_sims": fourier_star.get("k_sims", []),
                             "self_binding_k_values": fourier_star.get("k_values", []),
                             "knn_acc": knn_metrics.get("knn_acc_1000", 0.0),
-                            "gen_fid": gen_fid,
+                            "mean_cosine": float(mean_vector_acc),
                         }
+                        # collect for csv table
+                        key = (latent_dim, dist_name)
+                        if key not in trial_metrics:
+                            trial_metrics[key] = []
+                        trial_metrics[key].append({
+                            "knn_acc_100": knn_metrics.get("knn_acc_100", 0.0),
+                            "knn_acc_600": knn_metrics.get("knn_acc_600", 0.0),
+                            "knn_acc_1000": knn_metrics.get("knn_acc_1000", 0.0),
+                            "knn_f1_100": knn_metrics.get("knn_f1_100", 0.0),
+                            "knn_f1_600": knn_metrics.get("knn_f1_600", 0.0),
+                            "knn_f1_1000": knn_metrics.get("knn_f1_1000", 0.0),
+                            "mvc": float(mean_vector_acc),
+                            "fid": gen_fid if gen_fid is not None and not math.isnan(gen_fid) else float("nan"),
+                            "best_loss": best,
+                        })
                         across_dim_results[dist_name]["dims"].append(latent_dim)
                         across_dim_results[dist_name]["knn_100"].append(
                             knn_metrics.get("knn_acc_100", 0.0)
@@ -1176,6 +1354,9 @@ def main(args):
                         across_dim_results[dist_name]["f1_1000"].append(
                             knn_metrics.get("knn_f1_1000", 0.0)
                         )
+                        across_dim_results[dist_name]["mean_cosine"].append(
+                            float(mean_vector_acc)
+                        )
 
                     logger.finish_run()
 
@@ -1190,7 +1371,7 @@ def main(args):
                 ref_rf = vsa_binding_unbinding(
                     d=latent_dim, n_items=1000, k_range=RF_K_RANGE,
                     n_trials=20, normalize=True, device=DEVICE,
-                    unbind_method="*", item_memory=ref_items, bind_with_random=False,
+                    unbind_method="*", item_memory=ref_items, bind_with_random=True,
                 )
                 z_ref = F.normalize(torch.randn(1, latent_dim, device=DEVICE), p=2, dim=-1)
                 k_max = 50
@@ -1225,6 +1406,36 @@ def main(args):
         except Exception as e:
             print(f"warning: across-dims comparison failed for {dataset_name}: {e}")
 
+    # build unified csv results table
+    if trial_metrics:
+        try:
+            import pandas as pd
+            rows = []
+            for (ldim, dist), trials in sorted(trial_metrics.items()):
+                row = {"d": ldim, "dist": dist}
+                for metric in ["knn_acc_100", "knn_acc_600", "knn_acc_1000",
+                               "knn_f1_100", "knn_f1_600", "knn_f1_1000",
+                               "mvc"]:
+                    vals = [t[metric] * 100 for t in trials]
+                    row[metric] = f"{np.mean(vals):.1f}±{np.std(vals):.1f}" if len(vals) > 1 else f"{vals[0]*1:.1f}"
+                # fid (lower is better, don't multiply by 100)
+                fid_vals = [t["fid"] for t in trials if not math.isnan(t["fid"])]
+                row["fid"] = f"{np.mean(fid_vals):.1f}±{np.std(fid_vals):.1f}" if len(fid_vals) > 1 else (f"{fid_vals[0]:.1f}" if fid_vals else "N/A")
+                loss_vals = [t["best_loss"] for t in trials]
+                row["best_loss"] = f"{np.mean(loss_vals):.4f}±{np.std(loss_vals):.4f}" if len(loss_vals) > 1 else f"{loss_vals[0]:.4f}"
+                rows.append(row)
+            df = pd.DataFrame(rows)
+            csv_name = f"{dataset_name}_results.csv"
+            df.to_csv(csv_name, index=False)
+            print(f"\n{'='*25} {dataset_name} results {'='*25}")
+            print(df.to_string(index=False))
+            print(f"saved to {csv_name}")
+        except ImportError:
+            csv_name = f"{dataset_name}_results.json"
+            with open(csv_name, "w") as f:
+                json.dump([{"dim": k[0], "dist": k[1], "trials": v} for k, v in trial_metrics.items()], f, indent=2)
+            print(f"results saved to {csv_name}")
+
     script_total_time = time.time() - script_start_time
     timing_results["total_script_time_s"] = script_total_time
     with open("fashion_train_timing.json", "w") as f:
@@ -1235,11 +1446,11 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(
-        description="clifford vae experiments on fashionmnist/cifar10"
+        description="clifford vae experiments on fashionmnist"
     )
-    p.add_argument("--epochs", type=int, default=500, help="training epochs")
+    p.add_argument("--epochs", type=int, default=1000, help="training epochs")
     p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs (ignored if --use_learnable_beta)")
-    p.add_argument("--batch_size", type=int, default=256, help="batch size")
+    p.add_argument("--batch_size", type=int, default=128, help="batch size")
     p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
     p.add_argument(
         "--no-l2_norm",
@@ -1272,7 +1483,7 @@ if __name__ == "__main__":
         default="clifford-experiments-CNN",
         help="wandb project name",
     )
-    p.add_argument("--patience", type=int, default=75, help="early stopping patience")
+    p.add_argument("--patience", type=int, default=100, help="early stopping patience")
     p.add_argument(
         "--cycle_epochs",
         type=int,
@@ -1289,19 +1500,26 @@ if __name__ == "__main__":
         "--exclude_class",
         type=int,
         default=-1,
-        help="exclude class (-1=none) | fmnist: 0:tshirt 1:trouser 2:pullover 3:dress 4:coat 5:sandal 6:shirt 7:sneaker 8:bag 9:boot | cifar: 0:plane 1:auto 2:bird 3:cat 4:deer 5:dog 6:frog 7:horse 8:ship 9:truck",
+        help="exclude class (-1=none) | fmnist: 0:tshirt 1:trouser 2:pullover 3:dress 4:coat 5:sandal 6:shirt 7:sneaker 8:bag 9:boot",
     )
     p.add_argument(
         "--latent_dims",
         type=int,
         nargs="+",
-        default=[128, 256, 512, 1024, 2048, 4096],
+        default=[64, 256, 1024, 4096],
         help="latent dims to test",
     )
     p.add_argument(
         "--braid",
         action="store_true",
         help="run braiding tests",
+    )
+    p.add_argument(
+        "--arch",
+        type=str,
+        default="cnn",
+        choices=["cnn", "vit", "hybrid"],
+        help="backbone: cnn (plain conv) or vit (hybrid cnn+vit)",
     )
     args = p.parse_args()
     main(args)

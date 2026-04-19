@@ -20,12 +20,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.wandb_utils import (
     WandbLogger,
     test_self_binding,
-    test_cross_class_bind_unbind,
-    compute_class_means,
-    evaluate_mean_vector_cosine,
     plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
+    test_pairwise_bind_bundle_decode,
+    test_cross_class_bind_unbind,
+    compute_class_means,
+    evaluate_mean_vector_cosine,
 )
 import torch.nn.functional as F
 from utils.vsa import (
@@ -156,30 +157,19 @@ def plot_interpolations(model, loader, device, filepath, steps=10):
 
 
 def plot_latent_space(model, loader, device, filepath, n_plot=1000):
-    print(f"generating t-sne plot for {n_plot} points...")
+    """t-sne visualization of latent space."""
     X_z, y = encode_dataset(model, loader, device)
     X_z, y = X_z[:n_plot], y[:n_plot]
-
-    perplexity = 30
-    print(f"running t-sne with perplexity={perplexity}...")
-    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity, max_iter=1000)
+    print(f"running t-sne on {n_plot} points...")
+    tsne = TSNE(n_components=2, random_state=42, perplexity=30, max_iter=1000)
     z_tsne = tsne.fit_transform(X_z)
-
     plt.figure(figsize=(8, 6))
-    plt.scatter(
-        z_tsne[:, 0],
-        z_tsne[:, 1],
-        c=y,
-        cmap=plt.get_cmap("tab10", 10),
-        s=10,
-        alpha=0.8,
-    )
+    plt.scatter(z_tsne[:, 0], z_tsne[:, 1], c=y, cmap=plt.get_cmap("tab10", 10), s=10, alpha=0.8)
     plt.title(f"t-SNE Latent Space ({model.distribution.upper()}-VAE)")
     plt.xticks([])
     plt.yticks([])
     plt.savefig(filepath, dpi=200, bbox_inches="tight")
     plt.close()
-
     return filepath
 
 
@@ -215,7 +205,6 @@ def run(args):
     test_eval_loader = DataLoader(test_dataset, batch_size=512, num_workers=0)
 
     final_results = []
-    elbo_results = []  # for davidson-style table
     distributions_to_test = ["normal", "powerspherical", "clifford"]
 
     # per-distribution lr overrides
@@ -233,11 +222,15 @@ def run(args):
         agg_results = {
             dist: {s: [] for s in knn_samples} for dist in distributions_to_test
         }
+        agg_f1 = {
+            dist: {s: [] for s in knn_samples} for dist in distributions_to_test
+        }
         # aggregate elbo metrics for results table
         agg_metrics = {
             dist: {"ll": [], "entropy": [], "recon": [], "kl": []}
             for dist in distributions_to_test
         }
+        agg_mvc = {dist: [] for dist in distributions_to_test}
 
         for dist in distributions_to_test:
             # dist on sphere S^d is embedded in R^(d+1)
@@ -342,6 +335,10 @@ def run(args):
                             agg_results[dist][n_samples].append(
                                 knn_results[f"knn_acc_{n_samples}"]
                             )
+                        if f"knn_f1_{n_samples}" in knn_results:
+                            agg_f1[dist][n_samples].append(
+                                knn_results[f"knn_f1_{n_samples}"]
+                            )
 
                     test_subset = torch.utils.data.Subset(
                         test_dataset, list(range(min(1000, len(test_dataset))))
@@ -355,16 +352,12 @@ def run(args):
                         f"visualizations/d_{mdim}/{dist}",
                         unbind_method="*",
                     )
-                    fourier_deconv = {}
-
-                    cross_class_pseudo = test_cross_class_bind_unbind(
-                        model,
-                        test_subset_loader,
-                        device,
-                        f"visualizations/d_{mdim}/{dist}",
-                        unbind_method="*",
+                    deconv_dir = f"visualizations/d_{mdim}/{dist}/deconv"
+                    os.makedirs(deconv_dir, exist_ok=True)
+                    fourier_deconv = test_self_binding(
+                        model, test_subset_loader, device, deconv_dir,
+                        unbind_method="†",
                     )
-                    cross_class_deconv = {}
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
                     os.makedirs(vis_dir, exist_ok=True)
@@ -416,20 +409,50 @@ def run(args):
                         item_memory=item_memory,
                     )
 
-                    # role-filler unbinding (schlegel et al. sec 3.3)
+                    # role-filler variants
                     print(f"running role-filler unbinding ({dist})...")
-                    role_filler_raw = vsa_binding_unbinding(
-                        d=item_memory.shape[-1],
-                        n_items=500,
-                        k_range=list(range(2, 21, 2)),
-                        n_trials=20,
-                        normalize=normalize_vectors,
-                        device=device,
-                        plot=True,
-                        unbind_method="*",
-                        save_dir=vis_dir,
-                        item_memory=item_memory,
-                        bind_with_random=True,
+                    rf_variants = [
+                        (False, False, "*", "role_filler_no_random_keys"),
+                        (False, False, "†", "role_filler_no_random_keys_deconv"),
+                    ]
+                    rf_results = {}
+                    for bind_rand, braid, ubmethod, rf_name in rf_variants:
+                        save_d = deconv_dir if ubmethod == "†" else vis_dir
+                        rf_res = vsa_binding_unbinding(
+                            d=item_memory.shape[-1],
+                            n_items=500,
+                            k_range=list(range(2, 21, 2)),
+                            n_trials=20,
+                            normalize=normalize_vectors,
+                            device=device,
+                            plot=True,
+                            unbind_method=ubmethod,
+                            save_dir=save_d,
+                            item_memory=item_memory,
+                            bind_with_random=bind_rand,
+                            use_braiding=braid,
+                        )
+                        rf_results[rf_name] = rf_res
+                        default_plot = os.path.join(save_d, "role_filler_capacity.png")
+                        variant_plot = os.path.join(save_d, f"{rf_name}.png")
+                        if os.path.exists(default_plot):
+                            os.rename(default_plot, variant_plot)
+                    role_filler_raw = rf_results.get("role_filler_no_random_keys", {})
+
+                    # pairwise bind-bundle-decode test
+                    pairwise_result = test_pairwise_bind_bundle_decode(
+                        model, test_subset_loader, device, vis_dir,
+                        class_names=[str(i) for i in range(10)],
+                        img_shape=(1, 28, 28),
+                        n_classes=10,
+                    )
+                    pairwise_bind_bundle_path = pairwise_result.get("pairwise_bind_bundle_path")
+
+                    # cross-class bind/unbind test (6 vs 9)
+                    cross_class_result = test_cross_class_bind_unbind(
+                        model, test_subset_loader, device, vis_dir,
+                        img_shape=(1, 28, 28),
+                        class_a=6, class_b=9,
                     )
 
                     vis_dir = f"visualizations/d_{mdim}/{dist}"
@@ -441,18 +464,31 @@ def run(args):
                         device,
                         os.path.join(vis_dir, "reconstructions.png"),
                     )
-                    tsne_path = plot_latent_space(
-                        model,
-                        test_eval_loader,
-                        device,
-                        os.path.join(vis_dir, "tsne.png"),
-                    )
                     interp_path = plot_interpolations(
                         model,
                         test_eval_loader,
                         device,
                         os.path.join(vis_dir, "interpolations.png"),
                     )
+
+                    tsne_path = plot_latent_space(
+                        model, test_eval_loader, device,
+                        os.path.join(vis_dir, "tsne.png"),
+                    )
+
+                    # mean vector cosine accuracy
+                    train_subset = torch.utils.data.Subset(
+                        full_dataset, list(range(min(5000, len(full_dataset))))
+                    )
+                    train_subset_loader = DataLoader(train_subset, batch_size=256)
+                    class_means = compute_class_means(
+                        model, train_subset_loader, device, max_per_class=1000
+                    )
+                    mean_vector_acc, _ = evaluate_mean_vector_cosine(
+                        model, test_eval_loader, device, class_means
+                    )
+                    print(f"  mean vector cosine acc: {mean_vector_acc:.4f}")
+                    agg_mvc[dist].append(float(mean_vector_acc))
 
                     if dist == "clifford" and mdim >= 2:
                         cliff_viz = plot_clifford_manifold_visualization(
@@ -470,8 +506,8 @@ def run(args):
                     if logger.use:
                         images_to_log = {
                             "Reconstructions": recon_path,
-                            "Latent t-SNE": tsne_path,
                             "Interpolations": interp_path,
+                            "Latent t-SNE": tsne_path,
                         }
 
                         for tag, fr in {
@@ -498,26 +534,18 @@ def run(args):
                         bc_plot = os.path.join(vis_dir, "bundle_capacity.png")
                         if os.path.exists(bc_plot):
                             images_to_log["Bundle_Capacity"] = bc_plot
-                        rf_plot = os.path.join(vis_dir, "role_filler_capacity.png")
+                        rf_plot = os.path.join(vis_dir, "role_filler_no_random_keys.png")
                         if os.path.exists(rf_plot):
-                            images_to_log["Role_Filler_Capacity"] = rf_plot
+                            images_to_log["Role_Filler_No_Random_Keys"] = rf_plot
 
-                        if cross_class_pseudo.get(
-                            "cross_class_bind_unbind_plot_path"
-                        ):
-                            images_to_log["Cross_Class_Binding_Pseudo"] = (
-                                cross_class_pseudo[
-                                    "cross_class_bind_unbind_plot_path"
-                                ]
-                            )
-                        if cross_class_deconv.get(
-                            "cross_class_bind_unbind_plot_path"
-                        ):
-                            images_to_log["Cross_Class_Binding_Deconv"] = (
-                                cross_class_deconv[
-                                    "cross_class_bind_unbind_plot_path"
-                                ]
-                            )
+                        if pairwise_bind_bundle_path and os.path.exists(pairwise_bind_bundle_path):
+                            images_to_log["Pairwise_Bind_Bundle_Decode"] = pairwise_bind_bundle_path
+
+                        # log extra role-filler variant plots
+                        for rf_name in ["role_filler_no_random_keys_deconv"]:
+                            rf_plot = os.path.join(vis_dir if "deconv" not in rf_name else deconv_dir, f"{rf_name}.png")
+                            if os.path.exists(rf_plot):
+                                images_to_log[rf_name] = rf_plot
 
                         if dist == "clifford" and mdim >= 2 and cliff_viz:
                             images_to_log["Clifford_Manifold"] = cliff_viz
@@ -549,17 +577,6 @@ def run(args):
                             }
                         )
 
-                        train_subset = torch.utils.data.Subset(
-                            train_dataset, list(range(min(5000, len(train_dataset))))
-                        )
-                        train_subset_loader = DataLoader(train_subset, batch_size=256)
-                        class_means = compute_class_means(
-                            model, train_subset_loader, device, max_per_class=1000
-                        )
-                        mean_vector_acc, per_class_acc = evaluate_mean_vector_cosine(
-                            model, test_eval_loader, device, class_means
-                        )
-
                         logger.log_metrics(
                             {
                                 **knn_metrics,
@@ -571,12 +588,6 @@ def run(args):
                                 "test/entropy": test_metrics["entropy"],
                                 "test/recon": test_metrics["recon"],
                                 "test/kl": test_metrics["kl"],
-                                "cross_class_bind_unbind_similarity_pseudo": cross_class_pseudo.get(
-                                    "cross_class_bind_unbind_similarity", 0.0
-                                ),
-                                "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
-                                    "cross_class_bind_unbind_similarity", 0.0
-                                ),
                             }
                         )
 
@@ -585,17 +596,10 @@ def run(args):
                             "final_val_loss": best_val_loss,
                             **fourier_metrics,
                             "mean_vector_cosine_acc": float(mean_vector_acc),
-                            # elbo metrics for results table
                             "test/ll": test_metrics["ll"],
                             "test/entropy": test_metrics["entropy"],
                             "test/recon": test_metrics["recon"],
                             "test/kl": test_metrics["kl"],
-                            "cross_class_bind_unbind_similarity_pseudo": cross_class_pseudo.get(
-                                "cross_class_bind_unbind_similarity", 0.0
-                            ),
-                            "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
-                                "cross_class_bind_unbind_similarity", 0.0
-                            ),
                         }
                         logger.log_summary(summary_metrics)
                         logger.finish_run()
@@ -616,62 +620,44 @@ def run(args):
 
                     os.remove(model_path)
 
-        row_data = {"d": mdim}
+        # build unified row for this dim
+        row = {"d": mdim}
         for dist in distributions_to_test:
-            if not any(agg_results[dist].values()):
-                continue
-
+            D = dist.upper()
+            # knn acc & f1
             for n_samples in knn_samples:
-                accuracies = agg_results[dist][n_samples]
-                if accuracies:
-                    mean_acc, std_acc = (
-                        np.mean(accuracies) * 100,
-                        np.std(accuracies) * 100,
-                    )
-                    row_data[f"{dist.upper()}_{n_samples}"] = (
-                        f"{mean_acc:.1f}±{std_acc:.1f}"
-                    )
-                else:
-                    row_data[f"{dist.upper()}_{n_samples}"] = "N/A"
-        final_results.append(row_data)
-
-        elbo_row = {"d": mdim}
-        for dist in distributions_to_test:
+                accs = agg_results[dist][n_samples]
+                f1s = agg_f1[dist][n_samples]
+                row[f"{D}_acc_{n_samples}"] = (
+                    f"{np.mean(accs)*100:.1f}±{np.std(accs)*100:.1f}" if accs else "N/A"
+                )
+                row[f"{D}_f1_{n_samples}"] = (
+                    f"{np.mean(f1s)*100:.1f}±{np.std(f1s)*100:.1f}" if f1s else "N/A"
+                )
+            # mean vector cosine
+            mvc_vals = agg_mvc[dist]
+            row[f"{D}_mvc"] = (
+                f"{np.mean(mvc_vals)*100:.1f}±{np.std(mvc_vals)*100:.1f}" if mvc_vals else "N/A"
+            )
+            # elbo metrics
             for metric in ["ll", "entropy", "recon", "kl"]:
-                values = agg_metrics[dist][metric]
-                if values:
-                    mean_val = np.mean(values)
-                    std_val = np.std(values)
-                    elbo_row[f"{dist.upper()}_{metric}"] = f"{mean_val:.2f}±{std_val:.2f}"
-                else:
-                    elbo_row[f"{dist.upper()}_{metric}"] = "N/A"
-        elbo_results.append(elbo_row)
+                vals = agg_metrics[dist][metric]
+                row[f"{D}_{metric}"] = (
+                    f"{np.mean(vals):.2f}±{np.std(vals):.2f}" if vals else "N/A"
+                )
+        final_results.append(row)
 
     if final_results:
         try:
             import pandas as pd
             df = pd.DataFrame(final_results).set_index("d")
-            print("\n" + "=" * 25 + " results (knn acc %) " + "=" * 25)
+            print("\n" + "=" * 25 + " all metrics " + "=" * 25)
             print(df.to_string())
-            df.to_csv("mnist_vae_knn_results.csv")
-
-            if elbo_results:
-                df_elbo = pd.DataFrame(elbo_results).set_index("d")
-                print("\n" + "=" * 25 + " elbo metrics (ll, L[q], re, kl) " + "=" * 25)
-                print(df_elbo.to_string())
-                df_elbo.to_csv("mnist_vae_elbo_results.csv")
+            df.to_csv("mnist_vae_results.csv")
         except ImportError:
-            print("\n" + "=" * 25 + " results (knn acc %) " + "=" * 25)
-            for row in final_results:
-                print(row)
-            with open("mnist_vae_knn_results.json", "w") as f:
+            with open("mnist_vae_results.json", "w") as f:
                 json.dump(final_results, f, indent=2)
-            print("results saved to mnist_vae_knn_results.json")
-
-        if elbo_results:
-            with open("mnist_vae_elbo_raw.json", "w") as f:
-                json.dump(elbo_results, f, indent=2)
-            print("raw elbo metrics saved to mnist_vae_elbo_raw.json")
+            print("results saved to mnist_vae_results.json")
     else:
         print("no results were generated.")
 
@@ -701,7 +687,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--patience",
         type=int,
-        default=25,
+        default=50,
         help="Early stopping patience (0 to disable)",
     )
     parser.add_argument(
@@ -718,7 +704,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--n_runs",
         type=int,
-        default=20,
+        default=1,
         help="Number of runs (original paper param is 20)",
     )
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")

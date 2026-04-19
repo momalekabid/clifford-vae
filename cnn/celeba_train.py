@@ -17,11 +17,10 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cnn.models import VAE
+from cnn.cliffordar_model import CliffordARVAE, HybridVAE
 from utils.wandb_utils import (
     WandbLogger,
     test_self_binding,
-    test_cross_class_bind_unbind,
     plot_clifford_manifold_visualization,
     plot_powerspherical_manifold_visualization,
     plot_gaussian_manifold_visualization,
@@ -198,8 +197,9 @@ def plot_latent_distributions(model, loader, device, save_path, n_dims=50, n_sam
     with torch.no_grad():
         for x, _ in loader:
             x = x.to(device)
-            mu, _ = model.encoder(x)
-            all_mu.append(mu.cpu())
+            # get_flat_latent returns (B, T*latent_dim) — use as flat repr
+            mu_flat = model.get_flat_latent(x)
+            all_mu.append(mu_flat.cpu())
             n_collected += len(x)
             if n_collected >= n_samples:
                 break
@@ -333,8 +333,9 @@ def plot_phase_attribute_correlation(model, loader, device, save_dir, attr_names
     with torch.no_grad():
         for x, attrs in loader:
             x = x.to(device)
-            mu, _ = model.encoder(x)
-            all_mu.append(mu.cpu())
+            # flatten per-token mu to (B, T*latent_dim) for correlation analysis
+            mu_flat = model.get_flat_latent(x)
+            all_mu.append(mu_flat.cpu())
             all_attrs.append(attrs)
             n_collected += len(x)
             if n_collected >= n_samples:
@@ -423,6 +424,9 @@ def plot_attribute_traversal(model, loader, device, save_dir, attr_names,
         x_batch = x_batch[:20].to(device)
         mu, params = model.encoder(x_batch)
         z, _, _ = model.reparameterize(mu, params)
+        # flatten per-token mu/z to (B, T*D) for dim indexing
+        mu = mu.reshape(mu.shape[0], -1)
+        z = z.reshape(z.shape[0], -1)
 
     top_pairs = corr_data["top_pairs"]
     seen_attrs = set()
@@ -462,15 +466,9 @@ def plot_attribute_traversal(model, loader, device, save_dir, attr_names,
 
                 for step_idx, val in enumerate(traverse_range):
                     z_mod = z_base.clone().unsqueeze(0)
-
-                    if dist == "clifford":
-                        mu_mod = mu[sample_idx].clone().unsqueeze(0)
-                        mu_mod[0, dim_idx] = val
-                        z_mod, _, _ = model.reparameterize(mu_mod, params[sample_idx].unsqueeze(0))
-                    else:
-                        if dim_idx < z_mod.shape[1]:
-                            z_mod[0, dim_idx] = val
-
+                    # traverse the flat latent dim directly for all distributions
+                    if dim_idx < z_mod.shape[1]:
+                        z_mod[0, dim_idx] = val
                     x_recon = model.decoder(z_mod)
                     img = (x_recon[0].cpu() * 0.5 + 0.5).clamp(0, 1)
                     axes[row, step_idx].imshow(img.permute(1, 2, 0))
@@ -485,6 +483,78 @@ def plot_attribute_traversal(model, loader, device, save_dir, attr_names,
     fig.suptitle(f"{dist}: attribute traversal via latent dimension manipulation", fontsize=11)
     plt.tight_layout()
     save_path = os.path.join(save_dir, "attribute_traversal.png")
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    return save_path
+
+
+def plot_decoded_bundles_by_attr(model, loader, device, save_path,
+                                attr_names, n_samples=2000, top_attrs=6):
+    """
+    bundle latent prototypes conditioned on celeba binary attributes and
+    decode to see if constituent features appear in the output image.
+    picks the most balanced attributes, computes mean latent for positive
+    samples, then bundles increasing numbers of attribute prototypes.
+    """
+    model.eval()
+    dist = getattr(model, "distribution", "gaussian")
+
+    all_z = []
+    all_attrs = []
+    with torch.no_grad():
+        for x, attrs in loader:
+            x = x.to(device)
+            # use flat latent (B, T*latent_dim) for bundle ops
+            z = model.get_flat_latent(x)
+            all_z.append(z)
+            all_attrs.append(attrs.to(device))
+            if sum(t.shape[0] for t in all_z) >= n_samples:
+                break
+    all_z = torch.cat(all_z, 0)[:n_samples]
+    all_attrs = torch.cat(all_attrs, 0)[:n_samples]
+
+    # pick attributes with reasonable positive rate (20-80%)
+    pos_rates = all_attrs.float().mean(dim=0)
+    balanced = ((pos_rates > 0.2) & (pos_rates < 0.8)).cpu()
+    candidates = [i for i in range(len(attr_names)) if balanced[i]]
+    if len(candidates) < top_attrs:
+        candidates = list(range(min(top_attrs, len(attr_names))))
+    selected = candidates[:top_attrs]
+
+    # compute mean latent for positive samples of each attribute
+    attr_means = {}
+    for idx in selected:
+        mask = all_attrs[:, idx] == 1
+        if mask.sum() > 0:
+            attr_means[idx] = all_z[mask].mean(dim=0)
+
+    # bundle increasing numbers of attributes
+    bundle_sizes = [1, 2, 3, min(4, len(attr_means))]
+    n_combos = 3
+    rng = np.random.RandomState(42)
+
+    fig, axes = plt.subplots(
+        len(bundle_sizes), n_combos,
+        figsize=(3 * n_combos, 3 * len(bundle_sizes)),
+    )
+    if len(bundle_sizes) == 1:
+        axes = axes.reshape(1, -1)
+
+    attr_keys = list(attr_means.keys())
+    with torch.no_grad():
+        for row, k in enumerate(bundle_sizes):
+            for col in range(n_combos):
+                chosen = rng.choice(attr_keys, size=min(k, len(attr_keys)), replace=False).tolist()
+                bundle = sum(attr_means[c] for c in chosen)
+                decoded = model.decoder(bundle.unsqueeze(0))
+                img = (decoded[0].cpu() * 0.5 + 0.5).clamp(0, 1)
+                axes[row, col].imshow(img.permute(1, 2, 0))
+                label = " + ".join(attr_names[c] for c in chosen)
+                axes[row, col].set_title(label, fontsize=5)
+                axes[row, col].axis("off")
+
+    fig.suptitle(f"{dist}: decoded bundles of attribute prototypes", fontsize=11)
+    plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
     return save_path
@@ -526,11 +596,12 @@ def compute_generation_fid(model, dist_name, latent_dim, test_loader, device,
             if n_real >= n_samples:
                 break
     l2_norm = getattr(model, "l2_normalize", False)
+    z_dim = getattr(model, "latent_dim", latent_dim)
     n_done = 0
     with torch.no_grad():
         while n_done < n_samples:
             bs = min(batch_size, n_samples - n_done)
-            z = sample_prior_z(dist_name, latent_dim, bs, device, l2_normalize=l2_norm)
+            z = sample_prior_z(dist_name, z_dim, bs, device, l2_normalize=l2_norm)
             imgs_01 = (model.decoder(z) * 0.5 + 0.5).clamp(0, 1)
             fid_metric.update(imgs_01, real=False)
             n_done += bs
@@ -599,18 +670,31 @@ def main(args):
                 else:
                     actual_dist = dist_name
                     l2_norm = False
-                model = VAE(
-                    latent_dim=latent_dim,
-                    in_channels=IN_CHANNELS,
-                    distribution=actual_dist,
-                    device=DEVICE,
-                    recon_loss_type=args.recon_loss,
-                    l1_weight=args.l1_weight,
-                    freq_weight=0.0,
-                    l2_normalize=l2_norm,
-                    img_size=IMG_SIZE,
-                    use_learnable_beta=args.use_learnable_beta,
-                )
+                if args.arch == "hybrid":
+                    model_latent_dim = max(4, latent_dim // 16)
+                    model = HybridVAE(
+                        latent_dim=model_latent_dim,
+                        in_channels=IN_CHANNELS,
+                        distribution=actual_dist,
+                        device=DEVICE,
+                        recon_loss_type=args.recon_loss,
+                        l1_weight=args.l1_weight,
+                        l2_normalize=l2_norm,
+                        use_learnable_beta=args.use_learnable_beta,
+                        img_size=IMG_SIZE,
+                    )
+                else:
+                    model = CliffordARVAE(
+                        latent_dim=latent_dim,
+                        image_size=IMG_SIZE,
+                        in_channels=IN_CHANNELS,
+                        distribution=actual_dist,
+                        device=DEVICE,
+                        recon_loss_type=args.recon_loss,
+                        l1_weight=args.l1_weight,
+                        l2_normalize=l2_norm,
+                        use_learnable_beta=args.use_learnable_beta,
+                    )
                 logger.watch_model(model)
                 if args.use_learnable_beta:
                     sigma_ids = {id(model.log_sigma_0), id(model.log_sigma_1)}
@@ -717,6 +801,17 @@ def main(args):
                     )
                     print(f"  completed in {time.time() - t0:.2f}s")
 
+                    # decoded bundle visualization using attribute-based prototypes
+                    t0 = time.time()
+                    print(f"generating decoded bundle visualization...")
+                    bundle_path = plot_decoded_bundles_by_attr(
+                        model, test_loader, DEVICE,
+                        f"{output_dir}/decoded_bundles.png",
+                        attr_names=attr_names,
+                        n_samples=2000,
+                    )
+                    print(f"  completed in {time.time() - t0:.2f}s")
+
                     t0 = time.time()
                     print(f"generating latent interpolations...")
                     interp_path = plot_latent_interpolations(
@@ -735,8 +830,8 @@ def main(args):
                         latents = []
                         for x, _ in test_loader:
                             x = x.to(DEVICE)
-                            _, _, _, mu = model(x)
-                            latents.append(mu.detach())
+                            # get_flat_latent returns (B, T*latent_dim) for vsa ops
+                            latents.append(model.get_flat_latent(x).detach())
                             if sum(l.shape[0] for l in latents) >= 1000:
                                 break
                         item_memory = torch.cat(latents, 0)[:1000]
@@ -754,14 +849,17 @@ def main(args):
                     )
                     print(f"  completed in {time.time() - t0:.2f}s")
 
+                    # deconv self-binding ablation
+                    deconv_dir = f"{output_dir}/deconv"
+                    os.makedirs(deconv_dir, exist_ok=True)
                     t0 = time.time()
-                    print(f"running cross-class bind/unbind test ({dist_name})...")
-                    cross_class_star = test_cross_class_bind_unbind(
+                    print(f"running self-binding test deconv ({dist_name})...")
+                    fourier_deconv = test_self_binding(
                         model,
                         test_loader,
                         DEVICE,
-                        output_dir,
-                        unbind_method="*",
+                        deconv_dir,
+                        unbind_method="†",
                         img_shape=IMG_SHAPE,
                     )
                     print(f"  completed in {time.time() - t0:.2f}s")
@@ -784,20 +882,34 @@ def main(args):
 
                     # role-filler unbinding (schlegel et al. sec 3.3)
                     t0 = time.time()
-                    print(f"running role-filler unbinding test ({dist_name})...")
-                    role_filler_raw = vsa_binding_unbinding(
-                        d=item_memory.shape[-1],
-                        n_items=min(1000, item_memory.shape[0]),
-                        k_range=RF_K_RANGE,
-                        n_trials=20,
-                        normalize=True,
-                        device=DEVICE,
-                        plot=True,
-                        unbind_method="*",
-                        save_dir=output_dir,
-                        item_memory=item_memory,
-                        bind_with_random=True,
-                    )
+                    print(f"running role-filler unbinding tests ({dist_name})...")
+                    normalize_vectors = True
+                    rf_variants = [
+                        (False, False, "*", output_dir, "role_filler_no_random_keys"),
+                        (False, False, "†", deconv_dir, "role_filler_no_random_keys_deconv"),
+                    ]
+                    rf_results = {}
+                    for bind_rand, braid, ubmethod, save_d, rf_name in rf_variants:
+                        rf_res = vsa_binding_unbinding(
+                            d=item_memory.shape[-1],
+                            n_items=min(1000, item_memory.shape[0]),
+                            k_range=RF_K_RANGE,
+                            n_trials=20,
+                            normalize=normalize_vectors,
+                            device=DEVICE,
+                            plot=True,
+                            unbind_method=ubmethod,
+                            save_dir=save_d,
+                            item_memory=item_memory,
+                            bind_with_random=bind_rand,
+                            use_braiding=braid,
+                        )
+                        rf_results[rf_name] = rf_res
+                        default_plot = os.path.join(save_d, "role_filler_capacity.png")
+                        variant_plot = os.path.join(save_d, f"{rf_name}.png")
+                        if os.path.exists(default_plot):
+                            os.rename(default_plot, variant_plot)
+                    role_filler_raw = rf_results.get("role_filler_no_random_keys", {})
                     print(f"  completed in {time.time() - t0:.2f}s")
 
                     t0 = time.time()
@@ -832,12 +944,20 @@ def main(args):
                             if isinstance(v, (int, float, bool))
                         }
                     )
+                    fourier_metrics.update(
+                        {
+                            f"†/{k}": v
+                            for k, v in fourier_deconv.items()
+                            if isinstance(v, (int, float, bool))
+                        }
+                    )
 
                     images.update(
                         {
                             "reconstructions": recon_path,
                             "latent_distributions": latent_dist_path,
                             "latent_interpolation": interp_path,
+                            "decoded_bundles": bundle_path,
                         }
                     )
 
@@ -849,9 +969,9 @@ def main(args):
                     bc_plot = os.path.join(output_dir, "bundle_capacity.png")
                     if os.path.exists(bc_plot):
                         images["bundle_capacity"] = bc_plot
-                    rf_plot = os.path.join(output_dir, "role_filler_capacity.png")
+                    rf_plot = os.path.join(output_dir, "role_filler_no_random_keys.png")
                     if os.path.exists(rf_plot):
-                        images["role_filler_capacity"] = rf_plot
+                        images["role_filler_no_random_keys"] = rf_plot
 
                     sp = fourier_star.get("similarity_after_k_binds_plot_path")
                     if sp:
@@ -863,6 +983,27 @@ def main(args):
                         images["cross_class_binding_star"] = cross_class_star[
                             "cross_class_bind_unbind_plot_path"
                         ]
+
+                    # deconv plot paths
+                    sp_d = fourier_deconv.get("similarity_after_k_binds_plot_path")
+                    if sp_d:
+                        images["similarity_after_k_binds_†"] = sp_d
+                    rp_d = fourier_deconv.get("recon_after_k_binds_plot_path")
+                    if rp_d:
+                        images["recon_after_k_binds_†"] = rp_d
+                    if cross_class_deconv.get("cross_class_bind_unbind_plot_path"):
+                        images["cross_class_binding_deconv"] = cross_class_deconv[
+                            "cross_class_bind_unbind_plot_path"
+                        ]
+                    # deconv role-filler plots
+                    for rf_name in ["role_filler_no_random_keys_deconv"]:
+                        rf_p = os.path.join(deconv_dir, f"{rf_name}.png")
+                        if os.path.exists(rf_p):
+                            images[rf_name] = rf_p
+                    # star role-filler no-random-keys plot
+                    rf_nr = os.path.join(output_dir, "role_filler_no_random_keys.png")
+                    if os.path.exists(rf_nr):
+                        images["role_filler_no_random_keys"] = rf_nr
 
                     if dist_name == "clifford" and 2 <= model.latent_dim <= 8:
                         cliff_viz = plot_clifford_manifold_visualization(
@@ -894,6 +1035,9 @@ def main(args):
                             "cross_class_bind_unbind_similarity_star": cross_class_star.get(
                                 "cross_class_bind_unbind_similarity", 0.0
                             ),
+                            "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
+                                "cross_class_bind_unbind_similarity", 0.0
+                            ),
                         }
                     )
 
@@ -903,6 +1047,12 @@ def main(args):
                         "generation_fid": gen_fid,
                         "max_attr_correlation": corr_results["corr_data"]["max_abs_correlation"],
                         "mean_attr_correlation": corr_results["corr_data"]["mean_abs_correlation"],
+                        "cross_class_bind_unbind_similarity_star": cross_class_star.get(
+                            "cross_class_bind_unbind_similarity", 0.0
+                        ),
+                        "cross_class_bind_unbind_similarity_deconv": cross_class_deconv.get(
+                            "cross_class_bind_unbind_similarity", 0.0
+                        ),
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)
@@ -1050,5 +1200,7 @@ if __name__ == "__main__":
         default=[256, 512, 1024, 2048],
         help="latent dims to test",
     )
+    p.add_argument("--arch", type=str, default="vit", choices=["vit", "hybrid"],
+                    help="architecture: vit (CNN+ViT) or hybrid (CNN-only per-token)")
     args = p.parse_args()
     main(args)
