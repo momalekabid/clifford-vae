@@ -199,13 +199,13 @@ def test_bundle_capacity(
         display_d = baseline_d if baseline_d is not None else d
         plt.figure(figsize=(8, 5))
         plt.errorbar(results["k"], results["accuracy"], yerr=results["std"],
-                     marker="o", capsize=3, label="learned latents", color="tab:blue", linewidth=2)
+                     marker="o", capsize=3, label="Learned Latents", color="tab:blue", linewidth=2)
         plt.errorbar(baselines["HRR"]["k"], baselines["HRR"]["accuracy"],
                      yerr=baselines["HRR"]["std"], marker="^", capsize=3,
-                     label="HRR (random)", color="tab:gray", linestyle="--", alpha=0.8)
+                     label="HRR (Random)", color="tab:gray", linestyle="--", alpha=0.8)
         plt.errorbar(baselines["unitary"]["k"], baselines["unitary"]["accuracy"],
                      yerr=baselines["unitary"]["std"], marker="v", capsize=3,
-                     label="unitary (FHRR)", color="tab:green", linestyle="--", alpha=0.8)
+                     label="Random Unitary", color="tab:green", linestyle="--", alpha=0.8)
         plt.xlabel("Number of Bundled Vectors ($k$)")
         plt.ylabel("Retrieval Accuracy")
         plt.title(f"Bundle Capacity ($d={display_d}$, $N={n_items}$)")
@@ -376,13 +376,13 @@ def test_binding_unbinding_pairs(
         bind_label = " (Random Keys)" if bind_with_random else ""
         plt.figure(figsize=(8, 5))
         plt.errorbar(results["k"], results["accuracy"], yerr=results["std"],
-                     marker="s", capsize=3, label="learned latents", color="tab:blue", linewidth=2)
+                     marker="s", capsize=3, label="Learned Latents", color="tab:blue", linewidth=2)
         plt.errorbar(baselines["HRR"]["k"], baselines["HRR"]["accuracy"],
                      yerr=baselines["HRR"]["std"], marker="^", capsize=3,
-                     label="HRR (random)", color="tab:gray", linestyle="--", alpha=0.8)
+                     label="HRR (Random)", color="tab:gray", linestyle="--", alpha=0.8)
         plt.errorbar(baselines["unitary"]["k"], baselines["unitary"]["accuracy"],
                      yerr=baselines["unitary"]["std"], marker="v", capsize=3,
-                     label="unitary (FHRR)", color="tab:green", linestyle="--", alpha=0.8)
+                     label="Random Unitary", color="tab:green", linestyle="--", alpha=0.8)
         plt.xlabel("Number of Bundled Role-Filler Pairs ($k$)")
         plt.ylabel("Unbinding Accuracy")
         plt.title(f"Role-Filler Query Capacity{bind_label} ($d={display_d}$, $N={n_items}$)")

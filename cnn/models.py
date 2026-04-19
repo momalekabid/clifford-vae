@@ -16,7 +16,6 @@ from dists.clifford import (
 
 
 class ResBlock(nn.Module):
-    """conv block with residual skip connection and stride-2 downsampling."""
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.conv = nn.Conv2d(in_ch, out_ch, 4, 2, 1)
@@ -29,7 +28,6 @@ class ResBlock(nn.Module):
 
 
 class ResUpBlock(nn.Module):
-    """transpose conv block with residual skip connection and stride-2 upsampling."""
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.conv = nn.ConvTranspose2d(in_ch, out_ch, 4, 2, 1)

@@ -1,7 +1,3 @@
-# cifar-10 training with flat-latent CNN VAE
-# compares clifford vs powerspherical vs gaussian distributions
-# all use the same CNN encoder/decoder with constant-norm latents
-
 import argparse
 import os
 import random
@@ -758,6 +754,36 @@ def main(args):
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)
+
+                    # log vsa curve data as wandb tables so we can reconstruct figures later
+                    try:
+                        import wandb as _wandb
+                        if _wandb.run is not None:
+                            bc = bundle_cap_raw
+                            if bc and bc.get("k"):
+                                _wandb.log({"bundle_capacity_data": _wandb.Table(
+                                    columns=["k", "accuracy", "std"],
+                                    data=list(zip(bc["k"], bc["accuracy"], bc["std"])),
+                                )})
+                            rf = role_filler_raw
+                            if rf and rf.get("k"):
+                                _wandb.log({"role_filler_data": _wandb.Table(
+                                    columns=["k", "accuracy", "std"],
+                                    data=list(zip(rf["k"], rf["accuracy"], rf["std"])),
+                                )})
+                            for key_name, src in [
+                                ("binding_depth_star", fourier_star),
+                                ("binding_depth_dagger", fourier_deconv),
+                            ]:
+                                ks = src.get("k_values", [])
+                                sims = src.get("k_sims", [])
+                                if ks and sims:
+                                    _wandb.log({f"{key_name}_data": _wandb.Table(
+                                        columns=["m", "cosine_sim"],
+                                        data=list(zip(ks, sims)),
+                                    )})
+                    except Exception:
+                        pass
 
                     metrics_save_path = f"{output_dir}/metrics.json"
                     with open(metrics_save_path, "w") as f:

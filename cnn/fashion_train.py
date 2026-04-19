@@ -925,7 +925,7 @@ def main(args):
                         item_labels = torch.cat(labels_list, 0)[:1000].to(DEVICE)
                         item_images = torch.cat(images_list, 0)[:1000]
 
-                        # === test 1: 1-item-per-class similarity matrix (no braiding) ===
+                        # 1-item-per-class similarity matrix
                         t0 = time.time()
                         print(
                             f"running 1-item-per-class test ({dist_name}, no braiding)..."
@@ -948,7 +948,7 @@ def main(args):
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # === test 2: bundle capacity (schlegel et al. sec 3.1) ===
+                        # bundle capacity
                         t0 = time.time()
                         print(f"running bundle capacity test ({dist_name})...")
                         bundle_cap_raw = vsa_bundle_capacity(
@@ -966,7 +966,7 @@ def main(args):
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
-                        # === test 4: role-filler unbinding (schlegel et al. sec 3.3) ===
+                        # role-filler unbinding
                         t0 = time.time()
                         print(f"running role-filler unbinding test ({dist_name})...")
                         rf_results = {}
@@ -1257,6 +1257,41 @@ def main(args):
                         }
                         logger.log_summary(summary)
                         logger.log_images(images)
+
+                        # log vsa curve data as wandb tables so we can reconstruct figures later
+                        try:
+                            import wandb as _wandb
+                            if _wandb.run is not None:
+                                # bundle capacity
+                                bc = bundle_cap_raw
+                                if bc and bc.get("k"):
+                                    _wandb.log({"bundle_capacity_data": _wandb.Table(
+                                        columns=["k", "accuracy", "std"],
+                                        data=list(zip(bc["k"], bc["accuracy"], bc["std"])),
+                                    )})
+
+                                # role-filler capacity
+                                rf = role_filler_raw
+                                if rf and rf.get("k"):
+                                    _wandb.log({"role_filler_data": _wandb.Table(
+                                        columns=["k", "accuracy", "std"],
+                                        data=list(zip(rf["k"], rf["accuracy"], rf["std"])),
+                                    )})
+
+                                # binding depth (* and †)
+                                for key_name, src in [
+                                    ("binding_depth_star", fourier_star),
+                                    ("binding_depth_dagger", fourier_perp),
+                                ]:
+                                    ks = src.get("k_values", [])
+                                    sims = src.get("k_sims", [])
+                                    if ks and sims:
+                                        _wandb.log({f"{key_name}_data": _wandb.Table(
+                                            columns=["m", "cosine_sim"],
+                                            data=list(zip(ks, sims)),
+                                        )})
+                        except Exception:
+                            pass
 
                         metrics_save_path = f"{output_dir}/metrics.json"
                         with open(metrics_save_path, "w") as f:

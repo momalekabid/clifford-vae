@@ -142,13 +142,13 @@ def test_self_binding(
     os.makedirs(output_dir, exist_ok=True)
     fig, ax = plt.subplots(figsize=(8, 4))
 
-    ax.plot(depths, self_means, "o-", markersize=5, label="self-binding", color="tab:blue", linewidth=2)
+    ax.plot(depths, self_means, "o-", markersize=5, label="Self-Binding", color="tab:blue", linewidth=2)
     ax.fill_between(depths,
                     [m - s for m, s in zip(self_means, self_stds)],
                     [m + s for m, s in zip(self_means, self_stds)],
                     alpha=0.15, color="tab:blue")
 
-    ax.plot(depths, rand_means, "s-", markersize=5, label="random latent partners", color="tab:orange", linewidth=2)
+    ax.plot(depths, rand_means, "s-", markersize=5, label="Random Latent Partners", color="tab:orange", linewidth=2)
     ax.fill_between(depths,
                     [m - s for m, s in zip(rand_means, rand_stds)],
                     [m + s for m, s in zip(rand_means, rand_stds)],
@@ -157,8 +157,8 @@ def test_self_binding(
     # baselines: use encoder dim (not bivector dim) so clifford compares fairly
     d = getattr(model, "latent_dim", all_z.shape[-1])
     for bname, init_fn, color, marker in [
-        ("HRR", hrr_init, "tab:gray", "^"),
-        ("unitary (FHRR)", unitary_init, "tab:green", "v"),
+        ("HRR (Random)", hrr_init, "tab:gray", "^"),
+        ("Random Unitary", unitary_init, "tab:green", "v"),
     ]:
         b_depth_sims = {m: [] for m in range(1, max_depth + 1)}
         for trial in range(n_trials):

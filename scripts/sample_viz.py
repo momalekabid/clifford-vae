@@ -3,19 +3,31 @@ interactive 3D visualization of samples from clifford torus, powerspherical,
 and gaussian distributions on the unit sphere.
 projects nD samples onto first 3 coordinates with wireframe sphere.
 sliders for concentration (kappa) and latent dimension.
+
+usage:
+  python sample_viz.py              # interactive mode with sliders
+  python sample_viz.py --save       # save static high-dpi figure to figures/
+  python sample_viz.py --save --dim 8 --kappa 10
 """
 
 import sys
+import argparse
 sys.path.insert(0, "..")
 
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Slider
 from dists.clifford import (
     CliffordPowerSphericalDistribution,
     PowerSpherical,
 )
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--save", action="store_true", help="save static figure instead of showing interactive")
+parser.add_argument("--dim", type=int, default=4, help="latent dimension for static figure")
+parser.add_argument("--kappa", type=float, default=5.0, help="concentration for static figure")
+parser.add_argument("--out", type=str, default="figures/distribution_samples_3d.png")
+args = parser.parse_args()
 
 N_SAMPLES = 3000
 
@@ -102,64 +114,69 @@ COLUMNS = [
     ("clifford (PS)", sample_clifford_ps, False),
 ]
 
-fig = plt.figure(figsize=(22, 5))
-fig.subplots_adjust(bottom=0.22, wspace=0.02, top=0.88, left=0.02, right=0.98)
+if args.save:
+    import os
+    os.makedirs(os.path.dirname(args.out) if os.path.dirname(args.out) else ".", exist_ok=True)
 
-axes = []
-for i in range(5):
-    ax = fig.add_subplot(1, 5, i + 1, projection="3d")
-    axes.append(ax)
+    fig = plt.figure(figsize=(22, 5))
+    fig.subplots_adjust(wspace=0.02, top=0.88, left=0.02, right=0.98, bottom=0.08)
+    axes = [fig.add_subplot(1, 5, i + 1, projection="3d") for i in range(5)]
 
-
-def redraw(kappa, dim):
-    dim = int(dim)
+    kappa, dim = args.kappa, int(args.dim)
     for i, (name, func, do_norm) in enumerate(COLUMNS):
         samples = func(kappa, dim)
-        if do_norm:
-            pts = to_3d(normalize(samples))
-        else:
-            pts = to_3d(samples)
-
+        pts = to_3d(normalize(samples) if do_norm else samples)
         ax = axes[i]
-        ax.cla()
-
-        # wireframe sphere for everything except raw gaussian
         if name != "gaussian (raw)":
             draw_wireframe(ax)
-
-        color = COLORS[name]
-        ax.scatter(
-            pts[:, 0], pts[:, 1], pts[:, 2],
-            s=0.5, alpha=0.3, c=color, depthshade=True,
-        )
-        ax.set_title(name, fontsize=10, pad=2)
-
-        # raw gaussian can exceed unit sphere, auto-scale it
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                   s=0.5, alpha=0.3, c=COLORS[name], depthshade=True)
+        ax.set_title(name, fontsize=11, pad=4)
         if name == "gaussian (raw)":
-            margin = 0.2
-            lim = max(np.abs(pts).max() + margin, 1.2)
+            lim = max(np.abs(pts).max() + 0.2, 1.2)
             setup_ax(ax, lim=lim)
         else:
             setup_ax(ax)
 
-    fig.suptitle(
-        f"samples projected to 3D  (dim={dim}, κ={kappa:.1f})", fontsize=13
-    )
-    fig.canvas.draw_idle()
+    fig.suptitle(f"samples projected to 3D  (dim={dim}, κ={kappa:.1f})", fontsize=14)
+    plt.savefig(args.out, dpi=500, bbox_inches="tight")
+    plt.close()
+    print(f"saved to {args.out}")
 
+else:
+    # interactive mode with sliders
+    fig = plt.figure(figsize=(22, 5))
+    fig.subplots_adjust(bottom=0.22, wspace=0.02, top=0.88, left=0.02, right=0.98)
+    axes = [fig.add_subplot(1, 5, i + 1, projection="3d") for i in range(5)]
 
-def on_slider(_):
-    redraw(slider_kappa.val, slider_dim.val)
+    def redraw(kappa, dim):
+        dim = int(dim)
+        for i, (name, func, do_norm) in enumerate(COLUMNS):
+            samples = func(kappa, dim)
+            pts = to_3d(normalize(samples) if do_norm else samples)
+            ax = axes[i]
+            ax.cla()
+            if name != "gaussian (raw)":
+                draw_wireframe(ax)
+            ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                       s=0.5, alpha=0.3, c=COLORS[name], depthshade=True)
+            ax.set_title(name, fontsize=10, pad=2)
+            if name == "gaussian (raw)":
+                lim = max(np.abs(pts).max() + 0.2, 1.2)
+                setup_ax(ax, lim=lim)
+            else:
+                setup_ax(ax)
+        fig.suptitle(f"samples projected to 3D  (dim={dim}, κ={kappa:.1f})", fontsize=13)
+        fig.canvas.draw_idle()
 
+    from matplotlib.widgets import Slider
+    ax_kappa = fig.add_axes([0.15, 0.09, 0.7, 0.03])
+    slider_kappa = Slider(ax_kappa, "κ", 0.1, 100.0, valinit=5.0, valstep=0.5)
+    slider_kappa.on_changed(lambda _: redraw(slider_kappa.val, slider_dim.val))
 
-# sliders
-ax_kappa = fig.add_axes([0.15, 0.09, 0.7, 0.03])
-slider_kappa = Slider(ax_kappa, "κ", 0.1, 100.0, valinit=5.0, valstep=0.5)
-slider_kappa.on_changed(on_slider)
+    ax_dim = fig.add_axes([0.15, 0.03, 0.7, 0.03])
+    slider_dim = Slider(ax_dim, "dim", 2, 32, valinit=4, valstep=1)
+    slider_dim.on_changed(lambda _: redraw(slider_kappa.val, slider_dim.val))
 
-ax_dim = fig.add_axes([0.15, 0.03, 0.7, 0.03])
-slider_dim = Slider(ax_dim, "dim", 2, 32, valinit=4, valstep=1)
-slider_dim.on_changed(on_slider)
-
-redraw(5.0, 4)
-plt.show()
+    redraw(5.0, 4)
+    plt.show()
