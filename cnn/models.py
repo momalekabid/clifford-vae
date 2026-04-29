@@ -90,7 +90,7 @@ class Encoder(nn.Module):
             return mu, self.fc_log_var(x)
         elif self.distribution == "powerspherical":
             mu = F.normalize(mu, p=2, dim=-1)
-            kappa = torch.clamp(F.softplus(self.fc_concentration(x)) + 0.8, max=10.0)
+            kappa = torch.clamp(F.softplus(self.fc_concentration(x)) + 0.5, max=10.0)
             return mu, kappa
         elif self.distribution == "clifford":
             kappa = torch.clamp(F.softplus(self.fc_concentration(x)) + self.concentration_floor, max=10.0)
