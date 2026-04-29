@@ -375,7 +375,7 @@ def main(args):
 
     dist_lr = {
         "clifford": args.lr,
-        "powerspherical": 5e-5,
+        "powerspherical": 1e-4,
         "gaussian": args.lr,
     }
 
