@@ -1394,6 +1394,24 @@ def main(args):
                     dim_results, latent_dim, dataset_name, comp_dir
                 )
                 print(f"saved cross-dist comparison to {comp_path}")
+                # also log the consolidated comparison png to wandb under a
+                # dedicated summary run so it's viewable alongside the per-dist runs
+                if not args.no_wandb and comp_path and os.path.exists(comp_path):
+                    try:
+                        import wandb as _wandb
+                        summary_run = _wandb.init(
+                            project=args.wandb_project,
+                            name=f"comparison-{dataset_name}-d{latent_dim}",
+                            job_type="comparison",
+                            reinit=True,
+                            config={"dataset": dataset_name, "latent_dim": latent_dim},
+                        )
+                        _wandb.log({
+                            f"vsa_comparison_d{latent_dim}": _wandb.Image(comp_path),
+                        })
+                        summary_run.finish()
+                    except Exception as e:
+                        print(f"warning: wandb upload of cross-dist plot failed: {e}")
             except Exception as e:
                 print(f"warning: cross-dist comparison failed for d={latent_dim}: {e}")
 
