@@ -1493,7 +1493,7 @@ if __name__ == "__main__":
     p.add_argument(
         "--cycle_epochs",
         type=int,
-        default=100,
+        default=500,
         help="cycle length for cyclical kl beta (0=off)",
     )
     p.add_argument(
