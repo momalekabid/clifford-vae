@@ -1256,6 +1256,15 @@ def main(args):
                             json.dump(summary, f, indent=2)
                         print(f"saved metrics to {metrics_save_path}")
 
+                        # delete checkpoint after eval unless --keep_ckpts
+                        if not args.keep_ckpts:
+                            ckpt_path = f"{output_dir}/best_model.pt"
+                            if os.path.exists(ckpt_path):
+                                try:
+                                    os.remove(ckpt_path)
+                                except Exception as e:
+                                    print(f"warning: failed to delete {ckpt_path}: {e}")
+
                         eval_time = time.time() - eval_start_time
                         exp_time = time.time() - exp_start_time
 
@@ -1483,6 +1492,7 @@ if __name__ == "__main__":
         help="use learnable beta (L-VAE) instead of fixed/scheduled beta - eliminates need for warmup and beta scheduling",
     )
     p.add_argument("--no_wandb", action="store_true", help="disable wandb logging")
+    p.add_argument("--keep_ckpts", action="store_true", help="keep best_model.pt files (default: delete after eval to save disk)")
     p.add_argument(
         "--wandb_project",
         type=str,

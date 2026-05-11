@@ -768,6 +768,15 @@ def main(args):
                     with open(metrics_save_path, "w") as f:
                         json.dump(summary, f, indent=2)
 
+                    # delete checkpoint after eval unless --keep_ckpts
+                    if not args.keep_ckpts:
+                        ckpt_path = f"{output_dir}/best_model.pt"
+                        if os.path.exists(ckpt_path):
+                            try:
+                                os.remove(ckpt_path)
+                            except Exception as e:
+                                print(f"warning: failed to delete {ckpt_path}: {e}")
+
                     eval_time = time.time() - eval_start_time
                     exp_time = time.time() - exp_start_time
                     timing_results[exp_name] = {
@@ -970,7 +979,7 @@ if __name__ == "__main__":
     p.add_argument("--epochs", type=int, default=500, help="training epochs")
     p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs")
     p.add_argument("--batch_size", type=int, default=256, help="batch size")
-    p.add_argument("--lr", type=float, default=1e-3, help="learning rate")
+    p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
     p.add_argument(
         "--no-l2_norm",
         dest="l2_norm",
@@ -984,6 +993,7 @@ if __name__ == "__main__":
     p.add_argument("--min_beta", type=float, default=0.1)
     p.add_argument("--use_learnable_beta", action="store_true")
     p.add_argument("--no_wandb", action="store_true", help="disable wandb logging")
+    p.add_argument("--keep_ckpts", action="store_true", help="keep best_model.pt files (default: delete after eval to save disk)")
     p.add_argument(
         "--wandb_project", type=str, default="clifford-experiments-CNN-cifar10"
     )
