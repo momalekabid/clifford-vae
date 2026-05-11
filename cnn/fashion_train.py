@@ -1454,10 +1454,10 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(
         description="clifford vae experiments on fashionmnist"
     )
-    p.add_argument("--epochs", type=int, default=1000, help="training epochs")
+    p.add_argument("--epochs", type=int, default=500, help="training epochs")
     p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs (ignored if --use_learnable_beta)")
     p.add_argument("--batch_size", type=int, default=256, help="batch size")
-    p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
+    p.add_argument("--lr", type=float, default=1e-3, help="learning rate")
     p.add_argument(
         "--no-l2_norm",
         dest="l2_norm",
@@ -1489,11 +1489,11 @@ if __name__ == "__main__":
         default="clifford-experiments-CNN",
         help="wandb project name",
     )
-    p.add_argument("--patience", type=int, default=25, help="early stopping patience")
+    p.add_argument("--patience", type=int, default=50, help="early stopping patience")
     p.add_argument(
         "--cycle_epochs",
         type=int,
-        default=500,
+        default=250,
         help="cycle length for cyclical kl beta (0=off)",
     )
     p.add_argument(

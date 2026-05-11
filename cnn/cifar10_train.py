@@ -967,10 +967,10 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(
         description="cifar-10 VAE experiments with cliffordAR S-VAE + baselines"
     )
-    p.add_argument("--epochs", type=int, default=1000, help="training epochs")
+    p.add_argument("--epochs", type=int, default=500, help="training epochs")
     p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs")
     p.add_argument("--batch_size", type=int, default=256, help="batch size")
-    p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
+    p.add_argument("--lr", type=float, default=1e-3, help="learning rate")
     p.add_argument(
         "--no-l2_norm",
         dest="l2_norm",
@@ -987,8 +987,8 @@ if __name__ == "__main__":
     p.add_argument(
         "--wandb_project", type=str, default="clifford-experiments-CNN-cifar10"
     )
-    p.add_argument("--patience", type=int, default=25, help="early stopping patience")
-    p.add_argument("--cycle_epochs", type=int, default=500)
+    p.add_argument("--patience", type=int, default=50, help="early stopping patience")
+    p.add_argument("--cycle_epochs", type=int, default=250)
     p.add_argument("--n_trials", type=int, default=30)
     p.add_argument(
         "--exclude_class",
