@@ -38,6 +38,7 @@ from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
     test_per_class_bundle_capacity_k_items,
+    unitary_init as vsa_unitary_init,
 
     bind as vsa_bind,
     unbind as vsa_unbind,
@@ -938,7 +939,7 @@ def main(args):
                             n_trials=1,
                             normalize=normalize_vectors,
                             device=DEVICE,
-                            plot=True,
+                            plot=False,
                             save_dir=output_dir,
                             item_memory=item_memory,
                             labels=item_labels,
@@ -958,7 +959,7 @@ def main(args):
                             n_trials=20,
                             normalize=normalize_vectors,
                             device=DEVICE,
-                            plot=True,
+                            plot=False,
                             save_dir=output_dir,
                             item_memory=item_memory,
                             use_braiding=False,
@@ -978,7 +979,7 @@ def main(args):
                             n_trials=20,
                             normalize=normalize_vectors,
                             device=DEVICE,
-                            plot=True,
+                            plot=False,
                             unbind_method="*",
                             save_dir=output_dir,
                             item_memory=item_memory,
@@ -1025,29 +1026,22 @@ def main(args):
                         )
                         print(f"  completed in {time.time() - t0:.2f}s")
 
-                        t0 = time.time()
-                        print(f"generating latent distribution visualization...")
-                        latent_dist_path = plot_latent_distributions(
-                            model,
-                            test_loader,
-                            DEVICE,
-                            f"{output_dir}/latent_distributions.png",
-                            n_dims=50,
-                            n_samples=2000,
-                        )
-                        print(f"  completed in {time.time() - t0:.2f}s")
+                        # latent distributions plot disabled to save time/space
+                        latent_dist_path = None
 
-                        # t-sne visualization of latent space
-                        t0 = time.time()
-                        print(f"generating t-sne visualization...")
-                        tsne_path = plot_latent_tsne(
-                            model,
-                            test_loader,
-                            DEVICE,
-                            f"{output_dir}/tsne.png",
-                            n_samples=2000,
-                        )
-                        print(f"  completed in {time.time() - t0:.2f}s")
+                        # t-sne: only on first trial per (dim, dist) to save time
+                        tsne_path = None
+                        if trial == 0:
+                            t0 = time.time()
+                            print(f"generating t-sne visualization...")
+                            tsne_path = plot_latent_tsne(
+                                model,
+                                test_loader,
+                                DEVICE,
+                                f"{output_dir}/tsne.png",
+                                n_samples=2000,
+                            )
+                            print(f"  completed in {time.time() - t0:.2f}s")
 
                         # decoded bundle visualization
                         t0 = time.time()
@@ -1134,51 +1128,23 @@ def main(args):
                         images.update(
                             {
                                 "reconstructions": recon_path,
-                                "latent_distributions": latent_dist_path,
                                 "tsne": tsne_path,
                                 "latent_interpolation": interp_path,
                                 "decoded_bundles": bundle_viz_path,
                             }
                         )
 
-                        two_per_class_plot = os.path.join(
-                            output_dir, "bundle_similarity_matrix.png"
-                        )
-                        if os.path.exists(two_per_class_plot):
-                            images["bundle_similarity_matrix"] = two_per_class_plot
-                        bc_plot = os.path.join(output_dir, "bundle_capacity.png")
-                        if os.path.exists(bc_plot):
-                            images["bundle_capacity"] = bc_plot
-                        rf_plot = os.path.join(output_dir, "role_filler_capacity.png")
-                        if os.path.exists(rf_plot):
-                            images["role_filler_capacity"] = rf_plot
+                        # cross-class bind/unbind test (shirt=6 vs sandal=5) — kept for qualitative check, no wandb image
+                        if trial == 0:
+                            print(f"running cross-class bind/unbind test...")
+                            test_cross_class_bind_unbind(
+                                model, test_loader, DEVICE, output_dir,
+                                img_shape=IMG_SHAPE,
+                                class_a=5, class_b=6,
+                            )
 
-                        # cross-class bind/unbind test (shirt=6 vs sandal=5)
-                        print(f"running cross-class bind/unbind test...")
-                        cross_class_result = test_cross_class_bind_unbind(
-                            model, test_loader, DEVICE, output_dir,
-                            img_shape=IMG_SHAPE,
-                            class_a=5, class_b=6,
-                        )
-                        ccp = cross_class_result.get("cross_class_bind_unbind_plot_path")
-                        if ccp and os.path.exists(ccp):
-                            images["cross_class_binding"] = ccp
-
-                        sp = fourier_star.get("similarity_after_k_binds_plot_path")
-                        sd = fourier_perp.get("similarity_after_k_binds_plot_path")
-                        if sp:
-                            images["similarity_after_k_binds_*"] = sp
-                        if sd:
-                            images["similarity_after_k_binds_†"] = sd
-
-                        rp = fourier_star.get("recon_after_k_binds_plot_path")
-                        rd = fourier_perp.get("recon_after_k_binds_plot_path")
-                        if rp:
-                            images["recon_after_k_binds_*"] = rp
-                        if rd:
-                            images["recon_after_k_binds_†"] = rd
-
-                        if dist_name == "clifford" and 2 <= model.latent_dim <= 256:
+                        # manifold viz disabled (per user); per-trial vsa plots disabled — comparison plot is the canonical view
+                        if False and dist_name == "clifford" and 2 <= model.latent_dim <= 256:
                             cliff_viz = plot_clifford_manifold_visualization(
                                 model,
                                 DEVICE,
@@ -1258,40 +1224,32 @@ def main(args):
                         logger.log_summary(summary)
                         logger.log_images(images)
 
-                        # log vsa curve data as wandb tables so we can reconstruct figures later
+                        # save raw vsa curve data to disk so we can replot locally without wandb
                         try:
-                            import wandb as _wandb
-                            if _wandb.run is not None:
-                                # bundle capacity
-                                bc = bundle_cap_raw
-                                if bc and bc.get("k"):
-                                    _wandb.log({"bundle_capacity_data": _wandb.Table(
-                                        columns=["k", "accuracy", "std"],
-                                        data=list(zip(bc["k"], bc["accuracy"], bc["std"])),
-                                    )})
-
-                                # role-filler capacity
-                                rf = role_filler_raw
-                                if rf and rf.get("k"):
-                                    _wandb.log({"role_filler_data": _wandb.Table(
-                                        columns=["k", "accuracy", "std"],
-                                        data=list(zip(rf["k"], rf["accuracy"], rf["std"])),
-                                    )})
-
-                                # binding depth (* and †)
-                                for key_name, src in [
-                                    ("binding_depth_star", fourier_star),
-                                    ("binding_depth_dagger", fourier_perp),
-                                ]:
-                                    ks = src.get("k_values", [])
-                                    sims = src.get("k_sims", [])
-                                    if ks and sims:
-                                        _wandb.log({f"{key_name}_data": _wandb.Table(
-                                            columns=["m", "cosine_sim"],
-                                            data=list(zip(ks, sims)),
-                                        )})
-                        except Exception:
-                            pass
+                            raw_vsa = {
+                                "bundle_cap": bundle_cap_raw,
+                                "role_filler": role_filler_raw,
+                                "self_binding_star": {
+                                    "k_values": fourier_star.get("k_values", []),
+                                    "k_sims": fourier_star.get("k_sims", []),
+                                },
+                                "self_binding_dagger": {
+                                    "k_values": fourier_perp.get("k_values", []),
+                                    "k_sims": fourier_perp.get("k_sims", []),
+                                },
+                            }
+                            def _jsonable(o):
+                                if isinstance(o, dict):
+                                    return {k: _jsonable(v) for k, v in o.items()}
+                                if isinstance(o, (list, tuple)):
+                                    return [_jsonable(v) for v in o]
+                                if hasattr(o, "tolist"):
+                                    return o.tolist()
+                                return o
+                            with open(f"{output_dir}/vsa_raw.json", "w") as f:
+                                json.dump(_jsonable(raw_vsa), f)
+                        except Exception as e:
+                            print(f"warning: failed to save raw vsa data: {e}")
 
                         metrics_save_path = f"{output_dir}/metrics.json"
                         with open(metrics_save_path, "w") as f:
@@ -1389,6 +1347,36 @@ def main(args):
                     "self_binding_k_sims": ref_sims,
                     "self_binding_k_values": list(range(1, k_max + 1)),
                 }
+
+                # unitary HRR reference: vectors with unit fourier magnitude
+                uni_items = vsa_unitary_init(1000, latent_dim, device=DEVICE)
+                uni_items = F.normalize(uni_items, p=2, dim=-1)
+                uni_bc = vsa_bundle_capacity(
+                    d=latent_dim, n_items=1000, k_range=BC_K_RANGE,
+                    n_trials=20, normalize=True, device=DEVICE,
+                    item_memory=uni_items,
+                )
+                uni_rf = vsa_binding_unbinding(
+                    d=latent_dim, n_items=1000, k_range=RF_K_RANGE,
+                    n_trials=20, normalize=True, device=DEVICE,
+                    unbind_method="*", item_memory=uni_items, bind_with_random=True,
+                )
+                z_uni = vsa_unitary_init(1, latent_dim, device=DEVICE)
+                z_uni = F.normalize(z_uni, p=2, dim=-1)
+                uni_sims = []
+                for m in range(1, k_max + 1):
+                    cur = z_uni.clone()
+                    for _ in range(m):
+                        cur = vsa_bind(cur, z_uni)
+                    for _ in range(m):
+                        cur = vsa_unbind(cur, z_uni, method="*")
+                    uni_sims.append(F.cosine_similarity(cur, z_uni, dim=-1).mean().item())
+                dim_results["unitary"] = {
+                    "bundle_cap": uni_bc,
+                    "role_filler": uni_rf,
+                    "self_binding_k_sims": uni_sims,
+                    "self_binding_k_values": list(range(1, k_max + 1)),
+                }
                 comp_dir = f"results/comparisons/{dataset_name}"
                 comp_path = plot_cross_dist_comparison_dim(
                     dim_results, latent_dim, dataset_name, comp_dir
@@ -1468,7 +1456,7 @@ if __name__ == "__main__":
     )
     p.add_argument("--epochs", type=int, default=1000, help="training epochs")
     p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs (ignored if --use_learnable_beta)")
-    p.add_argument("--batch_size", type=int, default=128, help="batch size")
+    p.add_argument("--batch_size", type=int, default=256, help="batch size")
     p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
     p.add_argument(
         "--no-l2_norm",
@@ -1501,7 +1489,7 @@ if __name__ == "__main__":
         default="clifford-experiments-CNN",
         help="wandb project name",
     )
-    p.add_argument("--patience", type=int, default=100, help="early stopping patience")
+    p.add_argument("--patience", type=int, default=25, help="early stopping patience")
     p.add_argument(
         "--cycle_epochs",
         type=int,
@@ -1511,7 +1499,7 @@ if __name__ == "__main__":
     p.add_argument(
         "--n_trials",
         type=int,
-        default=1,
+        default=30,
         help="trials per config for statistical averaging",
     )
     p.add_argument(
@@ -1524,7 +1512,7 @@ if __name__ == "__main__":
         "--latent_dims",
         type=int,
         nargs="+",
-        default=[64, 256, 1024, 4096],
+        default=[128, 256, 512, 1024, 2048, 4096],
         help="latent dims to test",
     )
     p.add_argument(

@@ -32,6 +32,7 @@ from utils.vsa import (
     test_bundle_capacity as vsa_bundle_capacity,
     test_binding_unbinding_pairs as vsa_binding_unbinding,
     test_per_class_bundle_capacity_k_items,
+    unitary_init as vsa_unitary_init,
     bind as vsa_bind,
     unbind as vsa_unbind,
     normalize_vectors as vsa_normalize,
@@ -574,15 +575,16 @@ def main(args):
                     )
                     images["reconstructions"] = recon_path
 
-                    # t-sne
-                    tsne_path = plot_latent_tsne(
-                        model,
-                        test_loader,
-                        DEVICE,
-                        f"{output_dir}/tsne.png",
-                        n_samples=2000,
-                    )
-                    images["tsne"] = tsne_path
+                    # t-sne: only on first trial per (dim, dist) to save time
+                    if trial == 0:
+                        tsne_path = plot_latent_tsne(
+                            model,
+                            test_loader,
+                            DEVICE,
+                            f"{output_dir}/tsne.png",
+                            n_samples=2000,
+                        )
+                        images["tsne"] = tsne_path
 
                     # knn evaluation
                     knn_metrics = perform_knn_evaluation(
@@ -602,7 +604,7 @@ def main(args):
                         n_trials=20,
                         normalize=True,
                         device=DEVICE,
-                        plot=True,
+                        plot=False,
                         save_dir=output_dir,
                         item_memory=item_memory,
                         use_braiding=False,
@@ -619,7 +621,7 @@ def main(args):
                         n_trials=1,
                         normalize=True,
                         device=DEVICE,
-                        plot=True,
+                        plot=False,
                         save_dir=output_dir,
                         item_memory=item_memory,
                         labels=item_labels,
@@ -638,7 +640,7 @@ def main(args):
                         n_trials=20,
                         normalize=True,
                         device=DEVICE,
-                        plot=True,
+                        plot=False,
                         unbind_method="*",
                         save_dir=output_dir,
                         item_memory=item_memory,
@@ -648,19 +650,22 @@ def main(args):
                     rf_results["role_filler_capacity"] = rf_res
                     role_filler_raw = rf_res
 
-                    # cross-class bind/unbind test (two random pairs)
-                    pair_classes = random.sample(range(10), 4)
-                    print(f"running cross-class bind/unbind test ({dist_name}): pairs {pair_classes[:2]}, {pair_classes[2:]}...")
-                    cross_class_1 = test_cross_class_bind_unbind(
-                        model, test_loader, DEVICE, output_dir,
-                        img_shape=(3, 32, 32),
-                        class_a=pair_classes[0], class_b=pair_classes[1],
-                    )
-                    cross_class_2 = test_cross_class_bind_unbind(
-                        model, test_loader, DEVICE, os.path.join(output_dir, "pair2"),
-                        img_shape=(3, 32, 32),
-                        class_a=pair_classes[2], class_b=pair_classes[3],
-                    )
+                    # cross-class bind/unbind test (two random pairs) — only first trial to save time
+                    cross_class_1 = {}
+                    cross_class_2 = {}
+                    if trial == 0:
+                        pair_classes = random.sample(range(10), 4)
+                        print(f"running cross-class bind/unbind test ({dist_name}): pairs {pair_classes[:2]}, {pair_classes[2:]}...")
+                        cross_class_1 = test_cross_class_bind_unbind(
+                            model, test_loader, DEVICE, output_dir,
+                            img_shape=(3, 32, 32),
+                            class_a=pair_classes[0], class_b=pair_classes[1],
+                        )
+                        cross_class_2 = test_cross_class_bind_unbind(
+                            model, test_loader, DEVICE, os.path.join(output_dir, "pair2"),
+                            img_shape=(3, 32, 32),
+                            class_a=pair_classes[2], class_b=pair_classes[3],
+                        )
 
                     # self-binding: bind z with itself k times, unbind k times, measure similarity
                     deconv_dir = f"{output_dir}/deconv"
@@ -721,30 +726,7 @@ def main(args):
                         }
                     )
 
-                    # plots
-                    two_per_class_plot = os.path.join(
-                        output_dir, "bundle_similarity_matrix.png"
-                    )
-                    if os.path.exists(two_per_class_plot):
-                        images["bundle_similarity_matrix"] = two_per_class_plot
-                    bc_plot = os.path.join(output_dir, "bundle_capacity.png")
-                    if os.path.exists(bc_plot):
-                        images["bundle_capacity"] = bc_plot
-                    rf_plot = os.path.join(output_dir, "role_filler_capacity.png")
-                    if os.path.exists(rf_plot):
-                        images["role_filler_capacity"] = rf_plot
-
-                    for tag, fr in [("*", fourier_star), ("†", fourier_deconv)]:
-                        sp = fr.get("similarity_after_k_binds_plot_path")
-                        if sp:
-                            images[f"similarity_after_k_binds_{tag}"] = sp
-                        rp = fr.get("recon_after_k_binds_plot_path")
-                        if rp:
-                            images[f"recon_after_k_binds_{tag}"] = rp
-                    for cc, tag in [(cross_class_1, "pair1"), (cross_class_2, "pair2")]:
-                        ccp = cc.get("cross_class_bind_unbind_plot_path")
-                        if ccp and os.path.exists(ccp):
-                            images[f"cross_class_binding_{tag}"] = ccp
+                    # per-trial vsa plots no longer logged to wandb — comparison plot is the canonical view
 
                     summary = {
                         "final_best_total_loss": best,
@@ -755,35 +737,32 @@ def main(args):
                     logger.log_summary(summary)
                     logger.log_images(images)
 
-                    # log vsa curve data as wandb tables so we can reconstruct figures later
+                    # save raw vsa curve data to disk so we can replot locally without wandb
                     try:
-                        import wandb as _wandb
-                        if _wandb.run is not None:
-                            bc = bundle_cap_raw
-                            if bc and bc.get("k"):
-                                _wandb.log({"bundle_capacity_data": _wandb.Table(
-                                    columns=["k", "accuracy", "std"],
-                                    data=list(zip(bc["k"], bc["accuracy"], bc["std"])),
-                                )})
-                            rf = role_filler_raw
-                            if rf and rf.get("k"):
-                                _wandb.log({"role_filler_data": _wandb.Table(
-                                    columns=["k", "accuracy", "std"],
-                                    data=list(zip(rf["k"], rf["accuracy"], rf["std"])),
-                                )})
-                            for key_name, src in [
-                                ("binding_depth_star", fourier_star),
-                                ("binding_depth_dagger", fourier_deconv),
-                            ]:
-                                ks = src.get("k_values", [])
-                                sims = src.get("k_sims", [])
-                                if ks and sims:
-                                    _wandb.log({f"{key_name}_data": _wandb.Table(
-                                        columns=["m", "cosine_sim"],
-                                        data=list(zip(ks, sims)),
-                                    )})
-                    except Exception:
-                        pass
+                        raw_vsa = {
+                            "bundle_cap": bundle_cap_raw,
+                            "role_filler": role_filler_raw,
+                            "self_binding_star": {
+                                "k_values": fourier_star.get("k_values", []),
+                                "k_sims": fourier_star.get("k_sims", []),
+                            },
+                            "self_binding_dagger": {
+                                "k_values": fourier_deconv.get("k_values", []),
+                                "k_sims": fourier_deconv.get("k_sims", []),
+                            },
+                        }
+                        def _jsonable(o):
+                            if isinstance(o, dict):
+                                return {k: _jsonable(v) for k, v in o.items()}
+                            if isinstance(o, (list, tuple)):
+                                return [_jsonable(v) for v in o]
+                            if hasattr(o, "tolist"):
+                                return o.tolist()
+                            return o
+                        with open(f"{output_dir}/vsa_raw.json", "w") as f:
+                            json.dump(_jsonable(raw_vsa), f)
+                    except Exception as e:
+                        print(f"warning: failed to save raw vsa data: {e}")
 
                     metrics_save_path = f"{output_dir}/metrics.json"
                     with open(metrics_save_path, "w") as f:
@@ -888,6 +867,36 @@ def main(args):
                 "self_binding_k_sims": ref_sims,
                 "self_binding_k_values": list(range(1, k_max + 1)),
             }
+
+            # unitary HRR reference: vectors with unit fourier magnitude
+            uni_items = vsa_unitary_init(1000, latent_dim, device=DEVICE)
+            uni_items = F.normalize(uni_items, p=2, dim=-1)
+            uni_bc = vsa_bundle_capacity(
+                d=latent_dim, n_items=1000, k_range=BC_K_RANGE,
+                n_trials=20, normalize=True, device=DEVICE,
+                item_memory=uni_items,
+            )
+            uni_rf = vsa_binding_unbinding(
+                d=latent_dim, n_items=1000, k_range=RF_K_RANGE,
+                n_trials=20, normalize=True, device=DEVICE,
+                unbind_method="*", item_memory=uni_items, bind_with_random=True,
+            )
+            z_uni = vsa_unitary_init(1, latent_dim, device=DEVICE)
+            z_uni = F.normalize(z_uni, p=2, dim=-1)
+            uni_sims = []
+            for m in range(1, k_max + 1):
+                cur = z_uni.clone()
+                for _ in range(m):
+                    cur = vsa_bind(cur, z_uni)
+                for _ in range(m):
+                    cur = vsa_unbind(cur, z_uni, method="*")
+                uni_sims.append(F.cosine_similarity(cur, z_uni, dim=-1).mean().item())
+            dim_results["unitary"] = {
+                "bundle_cap": uni_bc,
+                "role_filler": uni_rf,
+                "self_binding_k_sims": uni_sims,
+                "self_binding_k_values": list(range(1, k_max + 1)),
+            }
             comp_dir = "results/comparisons/cifar10"
             comp_path = plot_cross_dist_comparison_dim(
                 dim_results, latent_dim, "cifar10", comp_dir
@@ -960,7 +969,7 @@ if __name__ == "__main__":
     )
     p.add_argument("--epochs", type=int, default=1000, help="training epochs")
     p.add_argument("--warmup_epochs", type=int, default=25, help="kl warmup epochs")
-    p.add_argument("--batch_size", type=int, default=128, help="batch size")
+    p.add_argument("--batch_size", type=int, default=256, help="batch size")
     p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
     p.add_argument(
         "--no-l2_norm",
@@ -978,9 +987,9 @@ if __name__ == "__main__":
     p.add_argument(
         "--wandb_project", type=str, default="clifford-experiments-CNN-cifar10"
     )
-    p.add_argument("--patience", type=int, default=100, help="early stopping patience")
+    p.add_argument("--patience", type=int, default=25, help="early stopping patience")
     p.add_argument("--cycle_epochs", type=int, default=100)
-    p.add_argument("--n_trials", type=int, default=1)
+    p.add_argument("--n_trials", type=int, default=30)
     p.add_argument(
         "--exclude_class",
         type=int,
@@ -991,7 +1000,7 @@ if __name__ == "__main__":
         "--latent_dims",
         type=int,
         nargs="+",
-        default=[256, 1024, 4096],
+        default=[128, 256, 512, 1024, 2048, 4096],
     )
     p.add_argument(
         "--distributions",

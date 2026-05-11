@@ -858,6 +858,7 @@ def plot_cross_dist_comparison_dim(dim_results, latent_dim, dataset_name, output
         "gaussian": "#4CAF50",
         "gaussian_nol2": "#9C27B0",
         "random_hrr": "#999999",
+        "unitary": "#000000",
     }
     LABELS = {
         "clifford": "Clifford",
@@ -865,8 +866,9 @@ def plot_cross_dist_comparison_dim(dim_results, latent_dim, dataset_name, output
         "gaussian": "Gaussian (L2)",
         "gaussian_nol2": "Gaussian",
         "random_hrr": "random HRR (ref.)",
+        "unitary": "unitary (ref.)",
     }
-    ORDER = ["clifford", "powerspherical", "gaussian", "gaussian_nol2", "random_hrr"]
+    ORDER = ["clifford", "powerspherical", "gaussian", "gaussian_nol2", "random_hrr", "unitary"]
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
@@ -874,8 +876,8 @@ def plot_cross_dist_comparison_dim(dim_results, latent_dim, dataset_name, output
         metrics = dim_results.get(dist_name)
         if metrics is None:
             continue
-        ls = "--" if dist_name == "random_hrr" else "-"
-        lw = 1 if dist_name == "random_hrr" else 2
+        ls = "--" if dist_name in ("random_hrr", "unitary") else "-"
+        lw = 1 if dist_name in ("random_hrr", "unitary") else 2
         color = COLORS.get(dist_name, "black")
         label = LABELS.get(dist_name, dist_name)
 
