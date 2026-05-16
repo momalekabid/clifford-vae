@@ -733,6 +733,7 @@ def main(args):
                         **fourier_metrics,
                         **knn_metrics,
                         "mean_vector_cosine_acc": float(mean_vector_acc),
+                        **({"generation_fid": gen_fid} if gen_fid is not None and not math.isnan(gen_fid) else {}),
                     }
                     logger.log_summary(summary)
                     logger.log_images(images)

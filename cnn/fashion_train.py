@@ -27,9 +27,6 @@ from utils.wandb_utils import (
 
     compute_class_means,
     evaluate_mean_vector_cosine,
-    plot_clifford_manifold_visualization,
-    plot_powerspherical_manifold_visualization,
-    plot_gaussian_manifold_visualization,
     plot_cross_dist_comparison_dim,
     plot_across_dims_comparison,
     test_cross_class_bind_unbind,
@@ -683,7 +680,7 @@ def main(args):
     logger = WandbLogger(args)
 
     latent_dims = args.latent_dims if args.latent_dims else [2048, 4096]
-    distributions = ["clifford", "powerspherical", "gaussian", "gaussian_nol2"]
+    distributions = args.distributions if args.distributions else ["clifford", "powerspherical", "gaussian", "gaussian_nol2"]
     datasets_to_test = ["fashionmnist"]
 
     # per-distribution lr overrides
@@ -766,7 +763,8 @@ def main(args):
 
             for dist_name in distributions:
                 for trial in range(args.n_trials):
-                    trial_suffix = f"-trial{trial+1}" if args.n_trials > 1 else ""
+                    trial_num = trial + args.start_trial
+                    trial_suffix = f"-trial{trial_num}" if (args.n_trials > 1 or args.start_trial > 1) else ""
                     exp_name = f"{dataset_name}-{dist_name}-d{latent_dim}-{args.recon_loss}{trial_suffix}"
                     output_dir = f"results/{exp_name}"
                     os.makedirs(output_dir, exist_ok=True)
@@ -1143,47 +1141,6 @@ def main(args):
                                 class_a=5, class_b=6,
                             )
 
-                        # manifold viz disabled (per user); per-trial vsa plots disabled — comparison plot is the canonical view
-                        if False and dist_name == "clifford" and 2 <= model.latent_dim <= 256:
-                            cliff_viz = plot_clifford_manifold_visualization(
-                                model,
-                                DEVICE,
-                                output_dir,
-                                n_grid=16,
-                                dims=(0, 1),
-                                img_shape=IMG_SHAPE,
-                            )
-                            if cliff_viz:
-                                images["clifford_manifold_visualization"] = cliff_viz
-
-                        elif (
-                            dist_name == "powerspherical" and 2 <= model.latent_dim <= 256
-                        ):
-                            pow_viz = plot_powerspherical_manifold_visualization(
-                                model,
-                                DEVICE,
-                                output_dir,
-                                n_samples=1000,
-                                dims=(0, 1),
-                                img_shape=IMG_SHAPE,
-                            )
-                            if pow_viz:
-                                images["powerspherical_manifold_visualization"] = (
-                                    pow_viz
-                                )
-
-                        elif dist_name == "gaussian" and 2 <= model.latent_dim <= 256:
-                            gauss_viz = plot_gaussian_manifold_visualization(
-                                model,
-                                DEVICE,
-                                output_dir,
-                                n_samples=1000,
-                                dims=(0, 1),
-                                img_shape=IMG_SHAPE,
-                            )
-                            if gauss_viz:
-                                images["gaussian_manifold_visualization"] = gauss_viz
-
                         excluded_metrics = {}
                         if excluded_test_loader is not None:
                             print(
@@ -1220,6 +1177,7 @@ def main(args):
                             **knn_metrics,
                             **excluded_metrics,
                             mean_metric_key: float(mean_vector_acc),
+                            **({"generation_fid": gen_fid} if gen_fid is not None and not math.isnan(gen_fid) else {}),
                         }
                         logger.log_summary(summary)
                         logger.log_images(images)
@@ -1529,6 +1487,20 @@ if __name__ == "__main__":
         "--braid",
         action="store_true",
         help="run braiding tests",
+    )
+    p.add_argument(
+        "--distributions",
+        type=str,
+        nargs="+",
+        default=None,
+        choices=["clifford", "powerspherical", "gaussian", "gaussian_nol2"],
+        help="distributions to train (default: all four)",
+    )
+    p.add_argument(
+        "--start_trial",
+        type=int,
+        default=1,
+        help="starting trial index (offsets exp_name trial number). useful for resuming",
     )
     p.add_argument(
         "--arch",

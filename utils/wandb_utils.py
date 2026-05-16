@@ -858,7 +858,7 @@ def plot_cross_dist_comparison_dim(dim_results, latent_dim, dataset_name, output
         "gaussian": "#4CAF50",
         "gaussian_nol2": "#9C27B0",
         "random_hrr": "#999999",
-        "unitary": "#000000",
+        "unitary": "#555555",
     }
     LABELS = {
         "clifford": "Clifford",
@@ -868,7 +868,8 @@ def plot_cross_dist_comparison_dim(dim_results, latent_dim, dataset_name, output
         "random_hrr": "random HRR (ref.)",
         "unitary": "unitary (ref.)",
     }
-    ORDER = ["clifford", "powerspherical", "gaussian", "gaussian_nol2", "random_hrr", "unitary"]
+    # refs first so they draw underneath the distributions
+    ORDER = ["random_hrr", "unitary", "gaussian_nol2", "gaussian", "powerspherical", "clifford"]
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
