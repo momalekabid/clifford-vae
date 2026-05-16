@@ -275,7 +275,7 @@ def run(args):
                         d=item_memory.shape[-1],
                         n_items=500,
                         k_range=list(range(5, 51, 5)),
-                        n_trials=3,
+                        n_trials=20,
                         normalize=True,
                         device=device,
                         plot=True,
@@ -295,7 +295,7 @@ def run(args):
                             d=item_memory.shape[-1],
                             n_items=500,
                             k_range=list(range(2, 21, 2)),
-                            n_trials=3,
+                            n_trials=20,
                             normalize=True,
                             device=device,
                             plot=True,
@@ -354,6 +354,41 @@ def run(args):
                     )
                     print(f"  mean vector cosine acc: {mean_vector_acc:.4f}")
                     agg_mvc.append(float(mean_vector_acc))
+
+                    # per-trial dump for replot_comparisons.py compatibility
+                    role_filler_raw = rf_results.get("role_filler_no_random_keys", {})
+                    trial_dir = f"results/mnist-vmf-d{d_manifold}-l1-trial{run_idx+1}"
+                    os.makedirs(trial_dir, exist_ok=True)
+                    def _jsonable(o):
+                        if isinstance(o, dict): return {k: _jsonable(v) for k, v in o.items()}
+                        if isinstance(o, (list, tuple)): return [_jsonable(v) for v in o]
+                        if hasattr(o, "tolist"): return o.tolist()
+                        return o
+                    raw_vsa = {
+                        "bundle_cap": bundle_cap_raw,
+                        "role_filler": role_filler_raw,
+                        "self_binding_star": {
+                            "k_values": self_bind.get("k_values", []),
+                            "k_sims": self_bind.get("k_sims", []),
+                        },
+                        "self_binding_dagger": {
+                            "k_values": self_bind_deconv.get("k_values", []),
+                            "k_sims": self_bind_deconv.get("k_sims", []),
+                        },
+                    }
+                    with open(f"{trial_dir}/vsa_raw.json", "w") as f:
+                        json.dump(_jsonable(raw_vsa), f)
+                    trial_metrics_out = {
+                        **{k: v for k, v in knn_results.items() if k.startswith("knn_")},
+                        "mean_vector_cosine_acc": float(mean_vector_acc),
+                        "test/ll": test_metrics["ll"],
+                        "test/entropy": test_metrics["entropy"],
+                        "test/recon": test_metrics["recon"],
+                        "test/kl": test_metrics["kl"],
+                        "final_val_loss": best_val_loss,
+                    }
+                    with open(f"{trial_dir}/metrics.json", "w") as f:
+                        json.dump(trial_metrics_out, f, indent=2)
 
                     if logger.use:
                         sb_metrics = {

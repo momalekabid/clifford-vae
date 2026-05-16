@@ -490,6 +490,45 @@ def run(args):
                     print(f"  mean vector cosine acc: {mean_vector_acc:.4f}")
                     agg_mvc[dist].append(float(mean_vector_acc))
 
+                    # per-trial dump for replot_comparisons.py compatibility.
+                    # rename "normal" -> "gaussian"/"gaussian_nol2" depending on --l2_norm
+                    if dist == "normal":
+                        dist_out = "gaussian" if args.l2_norm else "gaussian_nol2"
+                    else:
+                        dist_out = dist
+                    trial_dir = f"results/mnist-{dist_out}-d{mdim}-l1-trial{run+1}"
+                    os.makedirs(trial_dir, exist_ok=True)
+                    def _jsonable(o):
+                        if isinstance(o, dict): return {k: _jsonable(v) for k, v in o.items()}
+                        if isinstance(o, (list, tuple)): return [_jsonable(v) for v in o]
+                        if hasattr(o, "tolist"): return o.tolist()
+                        return o
+                    raw_vsa = {
+                        "bundle_cap": bundle_cap_raw,
+                        "role_filler": role_filler_raw,
+                        "self_binding_star": {
+                            "k_values": fourier_pseudo.get("k_values", []),
+                            "k_sims": fourier_pseudo.get("k_sims", []),
+                        },
+                        "self_binding_dagger": {
+                            "k_values": fourier_deconv.get("k_values", []),
+                            "k_sims": fourier_deconv.get("k_sims", []),
+                        },
+                    }
+                    with open(f"{trial_dir}/vsa_raw.json", "w") as f:
+                        json.dump(_jsonable(raw_vsa), f)
+                    trial_metrics_out = {
+                        **{k: v for k, v in knn_results.items() if k.startswith("knn_")},
+                        "mean_vector_cosine_acc": float(mean_vector_acc),
+                        "test/ll": test_metrics["ll"],
+                        "test/entropy": test_metrics["entropy"],
+                        "test/recon": test_metrics["recon"],
+                        "test/kl": test_metrics["kl"],
+                        "final_val_loss": best_val_loss,
+                    }
+                    with open(f"{trial_dir}/metrics.json", "w") as f:
+                        json.dump(trial_metrics_out, f, indent=2)
+
                     if dist == "clifford" and mdim >= 2:
                         cliff_viz = plot_clifford_manifold_visualization(
                             model, device, vis_dir, n_grid=16, dims=(0, 1)
