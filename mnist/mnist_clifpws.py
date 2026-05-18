@@ -210,7 +210,7 @@ def run(args):
     # per-distribution lr overrides
     dist_lr = {
         "normal": args.lr,
-        "powerspherical": 1e-4,
+        "powerspherical": 3e-4,
         "clifford": args.lr,
     }
     knn_samples = [100, 600, 1000]
@@ -240,6 +240,9 @@ def run(args):
                 model_z_dim = mdim
 
             if dist == "clifford" and mdim < 2:
+                continue
+            # skip normal d=2: already have 20 trials from a prior run
+            if dist == "normal" and mdim == 2:
                 continue
 
             print(
