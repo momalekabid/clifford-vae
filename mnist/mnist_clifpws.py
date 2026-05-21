@@ -241,9 +241,6 @@ def run(args):
 
             if dist == "clifford" and mdim < 2:
                 continue
-            # skip normal d=2: already have 20 trials from a prior run
-            if dist == "normal" and mdim == 2:
-                continue
 
             print(
                 f"\n--- Testing {dist.upper()}-VAE with d={mdim} (model z_dim={model_z_dim}, lr={dist_lr.get(dist, args.lr)}) ---"
@@ -257,7 +254,7 @@ def run(args):
                 if logger.use:
                     logger.start_run(f"{dist}-d{mdim}-run{run+1}", args)
 
-                l2_norm = args.l2_norm if dist == "normal" else False
+                l2_norm = dist == "normal"  # gaussian latents always l2-normalized
                 model = MLPVAE(
                     h_dim=args.h_dim, z_dim=model_z_dim, distribution=dist, l2_normalize=l2_norm
                 ).to(device)
@@ -494,11 +491,8 @@ def run(args):
                     agg_mvc[dist].append(float(mean_vector_acc))
 
                     # per-trial dump for replot_comparisons.py compatibility.
-                    # rename "normal" -> "gaussian"/"gaussian_nol2" depending on --l2_norm
-                    if dist == "normal":
-                        dist_out = "gaussian" if args.l2_norm else "gaussian_nol2"
-                    else:
-                        dist_out = dist
+                    # rename "normal" -> "gaussian"
+                    dist_out = "gaussian" if dist == "normal" else dist
                     trial_dir = f"results/mnist-{dist_out}-d{mdim}-l1-trial{run+1}"
                     os.makedirs(trial_dir, exist_ok=True)
                     def _jsonable(o):
@@ -737,12 +731,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    parser.add_argument(
-        "--l2_norm",
-        action="store_true",
-        help="L2 normalize Gaussian VAE latents (artificial hypersphere)",
-    )
-
     parser.add_argument(
         "--n_runs",
         type=int,
