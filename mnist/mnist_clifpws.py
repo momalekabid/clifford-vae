@@ -205,14 +205,12 @@ def run(args):
     test_eval_loader = DataLoader(test_dataset, batch_size=512, num_workers=0)
 
     final_results = []
-    distributions_to_test = ["normal", "powerspherical", "clifford"]
+    # normal     -> gaussian VAE, latents L2-normalized
+    # normal_nol2 -> gaussian VAE, NO L2 normalization
+    distributions_to_test = ["normal", "normal_nol2", "powerspherical", "clifford"]
 
-    # per-distribution lr overrides
-    dist_lr = {
-        "normal": args.lr,
-        "powerspherical": 3e-4,
-        "clifford": args.lr,
-    }
+    # all distributions use args.lr
+    dist_lr = {d: args.lr for d in distributions_to_test}
     knn_samples = [100, 600, 1000]
     logger = WandbLogger(args)
 
@@ -254,9 +252,10 @@ def run(args):
                 if logger.use:
                     logger.start_run(f"{dist}-d{mdim}-run{run+1}", args)
 
-                l2_norm = dist == "normal"  # gaussian latents always l2-normalized
+                l2_norm = dist == "normal"  # "normal" L2-normalized; "normal_nol2" not
+                model_dist = "normal" if dist == "normal_nol2" else dist
                 model = MLPVAE(
-                    h_dim=args.h_dim, z_dim=model_z_dim, distribution=dist, l2_normalize=l2_norm
+                    h_dim=args.h_dim, z_dim=model_z_dim, distribution=model_dist, l2_normalize=l2_norm
                 ).to(device)
                 optimizer = torch.optim.Adam(model.parameters(), lr=dist_lr.get(dist, args.lr))
 
@@ -491,8 +490,9 @@ def run(args):
                     agg_mvc[dist].append(float(mean_vector_acc))
 
                     # per-trial dump for replot_comparisons.py compatibility.
-                    # rename "normal" -> "gaussian"
-                    dist_out = "gaussian" if dist == "normal" else dist
+                    # rename normal -> gaussian, normal_nol2 -> gaussian_nol2
+                    dist_out = {"normal": "gaussian",
+                                "normal_nol2": "gaussian_nol2"}.get(dist, dist)
                     trial_dir = f"results/mnist-{dist_out}-d{mdim}-l1-trial{run+1}"
                     os.makedirs(trial_dir, exist_ok=True)
                     def _jsonable(o):
@@ -714,7 +714,7 @@ if __name__ == "__main__":
         "--d_dims",
         type=int,
         nargs="+",
-        default=[2, 5, 10, 20, 40, 80],
+        default=[2, 5, 10, 20, 40, 128, 256],
         help="Latent manifold dimensions to test",
     )
     parser.add_argument("--h_dim", type=int, default=128, help="Hidden layer size")
@@ -729,13 +729,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--warmup_epochs", type=int, default=100, help="KL annealing warmup epochs"
     )
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument(
         "--n_runs",
         type=int,
-        default=1,
-        help="Number of runs (original paper param is 20)",
+        default=20,
+        help="Number of runs per config",
     )
     parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
     parser.add_argument(

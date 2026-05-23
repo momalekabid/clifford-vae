@@ -451,15 +451,22 @@ def main(args):
                 logger.start_run(exp_name, args)
 
                 print(f"  {dist_name}: flat z, d={latent_dim} (CNN w/ residual)")
+                # gaussian_nol2 = gaussian VAE without l2 normalization
+                if dist_name == "gaussian_nol2":
+                    actual_dist, l2_norm = "gaussian", False
+                elif dist_name == "gaussian":
+                    actual_dist, l2_norm = "gaussian", args.l2_norm
+                else:
+                    actual_dist, l2_norm = dist_name, False
                 model = CNNVAE(
                     latent_dim=latent_dim,
                     in_channels=3,
-                    distribution=dist_name,
+                    distribution=actual_dist,
                     device=DEVICE,
                     recon_loss_type=args.recon_loss,
                     l1_weight=args.l1_weight,
                     use_learnable_beta=args.use_learnable_beta,
-                    l2_normalize=(dist_name == "gaussian" and args.l2_norm),
+                    l2_normalize=l2_norm,
                     img_size=32,
                 )
 
