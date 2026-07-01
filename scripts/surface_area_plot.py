@@ -25,21 +25,26 @@ def hypersphere_sa(d):
 def gaussian_typical_shell_sa(d):
     return hypersphere_sa(d) * (np.sqrt(d))**(d - 1)
 
-# l2-normalized gaussian lives on S^(d-1), same manifold as vMF/PowerSpherical
-# so its surface area is identical to the hypersphere
-# (plotted separately to make the point explicit)
+# l2-normalized gaussian lives on S^(d-1), the SAME manifold as vMF/PowerSpherical.
+# so its surface area is identical to the hypersphere -- we overlay it as markers
+# riding the hypersphere curve to make explicit that l2-normalizing a gaussian
+# does not escape the collapse, it just lands you on the same shrinking sphere.
 
 # --- single plot, log scale ---
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-# left: linear scale, short range, showing the hypersphere collapse clearly
+# left: log-y, short range, showing the hypersphere collapse clearly
 mdims_short = np.arange(1, 40)
 sa_sphere_short = np.array([hypersphere_sa(d+1) for d in mdims_short])
-ax1.plot(mdims_short, sa_sphere_short, 'b-', linewidth=2,
-         label=r'Power Spherical')
+ax1.semilogy(mdims_short, sa_sphere_short, 'b-', linewidth=2,
+             label=r'Power Spherical / vMF')
+# n-l2 sits exactly on the hypersphere curve; show every 3rd point as markers
+nl2_idx = mdims_short[::3]
+ax1.semilogy(nl2_idx, sa_sphere_short[::3], 'x', color='#9467bd', markersize=7,
+             markeredgewidth=2, label=r'$\mathcal{N}$-L2')
 ax1.axvline(x=6, color='gray', linestyle='--', alpha=0.5, label='$d=6$ (peak)')
 ax1.set_xlabel('manifold dimension $d$')
-ax1.set_ylabel('surface area')
+ax1.set_ylabel('surface area (log scale)')
 ax1.set_title('Hypersphere Surface Area Collapse')
 ax1.legend(fontsize=9)
 ax1.set_xlim(1, 39)
@@ -55,7 +60,11 @@ ax2.semilogy(mdims_comp, sa_gauss_comp, '-', color='#2ca02c', linewidth=2,
 ax2.semilogy(mdims_comp, sa_clifford_comp, 'r-', linewidth=2,
              label=r'Clifford torus')
 ax2.semilogy(mdims_comp, sa_sphere_comp, 'b-', linewidth=2,
-             label=r'Power Spherical')
+             label=r'Power Spherical / vMF')
+# n-l2 overlaid as markers on the hypersphere curve
+nl2_idx_c = mdims_comp[::4]
+ax2.semilogy(nl2_idx_c, sa_sphere_comp[::4], 'x', color='#9467bd', markersize=7,
+             markeredgewidth=2, label=r'$\mathcal{N}$-L2')
 ax2.set_xlabel('manifold dimension $d$')
 ax2.set_ylabel('surface area (log scale)')
 ax2.set_title('Surface Area Comparison Across Geometries')
