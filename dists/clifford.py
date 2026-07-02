@@ -83,6 +83,8 @@ class _HouseholderRotationTransform(Transform):
 
 
 class HypersphericalUniform(Distribution):
+    """Uniform distribution on S^(d-1) / R^d."""
+
     arg_constraints = {}
     has_rsample = True
 
@@ -157,10 +159,13 @@ class _JointTSDistribution(Distribution):
         )
 
 
-class PowerSpherical(
-    TransformedDistribution
-):  # from Nicola De Cao https://github.com/nicola-decao/power_spherical
-    # optimizations from https://evgeniia.tokarch.uk/blog/memory-optimization-for-kl-loss-calculation-in-pytorch/
+class PowerSpherical(TransformedDistribution):
+    """Power spherical distribution on S^(d-1) (De Cao & Aziz, 2020).
+    Adapted from https://github.com/nicola-decao/power_spherical, with the
+    memory optimizations from
+    https://evgeniia.tokarch.uk/blog/memory-optimization-for-kl-loss-calculation-in-pytorch/
+    """
+
     has_rsample = True
 
     def __init__(self, loc, scale, validate_args=None):
@@ -208,6 +213,8 @@ class PowerSpherical(
 
 
 class CliffordTorusUniform(Distribution):
+    """Uniform distribution on the clifford torus (S^1)^d"""
+
     arg_constraints = {}
     has_rsample = True
 
@@ -236,6 +243,8 @@ class CliffordTorusUniform(Distribution):
 
 
 class CliffordTorusDistribution(Distribution):
+    """Product of von-Mises distributions on the Clifford torus"""
+
     arg_constraints: Dict[str, constraints.Constraint] = {}
     has_rsample = True
 
@@ -270,7 +279,9 @@ class CliffordTorusDistribution(Distribution):
 
 
 class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
-    # clifford torus with powerspherical concentration
+    """Clifford Torus distribution with Powerspherical (rather than von Mises)
+    concentration for each S^1."""
+
     arg_constraints = {"loc": constraints.real, "concentration": constraints.positive}
     has_rsample = True
 
@@ -282,10 +293,11 @@ class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
         self.dtype = loc.dtype
 
     def rsample(self, sample_shape=torch.Size()) -> torch.Tensor:
-        mean_dir = torch.stack((torch.cos(self.loc), torch.sin(self.loc)), -1)
-        ps = PowerSpherical(mean_dir, self.concentration)
+        e1 = torch.zeros((*self.loc.shape, 2), device=self.loc.device, dtype=self.dtype)
+        e1[..., 0] = 1
+        ps = PowerSpherical(e1, self.concentration)
         v = ps.rsample(sample_shape)
-        theta = torch.atan2(v[..., 1], v[..., 0])
+        theta = self.loc + torch.atan2(v[..., 1], v[..., 0])
         n = 2 * self.orig_dim
         theta_s = torch.zeros(
             (*theta.shape[:-1], n), device=theta.device, dtype=self.dtype
@@ -293,9 +305,6 @@ class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
         theta_s[..., 1 : self.orig_dim] = theta[..., 1:]
         theta_s[..., -self.orig_dim + 1 :] = -torch.flip(theta[..., 1:], (-1,))
         samples_c = torch.exp(1j * theta_s)
-        # if self.normalize_ifft:
-        #     samples_c = samples_c / math.sqrt(n)
-        #     return torch.fft.ifft(samples_c, dim=-1, norm="ortho").real
         return torch.fft.ifft(samples_c, dim=-1).real
 
     def log_prob(self, value):
