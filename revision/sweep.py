@@ -131,7 +131,7 @@ def worker(wid, joblist, extra_args, max_retries):
         picked = None
         for job in joblist:
             st = status(job)
-            if st == "done" or (st.startswith("failed") and tries.get(job, 0) >= max_retries):
+            if st == "done" or (st.startswith("failed") and tries.get(rdir(job), 0) >= max_retries):
                 continue
             if claim(job):
                 picked = job
@@ -140,7 +140,7 @@ def worker(wid, joblist, extra_args, max_retries):
             return
         try:
             rc = run_job(picked, extra_args)
-            tries[picked] = tries.get(picked, 0) + 1
+            tries[rdir(picked)] = tries.get(rdir(picked), 0) + 1
             print(f"[w{wid}] {rdir(picked)} rc={rc} status={status(picked)}", flush=True)
         finally:
             release(picked)

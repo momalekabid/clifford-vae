@@ -46,3 +46,4 @@ wandb/
 .ipynb_checkpoints/
 test_integration.py
 cnn/experimental/
+poster/

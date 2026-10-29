@@ -27,6 +27,10 @@ parser.add_argument("--save", action="store_true", help="save static figure inst
 parser.add_argument("--dim", type=int, default=4, help="latent dimension for static figure")
 parser.add_argument("--kappa", type=float, default=5.0, help="concentration for static figure")
 parser.add_argument("--out", type=str, default="figures/distribution_samples_3d.png")
+parser.add_argument("--layout", type=str, default="row", choices=["row", "grid"], help="row: 1x5, grid: 3 over 2 for a poster column")
+parser.add_argument("--no-title", action="store_true", help="skip the suptitle")
+parser.add_argument("--clifford-subspace", action="store_true", help="project clifford samples onto the 2(dim-1)-dim subspace they occupy (drops the zero DC/nyquist bins) before taking 3 coords")
+parser.add_argument("--clifford-dim", type=int, default=None, help="latent dim for the clifford columns (real output is 2x this). default: same as --dim")
 args = parser.parse_args()
 
 N_SAMPLES = 3000
@@ -118,28 +122,46 @@ if args.save:
     import os
     os.makedirs(os.path.dirname(args.out) if os.path.dirname(args.out) else ".", exist_ok=True)
 
-    fig = plt.figure(figsize=(22, 5))
-    fig.subplots_adjust(wspace=0.02, top=0.88, left=0.02, right=0.98, bottom=0.08)
-    axes = [fig.add_subplot(1, 5, i + 1, projection="3d") for i in range(5)]
+    if args.layout == "grid":
+        # 3 panels over 2, centred, for a poster column
+        from matplotlib import gridspec
+        fig = plt.figure(figsize=(13, 9))
+        gs = gridspec.GridSpec(2, 6, figure=fig, wspace=0.02, hspace=0.05, left=0.02, right=0.98, top=0.95, bottom=0.03)
+        slots = [gs[0, 0:2], gs[0, 2:4], gs[0, 4:6], gs[1, 1:3], gs[1, 3:5]]
+        axes = [fig.add_subplot(sl, projection="3d") for sl in slots]
+    else:
+        fig = plt.figure(figsize=(22, 5))
+        fig.subplots_adjust(wspace=0.02, top=0.88, left=0.02, right=0.98, bottom=0.08)
+        axes = [fig.add_subplot(1, 5, i + 1, projection="3d") for i in range(5)]
 
     kappa, dim = args.kappa, int(args.dim)
     for i, (name, func, do_norm) in enumerate(COLUMNS):
-        samples = func(kappa, dim)
+        d_here = args.clifford_dim if (args.clifford_dim and name.startswith("clifford")) else dim
+        samples = func(kappa, d_here)
+        if args.clifford_subspace and name.startswith("clifford"):
+            # the ifft is an isometry, so the torus lives in a 2(d-1)-dim subspace of R^{2d}.
+            # rotate into that subspace with the top principal directions so the projection
+            # sees the torus in its own R^4 rather than through the fft basis
+            x = samples.detach() - samples.detach().mean(0, keepdim=True)
+            _, _, vt = torch.linalg.svd(x, full_matrices=False)
+            k = 2 * (d_here - 1)
+            samples = x @ vt[:k].T
         pts = to_3d(normalize(samples) if do_norm else samples)
         ax = axes[i]
         if name != "gaussian (raw)":
             draw_wireframe(ax)
         ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
                    s=0.5, alpha=0.3, c=COLORS[name], depthshade=True)
-        ax.set_title(name, fontsize=11, pad=4)
+        ax.set_title(name, fontsize=15 if args.layout == "grid" else 11, pad=4)
         if name == "gaussian (raw)":
             lim = max(np.abs(pts).max() + 0.2, 1.2)
             setup_ax(ax, lim=lim)
         else:
             setup_ax(ax)
 
-    fig.suptitle(f"samples projected to 3D  (dim={dim}, κ={kappa:.1f})", fontsize=14)
-    plt.savefig(args.out, dpi=500, bbox_inches="tight")
+    if not args.no_title:
+        fig.suptitle(f"samples projected to 3D  (dim={dim}, κ={kappa:.1f})", fontsize=14)
+    plt.savefig(args.out, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"saved to {args.out}")
 
