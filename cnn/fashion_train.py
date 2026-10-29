@@ -686,7 +686,7 @@ def main(args):
     # per-distribution lr overrides
     dist_lr = {
         "clifford": args.lr,
-        "powerspherical": 1e-4,
+        "powerspherical": args.lr,
         "gaussian": args.lr,
         "gaussian_nol2": args.lr,
     }
@@ -1424,7 +1424,7 @@ if __name__ == "__main__":
     p.add_argument("--epochs", type=int, default=500, help="training epochs")
     p.add_argument("--warmup_epochs", type=int, default=100, help="kl warmup epochs (ignored if --use_learnable_beta)")
     p.add_argument("--batch_size", type=int, default=256, help="batch size")
-    p.add_argument("--lr", type=float, default=1e-3, help="learning rate")
+    p.add_argument("--lr", type=float, default=3e-4, help="learning rate")
     p.add_argument(
         "--no-l2_norm",
         dest="l2_norm",

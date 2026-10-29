@@ -31,6 +31,17 @@ def _von_mises_entropy(kappa: torch.Tensor) -> torch.Tensor:
     )
 
 
+def clifford_embed(angles: torch.Tensor) -> torch.Tensor:
+    """map d angles to the real 2d vector F^-1{h}, h hermitian with h_k = e^{i angle_k}.
+    index 0 and the nyquist bin get angle 0 (h = 1), so every |F{x}_k| = 1 and ||x|| = 1.
+    angles[..., 0] is unused (same as rsample)."""
+    d = angles.shape[-1]
+    theta_s = torch.zeros((*angles.shape[:-1], 2 * d), device=angles.device, dtype=angles.dtype)
+    theta_s[..., 1:d] = angles[..., 1:]
+    theta_s[..., -d + 1 :] = -torch.flip(angles[..., 1:], (-1,))
+    return torch.fft.ifft(torch.exp(1j * theta_s), dim=-1).real
+
+
 try:
     compiled_von_mises_entropy = torch.compile(_von_mises_entropy)
 except Exception:
@@ -228,12 +239,7 @@ class CliffordTorusUniform(Distribution):
     def rsample(self, sample_shape=torch.Size()):
         shape = sample_shape + (self.dim,)
         angles = torch.rand(shape, device=self.device, dtype=self.dtype) * 2 * math.pi
-        n = 2 * self.dim
-        theta_s = torch.zeros(sample_shape + (n,), device=self.device, dtype=self.dtype)
-        theta_s[..., 1 : self.dim] = angles[..., 1:]
-        theta_s[..., -self.dim + 1 :] = -torch.flip(angles[..., 1:], dims=(-1,))
-        samples_complex = torch.exp(1j * theta_s)
-        return torch.fft.ifft(samples_complex, dim=-1).real
+        return clifford_embed(angles)
 
     def log_prob(self, value):
         return -torch.ones_like(value[..., 0]) * self.entropy()
@@ -298,14 +304,12 @@ class CliffordPowerSphericalDistribution(CliffordTorusDistribution):
         ps = PowerSpherical(e1, self.concentration)
         v = ps.rsample(sample_shape)
         theta = self.loc + torch.atan2(v[..., 1], v[..., 0])
-        n = 2 * self.orig_dim
-        theta_s = torch.zeros(
-            (*theta.shape[:-1], n), device=theta.device, dtype=self.dtype
-        )
-        theta_s[..., 1 : self.orig_dim] = theta[..., 1:]
-        theta_s[..., -self.orig_dim + 1 :] = -torch.flip(theta[..., 1:], (-1,))
-        samples_c = torch.exp(1j * theta_s)
-        return torch.fft.ifft(samples_c, dim=-1).real
+        return clifford_embed(theta)
+
+    @property
+    def mean(self):
+        # the mode / mean direction: every angle at its mu
+        return clifford_embed(self.loc)
 
     def log_prob(self, value):
         freq = torch.fft.fft(value, dim=-1)[..., : self.orig_dim]

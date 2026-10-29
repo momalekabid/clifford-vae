@@ -4,6 +4,7 @@ from dists.clifford import (
     CliffordTorusUniform,
     CliffordTorusDistribution,
     CliffordPowerSphericalDistribution,
+    clifford_embed,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "CliffordTorusUniform",
     "CliffordTorusDistribution",
     "CliffordPowerSphericalDistribution",
+    "clifford_embed",
 ]

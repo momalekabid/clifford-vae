@@ -376,7 +376,7 @@ def main(args):
 
     dist_lr = {
         "clifford": args.lr,
-        "powerspherical": 1e-4,
+        "powerspherical": args.lr,
         "gaussian": args.lr,
     }
 
@@ -438,8 +438,8 @@ def main(args):
         dim_results = {}
 
         for dist_name in distributions:
-            for trial in range(args.n_trials):
-                trial_suffix = f"-trial{trial+1}" if args.n_trials > 1 else ""
+            for trial in range(args.start_trial - 1, args.start_trial - 1 + args.n_trials):
+                trial_suffix = f"-trial{trial+1}"
                 exp_name = (
                     f"cifar10-{dist_name}-d{latent_dim}-{args.recon_loss}{trial_suffix}"
                 )
@@ -696,7 +696,8 @@ def main(args):
                         img_shape=IMG_SHAPE,
                     )
 
-                    mean_vector_acc = 0.0
+                    # mean-vector cosine was never computed for cifar (was hard-coded 0.0)
+                    mean_vector_acc = float("nan")
 
                     # log everything
                     fourier_metrics = {}
@@ -1008,6 +1009,7 @@ if __name__ == "__main__":
     p.add_argument("--patience", type=int, default=50, help="early stopping patience")
     p.add_argument("--cycle_epochs", type=int, default=250)
     p.add_argument("--n_trials", type=int, default=30)
+    p.add_argument("--start_trial", type=int, default=1, help="first trial number, so split sweeps do not overwrite each other")
     p.add_argument(
         "--exclude_class",
         type=int,

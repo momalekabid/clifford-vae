@@ -23,7 +23,8 @@ class IveFunction(torch.autograd.Function):
         #             print(v, type(v), np.isclose(v, 0))
         #             raise RuntimeError('v must be >= 0, it is {}'.format(v))
 
-        return torch.Tensor(output).to(z.device)
+        # keep z's dtype (the old torch.Tensor(...) cast silently dropped float64 to float32)
+        return torch.from_numpy(np.asarray(output)).to(device=z.device, dtype=z.dtype)
 
     @staticmethod
     def backward(self, grad_output):
@@ -44,6 +45,49 @@ class Ive(torch.nn.Module):
 
 
 ive = IveFunction.apply
+
+
+def _log_ive_debye(v, z):
+    # uniform asymptotic (debye) expansion of log(I_v(z) e^{-z}), leading term.
+    # accurate when v is large, which is exactly where scipy's ive underflows to 0.
+    t = z / v
+    s = np.sqrt(1.0 + t * t)
+    return v * (s + np.log(t / (1.0 + s))) - 0.5 * np.log(2 * np.pi * v) - 0.5 * np.log(s) - z
+
+
+def _log_ive_np(v, z):
+    z = np.asarray(z, dtype=np.float64)
+    out = np.log(scipy.special.ive(v, z))
+    bad = ~np.isfinite(out)
+    if bad.any():
+        out[bad] = _log_ive_debye(v, z[bad])
+    return out
+
+
+class LogIveFunction(torch.autograd.Function):
+    """log(I_v(z) e^{-z}) in float64, no epsilon. replaces log(ive(...) + 1e-20), which
+    swamped I_v for large v and gave negative KLs (d=40) and divergence (d=128)."""
+
+    @staticmethod
+    def forward(ctx, v, z):
+        assert isinstance(v, Number), "v must be a scalar"
+        ctx.save_for_backward(z)
+        ctx.v = v
+        out = _log_ive_np(v, z.detach().cpu().numpy())
+        return torch.from_numpy(out).to(device=z.device, dtype=z.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        z = ctx.saved_tensors[-1]
+        v = ctx.v
+        zn = z.detach().cpu().numpy().astype(np.float64)
+        # d/dz log(I_v e^{-z}) = I_{v-1}/I_v - v/z - 1
+        ratio = np.exp(_log_ive_np(v - 1, zn) - _log_ive_np(v, zn))
+        g = torch.from_numpy(ratio - v / zn - 1.0).to(device=z.device, dtype=z.dtype)
+        return None, grad_output * g
+
+
+log_ive = LogIveFunction.apply
 
 
 ##########

@@ -2,7 +2,7 @@ import math
 import torch
 from torch.distributions.kl import register_kl
 
-from hyperspherical_vae.ops.ive import ive, ive_fraction_approx2
+from hyperspherical_vae.ops.ive import ive, log_ive, ive_fraction_approx2
 from hyperspherical_vae.distributions.hyperspherical_uniform import (
     HypersphericalUniform,
 )
@@ -200,8 +200,7 @@ class VonMisesFisher(torch.distributions.Distribution):
     def _log_normalization(self):
         scale_64 = self.scale.to(torch.float64)
         m_by_2 = self.__m / 2
-        # added epsilon for log stability
-        log_ive_val = torch.log(ive(m_by_2 - 1, scale_64) + 1e-20)
+        log_ive_val = log_ive(m_by_2 - 1, scale_64)
 
         output = -(
             (m_by_2 - 1) * torch.log(scale_64)

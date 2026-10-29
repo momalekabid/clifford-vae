@@ -13,18 +13,25 @@ from dists.clifford import (
     HypersphericalUniform,
     CliffordPowerSphericalDistribution,
     CliffordTorusUniform,
+    clifford_embed,
 )
+
+# kappa cap scaled with the ambient dimension of each sphere (was a fixed max=10, which
+# pinned every S/V/C run at the clamp with zero gradient). see cnn/models.py.
+KAPPA_CAP_PER_DIM = 50.0
 
 
 class MLPVAE(nn.Module):
-    def __init__(self, h_dim: int, z_dim: int, distribution: str = "normal", l2_normalize: bool = False):
+    def __init__(self, h_dim: int, z_dim: int, distribution: str = "normal", l2_normalize: bool = False,
+                 x_dim: int = 784):
         super().__init__()
         self.z_dim = z_dim
+        self.x_dim = x_dim
         self.distribution = distribution
         self.l2_normalize = l2_normalize
 
         self.encoder = nn.Sequential(
-            nn.Linear(784, 256),
+            nn.Linear(x_dim, 256),
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -33,6 +40,10 @@ class MLPVAE(nn.Module):
         if self.distribution == "normal":
             self.fc_mean = nn.Linear(128, z_dim)
             self.fc_var = nn.Linear(128, z_dim)
+        elif self.distribution == "clifford":
+            # one concentration per circle
+            self.fc_mean = nn.Linear(128, z_dim)
+            self.fc_scale = nn.Linear(128, z_dim)
         else:
             self.fc_mean = nn.Linear(128, z_dim)
             self.fc_scale = nn.Linear(128, 1)
@@ -43,7 +54,7 @@ class MLPVAE(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 256),
             nn.ReLU(),
-            nn.Linear(256, 784),
+            nn.Linear(256, x_dim),
         )
 
         def init_weights(m: nn.Module):
@@ -63,12 +74,20 @@ class MLPVAE(nn.Module):
             return z_mean, self.fc_var(h)
         elif self.distribution in ["powerspherical", "vmf"]:
             z_mean = F.normalize(self.fc_mean(h), p=2, dim=-1)
-            z_scale = torch.clamp(F.softplus(self.fc_scale(h)) + 0.8, max=10.0)
+            z_scale = torch.clamp(F.softplus(self.fc_scale(h)) + 0.8, max=KAPPA_CAP_PER_DIM * self.z_dim)
             return z_mean, z_scale
-        else:  # clifford
+        else:  # clifford, each factor is S^1 in R^2
             z_mean_angles = self.fc_mean(h)
-            z_scale = torch.clamp(F.softplus(self.fc_scale(h)) + 0.03, max=10.0)
+            z_scale = torch.clamp(F.softplus(self.fc_scale(h)) + 0.03, max=KAPPA_CAP_PER_DIM * 2)
             return z_mean_angles, z_scale
+
+    def mean_code(self, x: torch.Tensor) -> torch.Tensor:
+        """deterministic code for every evaluation. clifford: the 2d unitary vector
+        at the mean angles, not the raw angles."""
+        z_mean, _ = self.encode(x.view(-1, self.x_dim))
+        if self.distribution == "clifford":
+            return clifford_embed(z_mean)
+        return z_mean
 
     def reparameterize(self, z_mean: torch.Tensor, z_param2: torch.Tensor):
         device = z_mean.device
@@ -95,7 +114,7 @@ class MLPVAE(nn.Module):
         return q_z, p_z
 
     def forward(self, x: torch.Tensor):
-        z_mean, z_param2 = self.encode(x.view(-1, 784))
+        z_mean, z_param2 = self.encode(x.view(-1, self.x_dim))
         q_z, p_z = self.reparameterize(z_mean, z_param2)
         z = q_z.rsample()
         if self.distribution == "normal" and self.l2_normalize:
@@ -120,13 +139,21 @@ def vae_loss(model: MLPVAE, x: torch.Tensor, beta: float = 1.0, return_dict: boo
     _, (q_z, p_z), _, x_recon = model(x)
 
     recon = F.binary_cross_entropy_with_logits(
-        x_recon, x.view(-1, 784), reduction="sum"
+        x_recon, x.view(-1, model.x_dim), reduction="sum"
     ) / x.size(0)
 
-    kl = torch.distributions.kl.kl_divergence(q_z, p_z).mean()
+    # normal returns per-dim terms (B, d): sum over dims, then mean over the batch.
+    # (was .mean() over both, i.e. KL/d for N and N_L2.) the other priors return (B,).
+    kl = torch.distributions.kl.kl_divergence(q_z, p_z)
+    if kl.dim() > 1:
+        kl = kl.sum(-1)
+    kl = kl.mean()
 
     try:
-        entropy = q_z.entropy().mean()
+        entropy = q_z.entropy()
+        if entropy.dim() > 1:
+            entropy = entropy.sum(-1)
+        entropy = entropy.mean()
     except (NotImplementedError, AttributeError):
         entropy = torch.tensor(0.0, device=x.device)
 
@@ -154,7 +181,7 @@ def compute_log_likelihood(model: MLPVAE, x: torch.Tensor, n_samples: int = 10) 
     returns:
         mc estimate of log p(x) averaged over batch
     """
-    x_flat = x.view(-1, 784)
+    x_flat = x.view(-1, model.x_dim)
     z_mean, z_param2 = model.encode(x_flat)
     q_z, p_z = model.reparameterize(z_mean, z_param2)
 
@@ -172,7 +199,7 @@ def compute_log_likelihood(model: MLPVAE, x: torch.Tensor, n_samples: int = 10) 
         log_p_z = log_p_z.sum(-1)  # (n_samples, batch)
 
     # log p(x|z)
-    x_expanded = x_flat.unsqueeze(0).expand(n_samples, -1, -1)  # (n_samples, batch, 784)
+    x_expanded = x_flat.unsqueeze(0).expand(n_samples, -1, -1)  # (n_samples, batch, x_dim)
     log_p_x_z = -F.binary_cross_entropy_with_logits(
         x_recon, x_expanded, reduction='none'
     ).sum(-1)  # (n_samples, batch)

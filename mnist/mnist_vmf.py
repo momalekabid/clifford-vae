@@ -502,15 +502,15 @@ def run(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="vMF-VAE on MNIST — minimal table runner")
 
-    parser.add_argument("--d_dims", type=int, nargs="+", default=[2, 5, 10, 20, 40],
+    parser.add_argument("--d_dims", type=int, nargs="+", default=[2, 5, 10, 20, 40, 128],
                         help="latent manifold dimensions")
     parser.add_argument("--h_dim", type=int, default=128)
-    parser.add_argument("--epochs", type=int, default=1000)
+    parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--patience", type=int, default=50)
     parser.add_argument("--warmup_epochs", type=int, default=100)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--n_runs", type=int, default=1,
+    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--n_runs", type=int, default=20,
                         help="runs to average for table")
     parser.add_argument("--no_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="mnist-vmf")

@@ -9,7 +9,7 @@ import math
 def hrr_init(n: int, d: int, device="cpu", dtype=torch.float32) -> torch.Tensor:
     return torch.randn(n, d, device=device, dtype=dtype) / math.sqrt(
         d
-    )  # N(0, 1/sqrt(d))
+    )  # N(0, 1/d): std 1/sqrt(d)
 
 
 def unitary_init(
@@ -56,7 +56,8 @@ def invert(a: torch.Tensor) -> torch.Tensor:
 def unbind(ab: torch.Tensor, b: torch.Tensor, method: str = "inv") -> torch.Tensor:
     """
     unbind operation for HRR vsa
-    - inv/*: x̂ = (ab) ⊛ a^{-1}, where a^{-1} = (a_n, ..., a_2, a_1)
+    - inv/*: x̂ = (ab) ⊛ b*, the involution b* = (b_0, b_{n-1}, ..., b_1) (approximate inverse,
+      exact for unitary b)
     - †/deconv: x̂ = IFFT( FFT(ab) / FFT(a) )
     """
     if method == "inv" or method == "*":

@@ -12,7 +12,17 @@ from dists.clifford import (
     HypersphericalUniform,
     CliffordPowerSphericalDistribution,
     CliffordTorusUniform,
+    clifford_embed,
 )
+
+# kappa cap scaled with the ambient dimension of each sphere. the old fixed cap of 10
+# made power spherical near-uniform at d=128 (E[cos] = kappa / (kappa + d - 1) ~ 0.07)
+# and pinned kappa with zero gradient. 50 * dim allows E[cos] ~ 0.98.
+KAPPA_CAP_PER_DIM = 50.0
+
+
+def kappa_cap(sphere_ambient_dim: int) -> float:
+    return KAPPA_CAP_PER_DIM * sphere_ambient_dim
 
 
 class ResBlock(nn.Module):
@@ -68,8 +78,12 @@ class Encoder(nn.Module):
         self.fc_mu = nn.Linear(self.flat_dim, latent_dim)
         if distribution == "gaussian":
             self.fc_log_var = nn.Linear(self.flat_dim, latent_dim)
+        elif distribution == "clifford":
+            # one concentration per circle
+            self.fc_concentration = nn.Linear(self.flat_dim, latent_dim)
         else:
             self.fc_concentration = nn.Linear(self.flat_dim, 1)
+        self.latent_dim = latent_dim
 
         def init_weights(m):
             if isinstance(m, (nn.Conv2d, nn.Linear)):
@@ -90,10 +104,11 @@ class Encoder(nn.Module):
             return mu, self.fc_log_var(x)
         elif self.distribution == "powerspherical":
             mu = F.normalize(mu, p=2, dim=-1)
-            kappa = torch.clamp(F.softplus(self.fc_concentration(x)) + 0.5, max=10.0)
+            kappa = torch.clamp(F.softplus(self.fc_concentration(x)) + 0.5, max=kappa_cap(self.latent_dim))
             return mu, kappa
         elif self.distribution == "clifford":
-            kappa = torch.clamp(F.softplus(self.fc_concentration(x)) + self.concentration_floor, max=10.0)
+            # each factor is S^1 in R^2
+            kappa = torch.clamp(F.softplus(self.fc_concentration(x)) + self.concentration_floor, max=kappa_cap(2))
             return mu, kappa
 
 
@@ -225,7 +240,7 @@ class VAE(nn.Module):
             )
             return q_z.rsample(), q_z, p_z
         elif self.distribution == "clifford":
-            q_z = CliffordPowerSphericalDistribution(mu, params.expand_as(mu))
+            q_z = CliffordPowerSphericalDistribution(mu, params)
             p_z = CliffordTorusUniform(
                 self.latent_dim, device=self.device, validate_args=False
             )
@@ -233,10 +248,19 @@ class VAE(nn.Module):
             return z, q_z, p_z
 
     def get_flat_latent(self, x):
-        """encode and return flat latent vector (B, latent_dim or 2*latent_dim)."""
+        """encode and return a SAMPLED flat latent (B, latent_dim or 2*latent_dim)."""
         mu, params = self.encoder(x)
         z, _, _ = self.reparameterize(mu, params)
         return z
+
+    def mean_code(self, x):
+        """deterministic code fed to every evaluation (k-NN, VSA tests, figures).
+        gaussian: mu (unit-norm for N_L2). power spherical: mean direction.
+        clifford: F^-1 of the hermitian unit-modulus spectrum at the mean angles (2d dims)."""
+        mu, _ = self.encoder(x)
+        if self.distribution == "clifford":
+            return clifford_embed(mu)
+        return mu
 
     def forward(self, x):
         mu, params = self.encoder(x)
