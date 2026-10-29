@@ -11,9 +11,16 @@ import time
 
 # must be set before cuda initialises for deterministic cublas
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+# several runs share one machine; torch would otherwise grab every core for tiny cpu ops
+# (the vsa tests), which is far slower than a few threads
+N_THREADS = int(os.environ.get("REVISION_THREADS", "4"))
+for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+    os.environ.setdefault(_v, str(N_THREADS))
 
 import numpy as np
 import torch
+
+torch.set_num_threads(N_THREADS)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
@@ -32,9 +39,13 @@ def seed_everything(seed: int) -> torch.Generator:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.use_deterministic_algorithms(True, warn_only=True)
+    if os.environ.get("REVISION_DETERMINISTIC", "1") == "1":
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    else:
+        # seeded but not bitwise reproducible across runs (faster cudnn kernels)
+        torch.backends.cudnn.benchmark = True
     g = torch.Generator()
     g.manual_seed(seed)
     return g

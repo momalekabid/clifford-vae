@@ -54,7 +54,7 @@ def _cached(name, build):
     path = os.path.join(CACHE, f"{name}.npz")
     if not os.path.exists(path):
         arrays = build()
-        tmp = path + ".tmp.npz"
+        tmp = f"{path}.{os.getpid()}.tmp.npz"
         np.savez_compressed(tmp, **arrays)
         os.replace(tmp, path)
     with np.load(path) as z:
@@ -109,21 +109,48 @@ def load_fashionmnist():
     return Data("fashionmnist", "cnn", 1, 32, train, val, Split(a["xte"], a["yte"]), knn_pool=train)
 
 
+def _hf_parquet(repo, split, size=None):
+    """images + labels from a huggingface parquet mirror (the official hosts are very slow).
+    cifar10: uoft-cs/cifar10. stl10: jxie/stl10 (train 5k, test 8k, unlabeled 100k)."""
+    import io
+    import json
+    import urllib.request
+
+    import pandas as pd
+    from PIL import Image
+
+    cfg = json.load(urllib.request.urlopen(f"https://huggingface.co/api/datasets/{repo}/parquet"))
+    urls = cfg[list(cfg)[0]][split]
+    df = pd.concat([pd.read_parquet(io.BytesIO(urllib.request.urlopen(u).read())) for u in urls])
+    col = "img" if "img" in df.columns else "image"
+    xs = []
+    for rec in df[col]:
+        img = Image.open(io.BytesIO(rec["bytes"])).convert("RGB")
+        if size is not None and img.size != (size, size):
+            img = img.resize((size, size), Image.BILINEAR)
+        xs.append(np.asarray(img, dtype=np.uint8).transpose(2, 0, 1))
+    y = df["label"].to_numpy().astype(np.int64) if "label" in df.columns else None
+    return np.stack(xs), y
+
+
 def load_cifar10():
-    a = _torchvision("cifar10")
+    def build():
+        xtr, ytr = _hf_parquet("uoft-cs/cifar10", "train")
+        xte, yte = _hf_parquet("uoft-cs/cifar10", "test")
+        assert len(xtr) == 50000 and len(xte) == 10000
+        return {"xtr": xtr, "ytr": ytr, "xte": xte, "yte": yte}
+
+    a = _cached("cifar10", build)
     train, val = _val_split(a["xtr"], a["ytr"])
     return Data("cifar10", "cnn", 3, 32, train, val, Split(a["xte"], a["yte"]), knn_pool=train)
 
 
 def load_stl10():
-    from torchvision import datasets
-
-    root = os.path.join(DATA_ROOT, "torchvision")
-
     def build():
         out = {}
-        for split, key in [("unlabeled", "xun"), ("train", "xtr"), ("test", "xte")]:
-            x, y = _tv_to_uint8(datasets.STL10(root, split=split, download=True), size=64)
+        for split, key, n in [("unlabeled", "xun", 100000), ("train", "xtr", 5000), ("test", "xte", 8000)]:
+            x, y = _hf_parquet("jxie/stl10", split, size=64)
+            assert len(x) == n, (split, len(x))
             out[key] = x
             if split != "unlabeled":
                 out["y" + key[1:]] = y

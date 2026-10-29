@@ -1,8 +1,8 @@
 """run the revision sweep. resumable, safe to start several workers on one or more gpus.
 
-    python revision/queue.py --workers 4                # all groups, seeds 1-10
-    python revision/queue.py --workers 4 --seeds 11-20  # second pass, adds seeds
-    python revision/queue.py --list                     # show the job order and status
+    python revision/sweep.py --workers 4                # all groups, seeds 1-10
+    python revision/sweep.py --workers 4 --seeds 11-20  # second pass, adds seeds
+    python revision/sweep.py --list                     # show the job order and status
 
 order: shapes2d, then cifar10 / fashionmnist / stl10, then mnist, and the mnist vMF runs
 last. within a group the order is seed-major, so every cell has seeds 1..n before any cell

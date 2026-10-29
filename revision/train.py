@@ -193,26 +193,36 @@ def main():
         return
 
     # ---------------- evaluation on the val-selected checkpoint, test set touched once
-    ck = torch.load(os.path.join(rd, "best.pt"), map_location=dev)
+    ck = torch.load(os.path.join(rd, "best.pt"), map_location=dev, weights_only=False)
     model.load_state_dict(ck["state"])
     model.eval()
     skip = set(filter(None, a.skip_evals.split(",")))
     common.seed_everything(a.seed)
+    t_ev = time.time()
+
+    def tick(name):
+        nonlocal_t = time.time()
+        print(f"eval {name}: {nonlocal_t - t_ev:.1f}s since start of evals", flush=True)
+
     metrics["test_elbo"] = E.test_elbo(model, te, 1000, seed=a.seed)
     metrics["recon_mae"] = E.recon_error(model, te)
     metrics["cost"].update(E.latency(model, te, dev))
+    tick("elbo+recon+latency")
     pool = data.knn_pool
     if pool is not None and pool.y is not None and "knn" not in skip and a.dataset != "shapes2d":
         pool_imgs = D.GpuImages(pool.x, dev, data.arch, binary=pool.extra.get("binary"))
         metrics["knn"] = E.knn(model, pool_imgs, pool.y, te, data.test.y, a.seed)
+        tick("knn")
         if a.slot_query:
             metrics["slot_query"] = E.slot_query(model, pool_imgs, pool.y, te, data.test.y, a.seed)
     if "vsa" not in skip and a.dataset != "shapes2d":
         metrics["vsa"], items = E.vsa(model, te, a.seed)
         torch.save({"codes": items, "labels": torch.from_numpy(data.test.y[: len(items)])},
                    os.path.join(rd, "codes_test1000.pt"))
+        tick("vsa")
     if data.arch == "cnn" and "fid" not in skip and a.dataset != "shapes2d":
         metrics["fid"] = E.generation_fid(model, te, a.seed)
+        tick("fid")
     if a.dataset == "shapes2d":
         un = D.GpuImages(data.extra_tests["unseen"].x, dev, "cnn")
         metrics["composition"] = E.composition(model, te, un, data.test.extra["labels"],
