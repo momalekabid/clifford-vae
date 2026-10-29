@@ -89,10 +89,14 @@ def test_cnn_vae_clifford_per_circle_gradients():
     loss = m.compute_loss(x, xr, q, p, 1.0)["total_loss"]
     loss.backward()
     g = m.encoder.fc_concentration.weight.grad
-    assert g.shape == (16, 2048)
-    # every circle except the unused index 0 gets a gradient
-    assert (g[1:].abs().sum(-1) > 0).all()
-    assert g[0].abs().sum() == 0
+    from cnn.models import CLIFFORD_PER_CIRCLE_KAPPA
+    assert g.shape == ((16 if CLIFFORD_PER_CIRCLE_KAPPA else 1), 2048)
+    if CLIFFORD_PER_CIRCLE_KAPPA:
+        # every circle except the unused index 0 gets a gradient
+        assert (g[1:].abs().sum(-1) > 0).all()
+        assert g[0].abs().sum() == 0
+    else:
+        assert g.abs().sum() > 0
     c = m.mean_code(x)
     assert c.shape == (4, 32)
     assert torch.allclose(c.norm(dim=-1), torch.ones(4), atol=1e-5)
@@ -109,7 +113,8 @@ def test_mlp_vae_kl_summed():
     got = vae_loss(m, x, return_dict=True)["kl"]
     assert torch.allclose(got, want, atol=1e-5)
     mc = MLPVAE(0, 10, "clifford")
-    assert mc.fc_scale.out_features == 10
+    import mnist.mlp_vae as mm
+    assert mc.fc_scale.out_features == (10 if mm.CLIFFORD_PER_CIRCLE_KAPPA else 1)
     assert mc.mean_code(x).shape == (8, 20)
 
 

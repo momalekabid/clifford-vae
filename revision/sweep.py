@@ -152,9 +152,12 @@ def main():
     p.add_argument("--seeds", default="1-10")
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--max_retries", type=int, default=1, help="re-runs of a failed run (fresh, same seed)")
+    p.add_argument("--priors", default=None, help="comma list, e.g. N,N_L2 (default: all)")
     p.add_argument("--list", action="store_true")
     a, extra_args = p.parse_known_args()
     joblist = jobs(a.groups.split(","), parse_seeds(a.seeds))
+    if a.priors:
+        joblist = [j for j in joblist if j[2] in a.priors.split(",")]
     if a.list:
         from collections import Counter
 

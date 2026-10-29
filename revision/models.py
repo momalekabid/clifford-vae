@@ -55,10 +55,11 @@ def concentration_stats(model, x):
             _, kappa = model.encoder(x)
         else:
             _, kappa = model.encode(x.view(len(x), -1))
+    from cnn.models import kappa_cap
     if model.prior_name == "C":
-        cap = 50.0 * 2
+        cap = kappa_cap(2)
     else:
-        cap = 50.0 * (model.latent_dim if model.arch == "cnn" else model.z_dim)
+        cap = kappa_cap(model.latent_dim if model.arch == "cnn" else model.z_dim)
     return {"kappa_mean": kappa.mean().item(), "kappa_at_cap": (kappa >= cap * 0.999).float().mean().item()}
 
 

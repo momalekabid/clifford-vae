@@ -21,7 +21,18 @@ from dists.clifford import (
 KAPPA_CAP_PER_DIM = 50.0
 
 
+# clifford: one kappa per image shared by all circles (the original setup). true gives one
+# kappa per circle.
+CLIFFORD_PER_CIRCLE_KAPPA = False
+
+
+# fixed cap as in the original runs. set to None to use the scaled cap above.
+KAPPA_CAP_FIXED = 10.0
+
+
 def kappa_cap(sphere_ambient_dim: int) -> float:
+    if KAPPA_CAP_FIXED is not None:
+        return KAPPA_CAP_FIXED
     return KAPPA_CAP_PER_DIM * sphere_ambient_dim
 
 
@@ -79,8 +90,7 @@ class Encoder(nn.Module):
         if distribution == "gaussian":
             self.fc_log_var = nn.Linear(self.flat_dim, latent_dim)
         elif distribution == "clifford":
-            # one concentration per circle
-            self.fc_concentration = nn.Linear(self.flat_dim, latent_dim)
+            self.fc_concentration = nn.Linear(self.flat_dim, latent_dim if CLIFFORD_PER_CIRCLE_KAPPA else 1)
         else:
             self.fc_concentration = nn.Linear(self.flat_dim, 1)
         self.latent_dim = latent_dim
@@ -240,7 +250,7 @@ class VAE(nn.Module):
             )
             return q_z.rsample(), q_z, p_z
         elif self.distribution == "clifford":
-            q_z = CliffordPowerSphericalDistribution(mu, params)
+            q_z = CliffordPowerSphericalDistribution(mu, params.expand_as(mu))
             p_z = CliffordTorusUniform(
                 self.latent_dim, device=self.device, validate_args=False
             )

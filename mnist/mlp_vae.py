@@ -19,6 +19,17 @@ from dists.clifford import (
 # kappa cap scaled with the ambient dimension of each sphere (was a fixed max=10, which
 # pinned every S/V/C run at the clamp with zero gradient). see cnn/models.py.
 KAPPA_CAP_PER_DIM = 50.0
+# fixed cap as in the original runs. set to None to use the scaled cap above.
+KAPPA_CAP_FIXED = 10.0
+
+
+def kappa_cap(sphere_ambient_dim: int) -> float:
+    if KAPPA_CAP_FIXED is not None:
+        return KAPPA_CAP_FIXED
+    return KAPPA_CAP_PER_DIM * sphere_ambient_dim
+
+# clifford: one kappa per image shared by all circles (the original setup). see cnn/models.py.
+CLIFFORD_PER_CIRCLE_KAPPA = False
 
 
 class MLPVAE(nn.Module):
@@ -41,9 +52,8 @@ class MLPVAE(nn.Module):
             self.fc_mean = nn.Linear(128, z_dim)
             self.fc_var = nn.Linear(128, z_dim)
         elif self.distribution == "clifford":
-            # one concentration per circle
             self.fc_mean = nn.Linear(128, z_dim)
-            self.fc_scale = nn.Linear(128, z_dim)
+            self.fc_scale = nn.Linear(128, z_dim if CLIFFORD_PER_CIRCLE_KAPPA else 1)
         else:
             self.fc_mean = nn.Linear(128, z_dim)
             self.fc_scale = nn.Linear(128, 1)
@@ -74,11 +84,11 @@ class MLPVAE(nn.Module):
             return z_mean, self.fc_var(h)
         elif self.distribution in ["powerspherical", "vmf"]:
             z_mean = F.normalize(self.fc_mean(h), p=2, dim=-1)
-            z_scale = torch.clamp(F.softplus(self.fc_scale(h)) + 0.8, max=KAPPA_CAP_PER_DIM * self.z_dim)
+            z_scale = torch.clamp(F.softplus(self.fc_scale(h)) + 0.8, max=kappa_cap(self.z_dim))
             return z_mean, z_scale
         else:  # clifford, each factor is S^1 in R^2
             z_mean_angles = self.fc_mean(h)
-            z_scale = torch.clamp(F.softplus(self.fc_scale(h)) + 0.03, max=KAPPA_CAP_PER_DIM * 2)
+            z_scale = torch.clamp(F.softplus(self.fc_scale(h)) + 0.03, max=kappa_cap(2))
             return z_mean_angles, z_scale
 
     def mean_code(self, x: torch.Tensor) -> torch.Tensor:
@@ -109,7 +119,7 @@ class MLPVAE(nn.Module):
             q_z = VonMisesFisher(z_mean, z_param2)
             p_z = VMFUniform(self.z_dim - 1, device=device, validate_args=False)
         else:  # clifford
-            q_z = CliffordPowerSphericalDistribution(z_mean, z_param2)
+            q_z = CliffordPowerSphericalDistribution(z_mean, z_param2.expand_as(z_mean))
             p_z = CliffordTorusUniform(self.z_dim, device=device, validate_args=False)
         return q_z, p_z
 
