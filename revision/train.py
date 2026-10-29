@@ -66,8 +66,10 @@ def parse():
     p.add_argument("--out", type=str, default=None, help="override run dir")
     p.add_argument("--clifford_kappa", choices=["shared", "per_circle"], default="shared",
                    help="one kappa per image (original) or one per circle")
-    p.add_argument("--kappa_cap", choices=["fixed", "scaled"], default="fixed",
-                   help="fixed max 10 (original) or 50 x sphere ambient dim")
+    p.add_argument("--kappa_cap", choices=["fixed", "scaled"], default="scaled",
+                   help="S/V: fixed max 10 (original) or 50 x sphere ambient dim")
+    p.add_argument("--clifford_kappa_cap", choices=["fixed", "scaled"], default="fixed",
+                   help="clifford circles: fixed max 10 (original) or 50 x 2")
     a = p.parse_args()
     arch = "mlp" if a.dataset == "mnist" else "cnn"
     for k, v in DEFAULTS[arch].items():
@@ -96,6 +98,7 @@ def main():
     for mod in (cm, mm):
         mod.CLIFFORD_PER_CIRCLE_KAPPA = a.clifford_kappa == "per_circle"
         mod.KAPPA_CAP_FIXED = 10.0 if a.kappa_cap == "fixed" else None
+        mod.CLIFFORD_KAPPA_CAP_FIXED = 10.0 if a.clifford_kappa_cap == "fixed" else None
     model = M.build(a.prior, a.d, data, dev)
 
     cfg = {"args": vars(a), "run_dir": rd, "n_params": M.n_params(model), "grad_clip": GRAD_CLIP,

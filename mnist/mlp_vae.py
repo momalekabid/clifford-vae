@@ -19,13 +19,17 @@ from dists.clifford import (
 # kappa cap scaled with the ambient dimension of each sphere (was a fixed max=10, which
 # pinned every S/V/C run at the clamp with zero gradient). see cnn/models.py.
 KAPPA_CAP_PER_DIM = 50.0
-# fixed cap as in the original runs. set to None to use the scaled cap above.
-KAPPA_CAP_FIXED = 10.0
+# fixed caps (None = the scaled cap above). the cifar pilot (seed 1, d 128/1024) kept the
+# original max 10 for clifford circles; power spherical at max 10 collapses to the uniform
+# prior (kl 0.3, k-NN at chance), so S/V use the scaled cap.
+KAPPA_CAP_FIXED = None
+CLIFFORD_KAPPA_CAP_FIXED = 10.0
 
 
-def kappa_cap(sphere_ambient_dim: int) -> float:
-    if KAPPA_CAP_FIXED is not None:
-        return KAPPA_CAP_FIXED
+def kappa_cap(sphere_ambient_dim: int, clifford: bool = False) -> float:
+    fixed = CLIFFORD_KAPPA_CAP_FIXED if clifford else KAPPA_CAP_FIXED
+    if fixed is not None:
+        return fixed
     return KAPPA_CAP_PER_DIM * sphere_ambient_dim
 
 # clifford: one kappa per image shared by all circles (the original setup). see cnn/models.py.
@@ -88,7 +92,7 @@ class MLPVAE(nn.Module):
             return z_mean, z_scale
         else:  # clifford, each factor is S^1 in R^2
             z_mean_angles = self.fc_mean(h)
-            z_scale = torch.clamp(F.softplus(self.fc_scale(h)) + 0.03, max=kappa_cap(2))
+            z_scale = torch.clamp(F.softplus(self.fc_scale(h)) + 0.03, max=kappa_cap(2, clifford=True))
             return z_mean_angles, z_scale
 
     def mean_code(self, x: torch.Tensor) -> torch.Tensor:
