@@ -46,11 +46,18 @@ def parse_seeds(s):
 
 
 def jobs(groups, seeds):
+    # seed-major across groups too, so seed 1 of every group finishes before any seed 2.
+    # mnist_vmf still goes last.
     out = []
-    for g in groups:
-        for seed in seeds:
+    main = [g for g in groups if g != "mnist_vmf"]
+    for seed in seeds:
+        for g in main:
             for ds, prior, d, extra in GROUPS[g]:
                 out.append((g, ds, prior, d, seed, extra))
+    if "mnist_vmf" in groups:
+        for seed in seeds:
+            for ds, prior, d, extra in GROUPS["mnist_vmf"]:
+                out.append(("mnist_vmf", ds, prior, d, seed, extra))
     return out
 
 
