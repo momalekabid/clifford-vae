@@ -2,7 +2,8 @@
 # pull finished runs from the pod to the mac every 2 hours.
 # on the pod, each finished run's best.pt gets an fp16 copy (best_fp16.pt); only that copy comes
 # down (the fp32 set for 20 seeds is ~52 GB, too big for this disk). wandb dirs, locks and
-# codes_test1000.pt (regenerable from the checkpoint) stay on the pod.
+# codes_test1000.pt (regenerable from the checkpoint) stay on the pod. pod fp16 copies are
+# deleted once they are here (marker best_fp16.pt.synced).
 #
 #   nohup bash revision/sync_results.sh > ~/clifford_sync.log 2>&1 &
 #   stop: pkill -f sync_results.sh
@@ -17,7 +18,8 @@ for m in glob.glob("/workspace/results_rev/*/*/seed*/metrics.json"):
     rd = os.path.dirname(m)
     src, dst = os.path.join(rd, "best.pt"), os.path.join(rd, "best_fp16.pt")
     try:
-        if json.load(open(m)).get("status") != "done" or not os.path.exists(src) or os.path.exists(dst):
+        if json.load(open(m)).get("status") != "done" or not os.path.exists(src) or os.path.exists(dst) \
+                or os.path.exists(dst + ".synced"):
             continue
     except Exception:
         continue
@@ -29,8 +31,11 @@ for m in glob.glob("/workspace/results_rev/*/*/seed*/metrics.json"):
     n += 1
 print("fp16 copies made:", n)
 EOF'
-  rsync -az --exclude best.pt --exclude '*.tmp' --exclude .lock --exclude wandb/ --exclude codes_test1000.pt \
+  rsync -az --exclude best.pt --exclude '*.tmp' --exclude '*.synced' --exclude .lock --exclude wandb/ --exclude codes_test1000.pt \
     "$HOST":/workspace/results_rev/ "$DEST"/
+  # free pod disk: drop fp16 copies that arrived intact, leave a marker so they aren't remade
+  ( cd "$DEST" && find . -name best_fp16.pt -exec stat -f "%z %N" {} \; ) | ssh "$HOST" 'cd /workspace/results_rev && while read size f; do
+      [ -f "$f" ] && [ "$(stat -c %s "$f")" = "$size" ] && rm -f "$f" && touch "$f.synced"; done'
   echo "$(date) synced: $(ls "$DEST"/*/*/seed*/best_fp16.pt 2>/dev/null | wc -l) checkpoints, $(du -sh "$DEST" | cut -f1)"
   sleep 7200
 done
