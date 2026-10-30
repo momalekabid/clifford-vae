@@ -17,7 +17,7 @@ from mnist.mlp_vae import MLPVAE, vae_loss
 from dists.clifford import CliffordTorusUniform, HypersphericalUniform
 
 PRIORS = ["N", "N_L2", "S", "V", "C"]
-EUCLIDEAN_PRIORS = {"N", "N_L2"}  # k-NN metric; cosine for the rest
+EUCLIDEAN_PRIORS = set()  # k-NN metric: cosine for every prior (euclidean also logged, evals.knn)
 
 
 def build(prior: str, d: int, data, dev):

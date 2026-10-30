@@ -47,3 +47,4 @@ wandb/
 test_integration.py
 cnn/experimental/
 poster/
+results_rev/
