@@ -82,7 +82,11 @@ def main():
             if ds not in cache:
                 cache[ds] = D.load(ds)
             model = M.build(cfg["prior"], cfg["d"], cache[ds], dev)
-            model.load_state_dict(torch.load(os.path.join(rd, "best.pt"), map_location=dev)["state"])
+            # pod fp32 best.pt is dropped once the fp16 copy is synced; load_state_dict upcasts
+            ck = os.path.join(rd, "best.pt")
+            if not os.path.exists(ck):
+                ck = os.path.join(rd, "best_fp16.pt")
+            model.load_state_dict(torch.load(ck, map_location=dev)["state"])
             model.eval()
             common.write_json(out, run(model, cache[ds], dev, seed))
             print(rd, flush=True)
