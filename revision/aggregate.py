@@ -235,22 +235,30 @@ def vsa_figure(runs, dataset, d, priors, refs, out):
 
     panels = [("bundle_capacity", "k", "accuracy", "bundle capacity", "k bundled"),
               ("unbinding_depth_inv", "m", "similarity", "unbinding depth (*)", "m bindings"),
-              ("role_filler", "k", "accuracy", "role-filler (Schlegel 3.3)", "k pairs")]
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.2))
+              ("role_filler", "k", "accuracy", "role-filler, image roles", "k pairs"),
+              ("symbolic_role_filler", "k", "accuracy", "role-filler, random roles", "k pairs")]
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4.2))
     colors = {"N": "C0", "N_L2": "C1", "S": "C2", "V": "C4", "C": "C3"}
+    # panel d = effective vector length. clifford with d/2 angles is a length-d vector, so it is
+    # the matched curve (solid); clifford with d angles (length 2d) is overlaid dashed. at the
+    # smallest d there is no d/2 run and only the dashed curve appears.
+    lines = [(p, d, "-") for p in priors if p != "C"]
+    if "C" in priors:
+        lines += [("C", d // 2, "-"), ("C", d, "--")]
     ref_dims = set()
     for ax, (name, xk, yk, title, xl) in zip(axes, panels):
-        for p in priors:
-            ms = runs.get((dataset, cell_name(p, d)), {"done": []})["done"]
-            curves = [m["vsa"][name] for m in ms if "vsa" in m]
+        for p, dl, ls in lines:
+            ms = runs.get((dataset, cell_name(p, dl)), {"done": []})["done"]
+            curves = [m["vsa"][name] for m in ms if "vsa" in m and name in m["vsa"]]
             if not curves:
                 continue
-            ref_dims.add(ms[0]["vsa"]["dim"])
+            D = ms[0]["vsa"]["dim"]
+            ref_dims.add(D)
             x = np.array(curves[0][xk])
             Y = np.array([c[yk] for c in curves])
             mean = Y.mean(0)
             band = np.array([hdi(Y[:, j]) for j in range(Y.shape[1])]) if len(Y) > 1 else None
-            ax.plot(x, mean, color=colors[p], label=f"{DISP[p]} (D={ms[0]['vsa']['dim']})")
+            ax.plot(x, mean, color=colors[p], ls=ls, label=f"{DISP[p]} d={dl} (effective d={D})")
             if band is not None:
                 ax.fill_between(x, band[:, 0], band[:, 1], color=colors[p], alpha=0.15, lw=0)
         for D in sorted(ref_dims):
@@ -260,7 +268,8 @@ def vsa_figure(runs, dataset, d, priors, refs, out):
                     continue
                 x = np.array(rs[0][name][xk])
                 Y = np.array([r[name][yk] for r in rs])
-                ax.plot(x, Y.mean(0), color="k", ls=ls, lw=1, label=f"random {kind} (D={D})")
+                ax.plot(x, Y.mean(0), color="k" if D == d else "0.6", ls=ls, lw=1,
+                        label=f"random {kind} (effective d={D})")
         ax.set_title(title)
         ax.set_xlabel(xl)
         ax.set_ylim(-0.02, 1.02)
