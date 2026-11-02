@@ -5,9 +5,9 @@
 # codes_test1000.pt (regenerable from the checkpoint) stay on the pod. once the fp16 copy is
 # here, the pod fp16 copy and the fp32 best.pt are deleted (marker best_fp16.pt.synced).
 #
-#   nohup bash revision/sync_results.sh > ~/clifford_sync.log 2>&1 &
-#   stop: pkill -f sync_results.sh
-HOST=${HOST:-clifford-pod}
+#   nohup bash revision/sync_results.sh clifford-pod > ~/clifford_sync.log 2>&1 &
+#   stop: pkill -f "sync_results.sh clifford-pod$"
+HOST=${1:-clifford-pod}
 DEST=${DEST:-$HOME/Desktop/clifford-vae/results_rev}
 mkdir -p "$DEST"
 while true; do
