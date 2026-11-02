@@ -41,6 +41,8 @@ def normalize_vectors(x: torch.Tensor) -> torch.Tensor:
 
 
 def bind(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    # torch 2.7's cpu (mkl) fft rejects expanded, stride-0 inputs
+    a, b = a.contiguous(), b.contiguous()
     fa = torch.fft.fft(a, dim=-1)
     fb = torch.fft.fft(b, dim=-1)
     return torch.fft.ifft(fa * fb, dim=-1).real
