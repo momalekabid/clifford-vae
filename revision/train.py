@@ -28,8 +28,11 @@ from revision import models as M  # noqa: E402
 DEFAULTS = {
     "mlp": dict(optim="adam", lr=1e-3, batch_size=128, epochs=500, patience=50, warmup=100,
                 schedule="warmup", beta_min=1.0, beta_max=1.0, cycle=250),
+    # cnn: was cyclical [0.1, 1] with period 250, but early stopping on the beta=1 val elbo always
+    # fired on the first downswing (~epoch 170), so the cycle never ran. constant beta=1 after
+    # the warm-up instead, same as mnist.
     "cnn": dict(optim="adamw", lr=3e-4, batch_size=256, epochs=500, patience=50, warmup=100,
-                schedule="cyclical", beta_min=0.1, beta_max=1.0, cycle=250),
+                schedule="warmup", beta_min=1.0, beta_max=1.0, cycle=250),
 }
 GRAD_CLIP = 1.0
 WEIGHT_DECAY = 0.01  # adamw default, stated in methods
@@ -220,7 +223,7 @@ def main():
     metrics["recon_mae"] = E.recon_error(model, te)
     metrics["cost"].update(E.latency(model, te, dev))
     tick("elbo+recon+latency")
-    pool = data.knn_pool
+    pool, pool_imgs = data.knn_pool, None
     if pool is not None and pool.y is not None and "knn" not in skip and a.dataset != "shapes2d":
         pool_imgs = D.GpuImages(pool.x, dev, data.arch, binary=pool.extra.get("binary"))
         metrics["knn"] = E.knn(model, pool_imgs, pool.y, te, data.test.y, a.seed)
@@ -232,6 +235,13 @@ def main():
         torch.save({"codes": items, "labels": torch.from_numpy(data.test.y[: len(items)])},
                    os.path.join(rd, "codes_test1000.pt"))
         tick("vsa")
+        if "vsa_extra" not in skip:
+            metrics["vsa_extra"] = E.vsa_extras(items, a.seed)
+            tick("vsa_extra")
+        if "sampled" not in skip and data.arch == "cnn":
+            metrics["sampled"] = E.sampled(model, pool_imgs, pool.y if pool_imgs is not None else None,
+                                           te, data.test.y, a.seed)
+            tick("sampled")
     if data.arch == "cnn" and "fid" not in skip and a.dataset != "shapes2d":
         metrics["fid"] = E.generation_fid(model, te, a.seed)
         tick("fid")
@@ -242,7 +252,7 @@ def main():
     metrics["time_end"] = time.strftime("%Y-%m-%d %H:%M:%S")
     common.write_json(mpath, metrics)
     if wb is not None:
-        flat = common.flatten_scalars({k: v for k, v in metrics.items() if k != "vsa"}, "test/")
+        flat = common.flatten_scalars({k: v for k, v in metrics.items() if k not in ("vsa", "vsa_extra")}, "test/")
         if "vsa" in metrics:
             for name in ["bundle_capacity", "role_filler", "symbolic_role_filler"]:
                 r = metrics["vsa"][name]

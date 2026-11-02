@@ -218,6 +218,39 @@ def evaluate_extra(items: torch.Tensor, n_trials: int = SCHLEGEL_N_TRIALS, seed:
     return out
 
 
+def two_bundle_trials(items: torch.Tensor, k_range, n_trials: int, seed: int = 0) -> Dict:
+    """the submission's bundle test: draw 2k items, bundle the first k (C1) and the second k
+    (C2). accuracy = fraction of the first k closer (cosine) to C1 than to C2. chance is 0.5."""
+    g = _gen(seed)
+    unit = normalize_vectors(items.cpu())
+    n = len(unit)
+    results = {"k": [], "accuracy": [], "std": []}
+    for k in k_range:
+        if 2 * k > n:
+            break
+        accs = []
+        for _ in range(n_trials):
+            idx = torch.randperm(n, generator=g)[: 2 * k]
+            x = unit[idx[:k]]
+            c1, c2 = normalize_vectors(x.sum(0)), normalize_vectors(unit[idx[k:]].sum(0))
+            accs.append((x @ c1 > x @ c2).float().mean().item())
+        results["k"].append(k)
+        results["accuracy"].append(float(np.mean(accs)))
+        results["std"].append(float(np.std(accs)))
+    return results
+
+
+def evaluate_flow_extras(items: torch.Tensor, n_trials: int = SCHLEGEL_N_TRIALS, seed: int = 0,
+                         k_range=None, heights=(1, 2, 3, 4, 5, 6)) -> Dict:
+    """extras run inside train.py: the submission's two-bundle test and tree decoding with
+    standard vs fourier-space permutations (polar bundling was dropped)."""
+    k_range = k_range or SCHLEGEL_K_RANGE
+    out = {"dim": int(items.shape[-1]), "two_bundle": two_bundle_trials(items, k_range, n_trials, seed)}
+    for kind in ("standard", "fourier"):
+        out[f"tree_{kind}"] = tree_trials(items, heights, n_trials, kind, seed)
+    return out
+
+
 def evaluate_items(items: torch.Tensor, n_trials: int = SCHLEGEL_N_TRIALS, seed: int = 0,
                    k_range=None, n_bind: int = SCHLEGEL_DEPTH) -> Dict:
     """all benchmarks on one item memory (encoded images or random atoms).

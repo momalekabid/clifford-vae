@@ -15,7 +15,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from revision import models as M
 from revision.data import CACHE, GpuImages
 from utils.vsa import bind, bundle, normalize_vectors, unbind, unitary_init
-from utils.vsa_schlegel import evaluate_items
+from utils.vsa_schlegel import evaluate_flow_extras, evaluate_items
 
 KNN_BUDGETS = [100, 600, 1000]
 KNN_K = 5
@@ -116,6 +116,38 @@ def vsa(model, test, seed):
     res["mean_pairwise_cos"] = float(((unit @ unit.T).sum() - len(unit)) / (len(unit) * (len(unit) - 1)))
     res["norm_of_mean_code"] = float(unit.mean(0).norm())
     return res, items
+
+
+def vsa_extras(items, seed):
+    """two-bundle test (submission protocol) and binary trees, on the same mean codes."""
+    return evaluate_flow_extras(items, seed=seed)
+
+
+@torch.no_grad()
+def sampled(model, pool, pool_y, test, test_y, seed):
+    """vsa tests and k-NN on one posterior sample per image (the submission evaluated samples),
+    plus decode error of mean vs sampled codes. appendix comparison; the mean code stays primary."""
+    x = test.get(torch.arange(VSA_ITEMS, device=test.x.device))
+    mean = model.mean_code(x)
+    if model.prior_name == "N_L2":
+        mean = F.normalize(mean, dim=-1)
+    torch.manual_seed(seed)
+    samp = model.get_flat_latent(x)
+    out = {"decode_l1_mean": ((model.decoder(mean) - x).abs() / 2).mean().item(),
+           "decode_l1_sample": ((model.decoder(samp) - x).abs() / 2).mean().item(),
+           "cos_sample_to_mean": F.cosine_similarity(samp, mean, dim=-1).mean().item()}
+    # evals.vsa / evals.knn read model.mean_code; point it at a seeded sample, then restore
+    orig = model.mean_code
+    model.mean_code = model.get_flat_latent
+    try:
+        torch.manual_seed(seed)
+        out["vsa"], _ = vsa(model, test, seed)
+        if pool is not None:
+            torch.manual_seed(seed)
+            out["knn"] = knn(model, pool, pool_y, test, test_y, seed)
+    finally:
+        model.mean_code = orig
+    return out
 
 
 # ---------------------------------------------------------------- slot query (downstream task)

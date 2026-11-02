@@ -1,5 +1,5 @@
 #!/bin/bash
-# runs on the mac. waits for the cnn seeds 11-30 sweep to exit, then: pushes the seed 1 fp16
+# runs on the mac. waits for the cnn seeds 1-30 sweep to exit, then: pushes the seed 1 fp16
 # checkpoints to a separate root on the pod (so the sync loop never touches them), runs the
 # clean timing on the now idle gpu, pulls timing.json back, waits until every finished run is
 # synced to the mac, then stops (not terminates) the pod.
@@ -7,7 +7,7 @@ HOST=clifford-pod
 POD=2rarwzc6vgkvvx
 LOCAL=$HOME/Desktop/clifford-vae/results_rev
 q() { ssh -o ConnectTimeout=60 "$HOST" "$1" 2>/dev/null; }
-while [ "$(q 'pgrep -f "[s]weep.py --groups cifar10,fashionmnist --seeds 11-30" >/dev/null && echo up || echo down')" != "down" ]; do sleep 900; done
+while [ "$(q 'pgrep -f "[s]weep.py --groups cifar10,fashionmnist --seeds 1-30" >/dev/null && echo up || echo down')" != "down" ]; do sleep 900; done
 echo "$(date) sweep finished"
 
 cd "$LOCAL" && rsync -aR --include '*/' --include 'seed1/best_fp16.pt' --include 'seed1/config.json' --exclude '*' \
