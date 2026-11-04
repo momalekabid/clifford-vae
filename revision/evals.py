@@ -60,7 +60,7 @@ def recon_error(model, images, bs=500):
 
 def knn(model, pool, pool_y, test, test_y, seed):
     """fit a 5-NN on n labelled pool images (random, seeded), score the FULL test set.
-    primary metric: cosine for every prior. euclidean is logged too (euc_acc_n)."""
+    primary metric: euclidean for N, cosine otherwise. the other metric is logged too (euc_acc_n / cos_acc_n)."""
     metric = "euclidean" if model.prior_name in M.EUCLIDEAN_PRIORS else "cosine"
     zp = M.mean_codes(model, pool).cpu().numpy()
     zt = M.mean_codes(model, test).cpu().numpy()
@@ -72,9 +72,9 @@ def knn(model, pool, pool_y, test, test_y, seed):
         pred = clf.predict(zt)
         out[f"acc_{n}"] = float(accuracy_score(test_y, pred))
         out[f"f1_macro_{n}"] = float(f1_score(test_y, pred, average="macro"))
-        if metric != "euclidean":
-            clf = KNeighborsClassifier(n_neighbors=KNN_K, metric="euclidean").fit(zp[idx], pool_y[idx])
-            out[f"euc_acc_{n}"] = float(accuracy_score(test_y, clf.predict(zt)))
+        other = "cosine" if metric == "euclidean" else "euclidean"
+        clf = KNeighborsClassifier(n_neighbors=KNN_K, metric=other).fit(zp[idx], pool_y[idx])
+        out[f"{other[:3]}_acc_{n}"] = float(accuracy_score(test_y, clf.predict(zt)))
     return out
 
 

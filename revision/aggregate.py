@@ -78,10 +78,18 @@ def cell_name(prior, d, beta_max=1.0):
     return f"{prior}-d{d}" + ("" if beta_max == 1.0 else f"-b{beta_max:g}")
 
 
+def knn_path(m, prior, path):
+    """N is scored with euclidean k-NN. runs from before that switch stored cosine as primary
+    and euclidean under euc_acc_n."""
+    if prior == "N" and path.startswith("knn.acc_") and get(m, "knn.metric") == "cosine":
+        return path.replace("knn.acc_", "knn.euc_acc_")
+    return path
+
+
 def values(runs, dataset, cell, path):
     out = []
     for m in runs.get((dataset, cell), {"done": []})["done"]:
-        v = get(m, path)
+        v = get(m, knn_path(m, cell.split("-d")[0], path))
         if v is not None and np.isfinite(v):
             out.append(float(v))
     return np.array(out)
