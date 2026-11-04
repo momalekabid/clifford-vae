@@ -239,37 +239,29 @@ def vsa_figure(runs, dataset, d, priors, refs, out):
               ("symbolic_role_filler", "k", "accuracy", "role-filler, random roles", "k pairs")]
     fig, axes = plt.subplots(1, 4, figsize=(20, 4.2))
     colors = {"N": "C0", "N_L2": "C1", "S": "C2", "V": "C4", "C": "C3"}
-    # panel d = effective vector length. clifford with d/2 angles is a length-d vector, so it is
-    # the matched curve (solid); clifford with d angles (length 2d) is overlaid dashed. at the
-    # smallest d there is no d/2 run and only the dashed curve appears.
-    lines = [(p, d, "-") for p in priors if p != "C"]
-    if "C" in priors:
-        lines += [("C", d // 2, "-"), ("C", d, "--")]
-    ref_dims = set()
+    # every prior at the same latent d, as in the paper. clifford with d angles is a length-2d
+    # vector, so the random baseline is unitary at length 2d (same vector length as clifford).
     for ax, (name, xk, yk, title, xl) in zip(axes, panels):
-        for p, dl, ls in lines:
-            ms = runs.get((dataset, cell_name(p, dl)), {"done": []})["done"]
+        D_ref = None
+        for p in priors:
+            ms = runs.get((dataset, cell_name(p, d)), {"done": []})["done"]
             curves = [m["vsa"][name] for m in ms if "vsa" in m and name in m["vsa"]]
             if not curves:
                 continue
-            D = ms[0]["vsa"]["dim"]
-            ref_dims.add(D)
+            if p == "C":
+                D_ref = ms[0]["vsa"]["dim"]
             x = np.array(curves[0][xk])
             Y = np.array([c[yk] for c in curves])
             mean = Y.mean(0)
             band = np.array([hdi(Y[:, j]) for j in range(Y.shape[1])]) if len(Y) > 1 else None
-            ax.plot(x, mean, color=colors[p], ls=ls, label=f"{DISP[p]} d={dl} (effective d={D})")
+            ax.plot(x, mean, color=colors[p], label=f"{DISP[p]} d={d}")
             if band is not None:
                 ax.fill_between(x, band[:, 0], band[:, 1], color=colors[p], alpha=0.15, lw=0)
-        for D in sorted(ref_dims):
-            for kind, ls in (("hrr", ":"), ("unitary", "--")):
-                rs = refs.get(f"{kind}-{D}")
-                if not rs:
-                    continue
-                x = np.array(rs[0][name][xk])
-                Y = np.array([r[name][yk] for r in rs])
-                ax.plot(x, Y.mean(0), color="k" if D == d else "0.6", ls=ls, lw=1,
-                        label=f"random {kind} (effective d={D})")
+        rs = refs.get(f"unitary-{D_ref}") if D_ref else None
+        if rs:
+            x = np.array(rs[0][name][xk])
+            Y = np.array([r[name][yk] for r in rs])
+            ax.plot(x, Y.mean(0), color="k", ls="--", lw=1, label=f"random unitary (length {D_ref})")
         ax.set_title(title)
         ax.set_xlabel(xl)
         ax.set_ylim(-0.02, 1.02)
