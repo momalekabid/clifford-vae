@@ -1,0 +1,20 @@
+# conda env create -f environment.yml && conda activate clifford-vae
+name: clifford-vae
+channels: [pytorch, nvidia, conda-forge]
+dependencies:
+  - python=3.12
+  - pytorch>=2.1
+  - torchvision>=0.16
+  - pytorch-cuda=12.4  # drop this line on macos / cpu-only machines
+  - numpy>=1.24
+  - scipy>=1.10
+  - scikit-learn>=1.3
+  - matplotlib>=3.7
+  - pandas>=2.0
+  - pyarrow>=14
+  - h5py>=3.9
+  - pytest>=7
+  - pip
+  - pip:
+      - torchmetrics[image]>=1.0
+      - wandb>=0.15

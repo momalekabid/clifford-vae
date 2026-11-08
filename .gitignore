@@ -5,7 +5,6 @@
 # Python
 __pycache__/
 .csv
-uv.lock
 
 # Envs
 .venv/
@@ -28,6 +27,8 @@ dist/
 data/
 datasets/
 results/
+runs/
+runs_pilot/
 visualizations
 
 # Weights & Biases
@@ -48,3 +49,17 @@ test_integration.py
 cnn/experimental/
 poster/
 results_rev/
+
+# local only (paper sources, old results, talks, side projects)
+results_rev_cyclic/
+overleaf/
+figures/
+dsprites/
+spherear/
+activate/
+.claude/
+*.pptx
+~$*
+
+# local checks, not shared
+tests/
