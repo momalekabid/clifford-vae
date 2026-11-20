@@ -21,8 +21,8 @@ DEPTH = 40
 
 
 def hrr_init(n, d, gen=None):
-    """n canonical hrr vectors: iid normal elements with variance 1/d (plate 2003)."""
-    return torch.randn(n, d, generator=gen) / math.sqrt(d)
+    """n canonical hrr vectors: iid normal elements with variance 1/d (plate 2003), scaled to unit length."""
+    return F.normalize(torch.randn(n, d, generator=gen) / math.sqrt(d), dim=-1)
 
 
 def unitary_init(n, d, gen=None):
@@ -224,8 +224,7 @@ def reference(dim, seed=0, n=N_ITEMS, n_trials=REF_TRIALS):
 
 
 def reference_hrr(dim, seed=0, n=N_ITEMS, n_trials=REF_TRIALS):
-    """a memory of n canonical (non-unitary) hrr vectors of length dim. the figures call it with half the length
-    of the unitary baseline (d real components against d phases, as schlegel et al. 2022 compare hrr and fhrr).
-    in the two random variants its random roles / fillers are unitary, as for every other curve (pass
-    atom_init=hrr_init to evaluate() for canonical ones)."""
-    return evaluate(hrr_init(n, dim, _g(seed + 20_000)), None, seed, n_trials)
+    """a memory of n canonical (non-unitary) hrr vectors of length dim, by default the length of the unitary
+    baseline. in the two random variants its random roles / fillers are canonical hrr vectors as well, so that
+    no unitary vector enters the hrr reference (schlegel et al. 2022 use hrr vectors throughout)."""
+    return evaluate(hrr_init(n, dim, _g(seed + 20_000)), None, seed, n_trials, atom_init=hrr_init)

@@ -43,8 +43,8 @@ python run_experiments.py --list                            # what's done, runni
 python timing.py --datasets cifar10,fashionmnist            # cost numbers, on an idle gpu
 python tables.py                                            # -> runs/_aggregate/tables
 python figures.py                                           # -> runs/_aggregate/figures
-python figures.py --vsa-only --hrr-length d                 # only the vsa curves; hrr reference with d components
-                                                            # (schlegel et al. 2022) or --hrr-length 2d (unitary length)
+python figures.py --vsa-only                                # only the vsa curves; --hrr-length d puts the hrr reference
+                                                            # at d components (schlegel et al. 2022) instead of 2d
 python wason.py                                             # wason card task on the saved codes
 
 # Test one run

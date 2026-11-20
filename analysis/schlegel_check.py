@@ -8,7 +8,9 @@
 import numpy as np, json, sys
 rng = np.random.default_rng(0)
 N = 1000
-def hrr(n, D): return rng.normal(0, 1 / np.sqrt(D), (n, D))
+def hrr(n, D):
+    x = rng.normal(0, 1 / np.sqrt(D), (n, D))
+    return x / np.linalg.norm(x, axis=1, keepdims=True)  # unit length, as in the vsa toolbox and in clifford_vae.vsa
 def unitary(n, D):
     ph = rng.uniform(-np.pi, np.pi, (n, D // 2 + 1)); ph[:, 0] = 0
     if D % 2 == 0: ph[:, -1] = 0
@@ -17,7 +19,7 @@ def run_real(make, D, k, trials):
     ok = 0
     for _ in range(trials):
         M = make(N, D); F = np.fft.rfft(M, axis=1)
-        ri = rng.choice(N, k, replace=False); fi = rng.choice(N, k, replace=False)
+        pick = rng.choice(N, 2 * k, replace=False); ri, fi = pick[:k], pick[k:]  # 2k distinct items (boundpairs.m, line 66)
         B = (F[ri] * F[fi]).sum(0)
         dec = np.fft.irfft(B[None] * np.conj(F[ri]), n=D, axis=1)
         Mn = M / np.linalg.norm(M, axis=1, keepdims=True)
@@ -27,7 +29,7 @@ def run_fhrr(D, k, trials, normalize):
     ok = 0
     for _ in range(trials):
         M = np.exp(1j * rng.uniform(-np.pi, np.pi, (N, D)))
-        ri = rng.choice(N, k, replace=False); fi = rng.choice(N, k, replace=False)
+        pick = rng.choice(N, 2 * k, replace=False); ri, fi = pick[:k], pick[k:]
         B = (M[ri] * M[fi]).sum(0)
         if normalize: B = B / np.abs(B)   # schlegel's fhrr bundling keeps only the angles of the sum
         dec = B[None] * np.conj(M[ri])

@@ -59,10 +59,10 @@ PANELS = {
 }
 
 
-# canonical hrr item memories by length, filled in main. HRR_HALF: the hrr reference has d components (half the
-# unitary length, the equal-component comparison of schlegel et al. 2022); otherwise the unitary length 2d
+# canonical hrr item memories by length, filled in main. the hrr reference has the unitary length 2d; with HRR_HALF
+# it has d components (half that length, the equal-component comparison of schlegel et al. 2022)
 HRR_REFS = {}
-HRR_HALF = True
+HRR_HALF = False
 
 
 def _style(p):
@@ -78,7 +78,8 @@ def references(runs, path, make=V.reference, half=False):
     dims = {common.get(m, "vsa.dim") for (ds, c), ms in runs.items() if c.startswith("C-") for m in ms}
     dims = {x // 2 if half else x for x in dims if x}
     for D in sorted(x for x in dims if x):
-        if str(D) not in refs or refs[str(D)].get("n_trials", 0) < V.REF_TRIALS:  # older caches used 10 trials
+        stale = make is V.reference_hrr and refs.get(str(D), {}).get("random_atoms") != "hrr"  # older caches: unitary atoms
+        if str(D) not in refs or refs[str(D)].get("n_trials", 0) < V.REF_TRIALS or stale:  # older caches used 10 trials
             refs[str(D)] = make(D)
             common.write_json(path, refs)
     return refs
@@ -496,8 +497,8 @@ def main():
     p.add_argument("--root", default=common.RESULTS)
     p.add_argument("--seed", type=int, default=1, help="run shown in the image figures")
     p.add_argument("--vsa-only", action="store_true", help="only the vsa and role-filler curve figures")
-    p.add_argument("--hrr-length", choices=["d", "2d"], default="d",
-                   help="length of the canonical hrr reference: d components (schlegel et al. 2022) or the unitary length 2d")
+    p.add_argument("--hrr-length", choices=["d", "2d"], default="2d",
+                   help="length of the canonical hrr reference: the unitary length 2d, or d components (schlegel et al. 2022)")
     a = p.parse_args()
     runs = load_runs(a.root)
     agg = os.path.join(a.root, "_aggregate")
