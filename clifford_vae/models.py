@@ -2,11 +2,15 @@
 #   N      gaussian                     N_L2   gaussian, mu and z l2-normalised
 #   S      power spherical              V      von mises-fisher (mlp only)
 #   C      clifford torus: power spherical on each circle, one kappa per circle, floor 0.01 (cnn)
-#          or 0.03 (mlp), cap 10. kappa_shared=True gives the submission's one kappa per image.
-# cnn: residual conv encoder/decoder, l1 reconstruction, 32px (4 blocks) or 64px (5 blocks).
+#          or 0.03 (mlp), cap 10. kappa_shared=True gives one kappa per image, shared by all circles.
+# cnn: residual conv encoder/decoder, l1 reconstruction, 32px (4 blocks) or 64px (5 blocks). a dataset
+# can ask for a bernoulli likelihood instead (data.meta["likelihood"], omniglot: sparse binary strokes,
+# where l1 lets the model ignore the code and draw the empty page).
 # mlp: 784-256-128-z, bernoulli likelihood on binarised mnist (davidson et al. 2018).
-# N_L2: the kl is the gaussian kl of the pre-normalisation latent; normalisation is the first
-# layer of the decoder. parameter names match the submission code, so old checkpoints load.
+# N_L2: a plain gaussian vae whose sample is normalised: z = normalise(mu + sigma * eps) with an
+# unconstrained mu, kl = the gaussian kl of mu + sigma * eps. (the submission normalised mu before
+# adding the noise; with sigma pulled to ~1 by the kl, the noise then swamped a length-1 signal.)
+# parameter names match the submission code, so old checkpoints load.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -87,7 +91,7 @@ class Encoder(nn.Module):
         x = x.flatten(1)
         mu = self.fc_mu(x)
         if self.dist == "N":
-            return (F.normalize(mu, dim=-1) if self.l2 else mu), self.fc_log_var(x)
+            return mu, self.fc_log_var(x)
         if self.dist == "S":
             k = F.softplus(self.fc_concentration(x)) + 0.5
             return F.normalize(mu, dim=-1), k.clamp(max=KAPPA_CAP_PER_DIM * self.latent_dim)
@@ -96,34 +100,42 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, d_in, channels, img_size):
+    def __init__(self, d_in, channels, img_size, bernoulli=False):
         super().__init__()
+        self.bernoulli = bernoulli
         self.fc = nn.Linear(d_in, 2048)
         chs = ([512] if img_size == 64 else []) + [512, 256, 128, 64]
         self.blocks = nn.ModuleList([ResUpBlock(chs[i], chs[i + 1]) for i in range(len(chs) - 1)])
-        self.final = nn.Sequential(nn.ConvTranspose2d(chs[-1], channels, 4, 2, 1), nn.Tanh())
+        self.final = nn.Sequential(nn.ConvTranspose2d(chs[-1], channels, 4, 2, 1), nn.Identity() if bernoulli else nn.Tanh())
         self.apply(_xavier)
 
-    def forward(self, z):
+    def logits(self, z):
+        """bernoulli: pixel logits; l1: the image itself."""
         x = self.fc(z).view(len(z), 512, 2, 2)
         for b in self.blocks:
             x = b(x)
         return self.final(x)
 
+    def forward(self, z):
+        # always an image in [-1, 1]: tanh(l / 2) = 2 sigmoid(l) - 1
+        return torch.tanh(self.logits(z) / 2) if self.bernoulli else self.logits(z)
+
 
 class CNNVAE(nn.Module):
     arch = "cnn"
 
-    def __init__(self, prior, d, channels, img_size, kappa_cap=None, kappa_floor=None, kappa_shared=False):
+    def __init__(self, prior, d, channels, img_size, kappa_cap=None, kappa_floor=None, kappa_shared=False,
+                 likelihood="l1"):
         super().__init__()
         self.prior, self.latent_dim, self.kappa_shared = prior, d, prior == "C" and kappa_shared
+        self.likelihood = likelihood
         dist = {"N": "N", "N_L2": "N", "S": "S", "C": "C"}[prior]
         per_circle = prior == "C" and not self.kappa_shared
         default = CLIFFORD_FLOOR["cnn"] if per_circle else _clifford_floor(d)
         self.kappa_floor = (default if kappa_floor is None else kappa_floor) if prior in CLIFFORD else 0.0
         self.kappa_cap = CLIFFORD_KAPPA_CAP if kappa_cap is None else kappa_cap
         self.encoder = Encoder(d, channels, dist, prior == "N_L2", img_size, self.kappa_floor, self.kappa_cap, per_circle)
-        self.decoder = Decoder(2 * d if prior in CLIFFORD else d, channels, img_size)
+        self.decoder = Decoder(2 * d if prior in CLIFFORD else d, channels, img_size, likelihood == "bernoulli")
 
     def posterior(self, mu, p):
         dev = mu.device
@@ -146,7 +158,10 @@ class CNNVAE(nn.Module):
         z = q.rsample()
         if self.prior == "N_L2":
             z = F.normalize(z, dim=-1)
-        recon = F.l1_loss(self.decoder(z), x, reduction="sum") / len(x)
+        if self.likelihood == "bernoulli":
+            recon = F.binary_cross_entropy_with_logits(self.decoder.logits(z), (x + 1) / 2, reduction="sum") / len(x)
+        else:
+            recon = F.l1_loss(self.decoder(z), x, reduction="sum") / len(x)
         kl = torch.distributions.kl_divergence(q, pz)
         kl = (kl.sum(-1) if kl.dim() > 1 else kl).mean()
         return recon + beta * kl, recon, kl
@@ -191,7 +206,7 @@ class MLPVAE(nn.Module):
         h = self.encoder(x.view(len(x), -1))
         mu = self.fc_mean(h)
         if self.prior in ("N", "N_L2"):
-            return (F.normalize(mu, dim=-1) if self.prior == "N_L2" else mu), self.fc_var(h)
+            return mu, self.fc_var(h)
         if self.prior in ("S", "V"):
             k = F.softplus(self.fc_scale(h)) + 0.8
             return F.normalize(mu, dim=-1), k.clamp(max=KAPPA_CAP_PER_DIM * self.z_dim)
@@ -245,7 +260,8 @@ def build(prior, d, data, dev, kappa_cap=None, kappa_floor=None, kappa_shared=Fa
     """kappa_cap / kappa_floor / kappa_shared: clifford only, None / False = the defaults (cap 10,
     floor 0.01 cnn / 0.03 mlp, one kappa per circle)."""
     if data.arch == "cnn":
-        m = CNNVAE(prior, d, data.channels, data.img_size, kappa_cap, kappa_floor, kappa_shared)
+        m = CNNVAE(prior, d, data.channels, data.img_size, kappa_cap, kappa_floor, kappa_shared,
+                   data.meta.get("likelihood", "l1"))
     else:
         m = MLPVAE(prior, d, data.channels * data.img_size * data.img_size, kappa_cap, kappa_floor, kappa_shared)
     return m.to(dev)
@@ -263,7 +279,29 @@ def mean_code(model, x):
     """the deterministic code every evaluation uses. N: mu. N_L2: mu/|mu|. S, V: mean direction.
     C: the length-2d unitary vector at the mean angles (never the raw angles)."""
     mu = model.encode_mean(x)
-    return clifford_embed(mu) if model.prior in CLIFFORD else mu
+    if model.prior in CLIFFORD:
+        return clifford_embed(mu)
+    return F.normalize(mu, dim=-1) if model.prior == "N_L2" else mu
+
+
+def code_sigma(model, x):
+    """N_L2 only: the posterior noise relative to the mean, sigma / |mu|, which decode() needs (normalising
+    is scale-free, so normalise(mu + sigma eps) = normalise(mu/|mu| + sigma/|mu| eps)). None otherwise."""
+    if model.prior != "N_L2":
+        return None
+    mu, p = model.encoder(x) if model.arch == "cnn" else model._encode(x)
+    return torch.exp(0.5 * p) / mu.norm(dim=-1, keepdim=True)
+
+
+def decode(model, z, sigma=None, k=8):
+    """decode a code into an image. N_L2's decoder only sees normalised noisy samples, so when the noise is
+    large next to |mu| its clean mean code is off-distribution. for N_L2 (given sigma) this averages the
+    decoder over k noisy versions of the code, the posterior predictive mean. every other prior decodes
+    the code as it is."""
+    if model.prior != "N_L2" or sigma is None:
+        return model.decoder(z)
+    z = F.normalize(z, dim=-1)
+    return torch.stack([model.decoder(F.normalize(z + sigma * torch.randn_like(z), dim=-1)) for _ in range(k)]).mean(0)
 
 
 @torch.no_grad()

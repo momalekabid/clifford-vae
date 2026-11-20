@@ -27,15 +27,17 @@ SCRIPTS = {"mnist": "train_mnist.py", "fashionmnist": "train_fashionmnist.py", "
            "celeba": "train_celeba.py", "shapes3d": "train_disentangle.py",
            "omniglot": "train_omniglot.py"}
 CNN = ([128, 256, 512, 1024, 2048, 4096], ["N", "N_L2", "S", "C"])
-CELLS = {"cifar10": CNN, "fashionmnist": CNN, "mnist": ([2, 5, 10, 20, 40, 128], ["N", "N_L2", "S", "V", "C"]),
+# mnist: no vmf (V) in the revision runs: its float64 kl + rejection sampling is ~10x slower per epoch, and the power
+# spherical prior covers the hypersphere. train_mnist.py --prior V still trains one.
+CELLS = {"cifar10": CNN, "fashionmnist": CNN, "mnist": ([2, 5, 10, 20, 40, 128], ["N", "N_L2", "S", "C"]),
          "celeba": ([128, 256, 512], ["N", "N_L2", "S", "C"]), "shapes3d": ([128], ["N", "N_L2", "S", "C"]),
          "omniglot": ([256, 512], ["N", "N_L2", "C"])}
 # cells whose d depends on the prior. omniglot: every code is 512 long, as in karunaratne et al.
 # 2021 (clifford's code is 2d long, so C runs at d=256)
 PRIOR_DIM = {"omniglot": {"N": 512, "N_L2": 512, "C": 256}}
-BETAS = {"shapes3d": [1.0, 4.0], "omniglot": [1.0, 4.0]}  # beta_max per cell (beta-vae for the disentangle tests)
+BETAS = {}  # beta_max per cell, default 1. the beta-vae ablation is --betas 4 (or --betas 1,4): runs go to <cell>-b4/
 ORDER = ["cifar10", "fashionmnist", "mnist", "celeba"]  # shapes3d and omniglot are standalone: --datasets ...
-RUNS = {"celeba": "5", "shapes3d": "3", "omniglot": "5"}  # runs per cell when --runs is not given (else 20)
+RUNS = {"celeba": "2", "shapes3d": "3", "omniglot": "5"}  # runs per cell when --runs is not given (else 20)
 
 
 def run_ids(s):
@@ -60,7 +62,7 @@ def jobs(a):
             dims, priors = CELLS[ds]
             pairs = [(PRIOR_DIM[ds][p], p) for p in priors] if ds in PRIOR_DIM else [(d, p) for d in dims for p in priors]
             for d, p in pairs:
-                for b in BETAS.get(ds, [1.0]):
+                for b in (parse_list(a.betas, float) if getattr(a, "betas", None) else BETAS.get(ds, [1.0])):
                     if (a.dims is None or d in parse_list(a.dims, int)) and (a.priors is None or p in parse_list(a.priors)):
                         out.append((ds, p, d, seed, b))
     return out
@@ -137,6 +139,7 @@ def main():
     p.add_argument("--runs", default=None, help="runs per cell: a count (5), a range (6-20) or a list (1,4,7); "
                                                 "default 20, celeba 5, shapes3d 3, omniglot 5")
     p.add_argument("--dims", default=None, help="comma list (default: every paper dim)")
+    p.add_argument("--betas", default=None, help="comma list of beta_max values (default 1), e.g. 4 for the beta-vae ablation")
     p.add_argument("--priors", default=None, help="comma list (default: every prior)")
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--gpus", default=None, help="comma list of gpu ids, workers are spread over them")

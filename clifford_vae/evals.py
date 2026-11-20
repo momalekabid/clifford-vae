@@ -17,7 +17,7 @@ from .data import GpuImages
 KNN_BUDGETS = [100, 600, 1000]
 KNN_K = 5
 FID_SAMPLES = 10000
-RECOVERY_DEPTHS = [1, 5, 10, 20, 30, 40]
+RECOVERY_DEPTHS = [1, 5, 10, 20, 50, 100]
 
 
 def to_uint8(model, x):
@@ -106,7 +106,7 @@ def _fid(model, test, seed, n, bs):
 @torch.no_grad()
 def vsa(model, test, groups, seed, n=V.N_ITEMS, codes=M.mean_codes):
     """all vsa tests on the mean codes of the first 1000 test images (item dimension = 2d for
-    clifford). returns the results and the codes (saved for offline tests like role_filler_cross)."""
+    clifford). returns the results and the codes (saved for offline tests such as wason.py)."""
     items = codes(model, test)[:n].cpu()
     g = None if groups is None else groups[:n]
     res = V.evaluate(items, g, seed)
@@ -123,7 +123,7 @@ def raw_recon(model, test, n=10, seed=0):
     """first n test images, decoded from the mean code and from one posterior sample."""
     x = test.get(torch.arange(n, device=test.x.device))
     torch.manual_seed(seed)
-    return {"x": to_uint8(model, x), "mean": to_uint8(model, model.decoder(M.mean_code(model, x))),
+    return {"x": to_uint8(model, x), "mean": to_uint8(model, M.decode(model, M.mean_code(model, x), M.code_sigma(model, x))),
             "sample": to_uint8(model, model.decoder(model.sample_code(x)))}
 
 
@@ -150,7 +150,8 @@ def raw_recovery(model, test, groups, seed, depths=RECOVERY_DEPTHS, n_targets=3)
                 for i in range(m - 1, -1, -1):
                     s = V.unbind(s, partners[i:i + 1], method)
                 row.append(s[0])
-            rows.append(to_uint8(model, model.decoder(torch.stack(row))))
+            sig = M.code_sigma(model, test.get(torch.tensor([t], device=test.x.device)))
+            rows.append(to_uint8(model, M.decode(model, torch.stack(row), sig)))
         out[method] = np.stack(rows)
     return out
 
@@ -164,8 +165,9 @@ def raw_prior_samples(model, seed, n=64):
 def raw_manifold(model, test, y, n=2000, n_grid=12, n_anchors=3):
     """mnist manifold figures. latent: the encoder's mean output for the first n test images (clifford:
     the raw angles, N: mu, N_L2 / S / V: the unit direction) with labels. grid: decoded images over the
-    prior's own 2-d latent space at d=2 (N: a gaussian-quantile grid, N_L2: the circle, S / V: a
-    longitude x latitude grid on the sphere, C: its one circle). anchors (clifford, d >= 3): angles 1
+    prior's own latent space when it is one- or two-dimensional (N at d=2: a gaussian-quantile grid;
+    N_L2 at d=2: the circle, at d=3: the sphere; S / V at d=2: a longitude x latitude grid on the
+    sphere; C at d=2: its one circle, at d=3: its two circles, the torus). anchors (clifford, d >= 3): angles 1
     and 2 swept around real test images, the other angles held at that image's mean angles."""
     from scipy.stats import norm
 
@@ -185,7 +187,7 @@ def raw_manifold(model, test, y, n=2000, n_grid=12, n_anchors=3):
     elif p == "N_L2" and d == 2:
         z = torch.stack([torch.cos(a), torch.sin(a)], -1)
         out["grid_shape"] = np.array([1, n_grid])
-    elif p in ("S", "V") and d == 3:
+    elif p in ("S", "V", "N_L2") and d == 3:
         lon, la = a, torch.linspace(-1.2, 1.2, n_grid // 2, device=dev)
         LA, LO = torch.meshgrid(la.flip(0), lon, indexing="ij")
         z = torch.stack([torch.cos(LA) * torch.cos(LO), torch.cos(LA) * torch.sin(LO), torch.sin(LA)], -1).reshape(-1, 3)
@@ -195,6 +197,11 @@ def raw_manifold(model, test, y, n=2000, n_grid=12, n_anchors=3):
         A[:, 1] = a
         z = clifford_embed(A)
         out["grid_shape"] = np.array([1, n_grid])
+    elif p in M.CLIFFORD and d == 3:  # two free angles: the whole torus
+        A = torch.zeros(n_grid * n_grid, 3, device=dev)
+        A[:, 2], A[:, 1] = [t.reshape(-1) for t in torch.meshgrid(a.flip(0), a, indexing="ij")]
+        z = clifford_embed(A)
+        out["grid_shape"] = np.array([n_grid, n_grid])
     if z is not None:
         out["grid"] = to_uint8(model, model.decoder(z))
     if p in M.CLIFFORD and d >= 3:
@@ -315,5 +322,13 @@ def run_all(model, data, rd, seed, dev, skip=()):
             save_raw(rd, "traversal", raw_traversal(model))
         if data.name == "mnist":
             save_raw(rd, "manifold", raw_manifold(model, te, data.test.y))
+        if data.name == "shapes3d":
+            from .disentangle import raw_unseen_grid
+
+            save_raw(rd, "unseen_grid", raw_unseen_grid(model, data, dev))  # the held-out-pair figure
+        if data.name == "shapes3d":  # vsa is skipped there, but wason.py needs the codes
+            items = M.mean_codes(model, te)[:V.N_ITEMS].cpu()
+            save_raw(rd, "codes", {"codes": items.half().numpy(), "y": data.test.y[:len(items)],
+                                   "groups": data.test.groups[:len(items)]})
         tick("raw")
     return out

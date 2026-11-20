@@ -1,5 +1,6 @@
 """everything in one go: train + evaluate every run (run_experiments.py), then the clean timings on
-the now idle gpu (timing.py), then every table and figure (tables.py, figures.py). resumable: runs
+the now idle gpu (timing.py), the wason card task on the saved codes (wason.py), then every table
+and figure (tables.py, figures.py). resumable: runs
 that are done are skipped, so stop it and start it again any time. flags other than the ones below
 go to run_experiments.py (--runs, --dims, --priors, --workers, --gpus, --max_retries).
 
@@ -17,6 +18,7 @@ from clifford_vae import common
 from run_experiments import ORDER
 
 TIMED = ("cifar10", "fashionmnist", "celeba")  # the cost tables are for the cnn datasets
+WASON = ("mnist", "fashionmnist", "cifar10", "shapes3d")  # datasets with one concept per image
 
 
 def step(name, cmd):
@@ -43,6 +45,9 @@ def main():
             step("timing", ["timing.py", "--datasets", ",".join(timed), *root])
         else:
             print("\n=== timing skipped: no cuda gpu", flush=True)
+    wason = [d for d in a.datasets.split(",") if d in WASON]
+    if wason:
+        step("wason", ["wason.py", "--datasets", ",".join(wason), *root])
     step("tables", ["tables.py", *root])
     step("figures", ["figures.py", *root])
     print(f"\ndone. tables in {a.root}/_aggregate/tables, figures in {a.root}/_aggregate/figures", flush=True)

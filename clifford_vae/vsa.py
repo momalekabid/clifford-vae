@@ -7,8 +7,6 @@
 #   role_filler            3.3  k image roles, k image fillers, never sharing a class / identity
 #   role_filler_random_roles    random unitary roles, image fillers (the submission's variant)
 #   role_filler_random_fillers  image roles, random unitary fillers (clean-up over the atoms)
-#   role_filler_cross           image roles from one dataset, fillers from another (offline,
-#                               figures.py; needs two runs' saved codes)
 #   two_bundle                  the submission's bundle test (appendix only, chance 0.5)
 import math
 
@@ -22,8 +20,9 @@ N_TRIALS = 10
 DEPTH = 40
 
 
-def hrr_init(n, d):
-    return torch.randn(n, d) / math.sqrt(d)
+def hrr_init(n, d, gen=None):
+    """n canonical hrr vectors: iid normal elements with variance 1/d (plate 2003)."""
+    return torch.randn(n, d, generator=gen) / math.sqrt(d)
 
 
 def unitary_init(n, d, gen=None):
@@ -148,50 +147,34 @@ def role_filler(items, groups=None, seed=0, k_range=K_RANGE, n_trials=N_TRIALS):
     return _curve(k_range, trial, n_trials)
 
 
-def role_filler_random_roles(items, seed=0, k_range=K_RANGE, n_trials=N_TRIALS):
+def role_filler_random_roles(items, seed=0, k_range=K_RANGE, n_trials=N_TRIALS, atom_init=None):
     """roles are random unitary vectors (symbols), fillers are images; unbind each role, clean
-    up over the item memory, score the k fillers."""
+    up over the item memory, score the k fillers. atom_init: how the random roles are sampled
+    (default unitary; the canonical hrr reference samples canonical hrr roles)."""
+    atom_init = atom_init or unitary_init
     g, u = _g(seed), normalize(items)
 
     def trial(k):
         idx = torch.randperm(len(u), generator=g)[:k]
-        roles = normalize(unitary_init(k, u.shape[1], g))
+        roles = normalize(atom_init(k, u.shape[1], g))
         got = _cleanup(unbind(bundle(bind(roles, u[idx])).expand(k, -1), roles), u)
         return (got == idx).float().mean().item()
 
     return _curve(k_range, trial, n_trials)
 
 
-def role_filler_random_fillers(items, seed=0, k_range=K_RANGE, n_trials=N_TRIALS, n_atoms=N_ITEMS):
+def role_filler_random_fillers(items, seed=0, k_range=K_RANGE, n_trials=N_TRIALS, n_atoms=N_ITEMS, atom_init=None):
     """roles are images, fillers random unitary atoms (a clean-up memory of n_atoms symbols);
     unbind each image role, clean up over the atoms, score the k fillers. isolates how good the
     image codes are as keys, with no semantic overlap between roles and fillers possible."""
     g, u = _g(seed), normalize(items)
-    atoms = normalize(unitary_init(n_atoms, u.shape[1], g))
+    atoms = normalize((atom_init or unitary_init)(n_atoms, u.shape[1], g))
 
     def trial(k):
         ri = torch.randperm(len(u), generator=g)[:k]
         fi = torch.randperm(n_atoms, generator=g)[:k]
         got = _cleanup(unbind(bundle(bind(u[ri], atoms[fi])).expand(k, -1), u[ri]), atoms)
         return (got == fi).float().mean().item()
-
-    return _curve(k_range, trial, n_trials)
-
-
-def role_filler_cross(roles, fillers, seed=0, k_range=K_RANGE, n_trials=N_TRIALS):
-    """roles from one item memory (e.g. fashionmnist codes), fillers from another (cifar-10
-    codes of a model with the same prior and d). clean-up over the union of both memories;
-    score both directions as in role_filler."""
-    g, ur, uf = _g(seed), normalize(roles), normalize(fillers)
-    mem = torch.cat([ur, uf])
-
-    def trial(k):
-        ri = torch.randperm(len(ur), generator=g)[:k]
-        fi = torch.randperm(len(uf), generator=g)[:k]
-        r = bundle(bind(ur[ri], uf[fi]))
-        keys, want = torch.cat([ur[ri], uf[fi]]), torch.cat([fi + len(ur), ri])
-        got = _cleanup(unbind(r.expand(2 * k, -1), keys), mem)
-        return (got == want).float().mean().item()
 
     return _curve(k_range, trial, n_trials)
 
@@ -211,23 +194,38 @@ def two_bundle(items, seed=0, k_range=K_RANGE, n_trials=N_TRIALS):
     return _curve(k_range, trial, n_trials)
 
 
-def evaluate(items, groups=None, seed=0):
-    """every in-run test on one item memory (encoded images or random atoms)."""
+def evaluate(items, groups=None, seed=0, n_trials=N_TRIALS, atom_init=None):
+    """every in-run test on one item memory (encoded images or random atoms). atom_init: the sampler
+    for the random roles / fillers of the two variants (unitary unless given)."""
     items = items.cpu().float()
     return {
         "dim": int(items.shape[1]),
         "n_items": int(items.shape[0]),
-        "bundle_capacity": bundle_capacity(items, seed),
-        "unbinding_depth_inv": unbinding_depth(items, seed, "inv"),
-        "unbinding_depth_dagger": unbinding_depth(items, seed, "dagger"),
-        "role_filler": role_filler(items, groups, seed),
-        "role_filler_random_roles": role_filler_random_roles(items, seed),
-        "role_filler_random_fillers": role_filler_random_fillers(items, seed),
-        "two_bundle": two_bundle(items, seed),
+        "n_trials": int(n_trials),
+        "bundle_capacity": bundle_capacity(items, seed, n_trials=n_trials),
+        "unbinding_depth_inv": unbinding_depth(items, seed, "inv", n_trials=n_trials),
+        "unbinding_depth_dagger": unbinding_depth(items, seed, "dagger", n_trials=n_trials),
+        "role_filler": role_filler(items, groups, seed, n_trials=n_trials),
+        "role_filler_random_roles": role_filler_random_roles(items, seed, n_trials=n_trials, atom_init=atom_init),
+        "role_filler_random_fillers": role_filler_random_fillers(items, seed, n_trials=n_trials, atom_init=atom_init),
+        "random_atoms": "hrr" if atom_init is hrr_init else "unitary",
+        "two_bundle": two_bundle(items, seed, n_trials=n_trials),
     }
 
 
-def reference(dim, seed=0, n=N_ITEMS):
+# the reference curves are drawn without a band, so they average more trials than a single run does
+REF_TRIALS = 100
+
+
+def reference(dim, seed=0, n=N_ITEMS, n_trials=REF_TRIALS):
     """the random baseline: a memory of n random unitary vectors at the item dimension (for
     clifford with d angles that is 2d)."""
-    return evaluate(unitary_init(n, dim, _g(seed + 10_000)), None, seed)
+    return evaluate(unitary_init(n, dim, _g(seed + 10_000)), None, seed, n_trials)
+
+
+def reference_hrr(dim, seed=0, n=N_ITEMS, n_trials=REF_TRIALS):
+    """a memory of n canonical (non-unitary) hrr vectors of length dim. the figures call it with half the length
+    of the unitary baseline (d real components against d phases, as schlegel et al. 2022 compare hrr and fhrr).
+    in the two random variants its random roles / fillers are unitary, as for every other curve (pass
+    atom_init=hrr_init to evaluate() for canonical ones)."""
+    return evaluate(hrr_init(n, dim, _g(seed + 20_000)), None, seed, n_trials)

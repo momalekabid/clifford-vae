@@ -1,5 +1,8 @@
-"""reviewer 2's overview figure of the clifford-vae pipeline. uses one clifford run's raw/recon.npz
-for the example image and its reconstruction (any dataset).
+"""reviewer 2's overview figure: the clifford-vae pipeline drawn with its data. an image is encoded to
+one angle per circle of the torus, the angles are embedded as a real unitary vector, and two hrr
+operations (bind, unbind) are applied to the trained codes with the code of a second image before
+decoding. the right panel shows what binding does on one circle. the two images and the reconstruction
+come from one clifford run's raw/recon.npz (any dataset); the angles and vectors drawn are illustrative.
 
     python overview_figure.py runs/cifar10/C-d128/seed1 --out overview.pdf
 """
@@ -11,110 +14,177 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
-from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch, Wedge  # noqa: E402
+from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
+from matplotlib.patches import Circle, FancyArrowPatch, Polygon, Rectangle  # noqa: E402
 
-BLUE, GREY, DARK = "#2196F3", "#9E9E9E", "#333333"
+INK, GREY, LINE = "#2B2B2B", "#6B6B6B", "#6C8EBF"  # text, captions, data-flow arrows
+RED = "#C0505A"  # the hrr operations and the second code
+ENC, ENC_E = "#DDEBD9", "#7FA67A"
+DEC, DEC_E = "#E4DEF2", "#8E7CC3"
+CA, CB, CAB = "#2196F3", "#8E7CC3", "#C0505A"  # angle colours: first code, second code, bound
+CELLS = LinearSegmentedColormap.from_list("cells", ["#8E7CC3", "#F7F7FA", "#2196F3"])
 plt.rcParams.update({"font.family": "sans-serif", "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans"],
-                     "mathtext.fontset": "dejavusans", "font.size": 11})
+                     "mathtext.fontset": "cm", "font.size": 15})
 
 
-def box(ax, x, y, w, h, text, fc="white", ec=DARK, fs=11, bold=False):
-    ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.02,rounding_size=0.08", fc=fc, ec=ec, lw=1.2))
-    ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=fs, weight="bold" if bold else None)
+def unitary(theta):
+    """real vector whose fourier coefficients are exp(i theta), conjugate-symmetric."""
+    m = len(theta)
+    f = np.ones(2 * m + 2, dtype=complex)
+    f[1:m + 1] = np.exp(1j * theta)
+    f[m + 2:] = np.conj(f[1:m + 1][::-1])
+    return np.fft.ifft(f).real
 
 
-def arrow(ax, a, b, text=None, color=DARK, off=0.12, rad=0.0):
-    ax.add_patch(FancyArrowPatch(a, b, arrowstyle="-|>", mutation_scale=14, lw=1.3, color=color,
-                                 connectionstyle=f"arc3,rad={rad}"))
-    if text:
-        ax.text((a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + off, text, ha="center", va="bottom", fontsize=9.5, color=color)
+def image(ax, img, x, y, s=1.15):
+    img = img.transpose(1, 2, 0).squeeze()
+    ax.imshow(img, extent=(x - s / 2, x + s / 2, y - s / 2, y + s / 2), cmap="gray" if img.ndim == 2 else None, zorder=3,
+              interpolation="nearest")
+    ax.add_patch(Rectangle((x - s / 2, y - s / 2), s, s, fill=False, ec=INK, lw=1.0, zorder=4))
 
 
-def image(ax, img, x, y, s, label):
-    im = img.transpose(1, 2, 0).squeeze()
-    ax.imshow(im, extent=(x, x + s, y, y + s), cmap="gray" if im.ndim == 2 else None, zorder=3)
-    ax.add_patch(FancyBboxPatch((x, y), s, s, boxstyle="square,pad=0", fc="none", ec=DARK, lw=1, zorder=4))
-    ax.text(x + s / 2, y - 0.12, label, ha="center", va="top", fontsize=10)
+def arrow(ax, a, b, color=LINE, style="arc3,rad=0", lw=1.8):
+    ax.add_patch(FancyArrowPatch(a, b, arrowstyle="-|>", mutation_scale=13, color=color, lw=lw, connectionstyle=style,
+                                 shrinkA=0, shrinkB=0, zorder=2))
 
 
-def circle_with_posterior(ax, cx, cy, r, theta, kappa, label):
-    ax.add_patch(Circle((cx, cy), r, fc="none", ec=GREY, lw=1.2))
-    width = 150 / (1 + kappa)  # wedge narrows as the concentration grows
-    t = np.degrees(theta)
-    ax.add_patch(Wedge((cx, cy), r, t - width, t + width, width=0.07, fc=BLUE, ec="none", alpha=0.55))
-    ax.plot([cx, cx + r * np.cos(theta)], [cy, cy + r * np.sin(theta)], color=BLUE, lw=1.5)
-    ax.plot(cx + r * np.cos(theta), cy + r * np.sin(theta), "o", color=BLUE, ms=4)
-    ax.text(cx, cy - r - 0.1, label, ha="center", va="top", fontsize=9.5)
+def network(ax, x0, x1, y, h0, h1, fc, ec, label):
+    """a trapezoid: tall on the image side, short on the code side."""
+    ax.add_patch(Polygon([(x0, y - h0 / 2), (x0, y + h0 / 2), (x1, y + h1 / 2), (x1, y - h1 / 2)], closed=True, fc=fc, ec=ec,
+                         lw=1.6, joinstyle="round", zorder=3))
+    ax.text((x0 + x1) / 2, y, label, ha="center", va="center", fontsize=14.5, color=INK, zorder=4)
+
+
+def angles(ax, x, y, theta, color, r=0.19, gap=0.47):
+    """one small circle per latent angle, with the angle marked on it."""
+    n = len(theta)
+    xs = x + (np.arange(n) - (n - 1) / 2) * gap
+    for xi, t in zip(xs, theta):
+        ax.add_patch(Circle((xi, y), r, fc="white", ec=GREY, lw=1.1, zorder=3))
+        ax.plot([xi, xi + r * np.cos(t)], [y, y + r * np.sin(t)], color=color, lw=1.4, zorder=4, solid_capstyle="round")
+        ax.add_patch(Circle((xi + r * np.cos(t), y + r * np.sin(t)), 0.055, fc=color, ec="none", zorder=5))
+    return xs[0] - r, xs[-1] + r
+
+
+def strip(ax, x, y, v, w=0.3, h=1.5):
+    """a vector drawn as a column of cells coloured by value."""
+    n, s = len(v), np.abs(v).max()
+    ch = h / n
+    for i, vi in enumerate(v):
+        ax.add_patch(Rectangle((x - w / 2, y + h / 2 - (i + 1) * ch), w, ch, fc=CELLS(0.5 + 0.5 * vi / s), ec="white", lw=0.5,
+                               zorder=3))
+    ax.add_patch(Rectangle((x - w / 2, y - h / 2), w, h, fill=False, ec=INK, lw=1.0, zorder=4))
+
+
+def op(ax, x, y, label, r=0.27):
+    ax.add_patch(Circle((x, y), r, fc="#FBEFEF", ec=RED, lw=1.6, zorder=4))
+    ax.text(x, y - 0.012, r"$\circledast$", ha="center", va="center", fontsize=19.5, color=RED, zorder=5)
+    ax.text(x, y + r + 0.12, label, ha="center", va="bottom", fontsize=15.0, color=RED)
+
+
+def bracket(ax, x0, x1, y, label, color=GREY):
+    ax.plot([x0, x0, x1, x1], [y - 0.1, y, y, y - 0.1], color=color, lw=1.2, solid_capstyle="round", zorder=2)
+    ax.text((x0 + x1) / 2, y + 0.1, label, ha="center", va="bottom", fontsize=15.5, color=color, fontweight="bold")
+
+
+def dial(ax, x, y, t, color, label, r=0.44):
+    """one circle of the torus with an angle marked from the positive axis."""
+    ax.add_patch(Circle((x, y), r, fc="white", ec=GREY, lw=1.2, zorder=3))
+    ax.plot([x, x + r], [y, y], color="#C9C9C9", lw=1.0, zorder=3)
+    arc = np.linspace(0, t, 40)
+    ax.plot(x + 0.45 * r * np.cos(arc), y + 0.45 * r * np.sin(arc), color=color, lw=1.2, zorder=4)
+    ax.plot([x, x + r * np.cos(t)], [y, y + r * np.sin(t)], color=color, lw=1.8, zorder=4, solid_capstyle="round")
+    ax.add_patch(Circle((x + r * np.cos(t), y + r * np.sin(t)), 0.075, fc=color, ec="none", zorder=5))
+    ax.text(x, y - r - 0.16, label, ha="center", va="top", fontsize=16.0, color=INK)
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("run_dir")
     p.add_argument("--out", default="overview.pdf")
-    p.add_argument("--index", type=int, default=3, help="which of the 10 saved test images")
+    p.add_argument("--index", type=int, nargs=2, default=[3, 6], help="which two of the 10 saved test images")
     a = p.parse_args()
     z = np.load(os.path.join(a.run_dir, "raw", "recon.npz"))
-    x, xr = z["x"][a.index], z["mean"][a.index]
+    xa, xb, xr = z["x"][a.index[0]], z["x"][a.index[1]], z["mean"][a.index[0]]
 
-    fig, ax = plt.subplots(figsize=(14.4, 6.0))
-    ax.set(xlim=(0, 14.4), ylim=(0, 6.0), aspect="equal")
+    # illustrative angles: five circles per code; binding adds them
+    rng = np.random.default_rng(4)
+    ta, tb = rng.uniform(-np.pi, np.pi, 5), rng.uniform(-np.pi, np.pi, 5)
+    za, zb, zab = unitary(ta), unitary(tb), unitary(ta + tb)
+
+    y, yb = 3.35, 1.05
+    fig, ax = plt.subplots(figsize=(13.9, 4.75))
+    ax.set(xlim=(0.1, 15.5), ylim=(-0.1, 5.15), aspect="equal")
     ax.axis("off")
 
-    # ---- top row: the vae
-    y0 = 3.3
-    ax.text(7.5, y0 + 2.35, r"training: $\mathcal{L}=\|\mathbf{x}-\hat{\mathbf{x}}\|_1+\beta\sum_{k=1}^{d-1}"
-            r"\mathrm{KL}\left(q(\theta_k\mid\mathbf{x})\,\|\,\mathcal{U}(\mathcal{S}^1)\right)$", ha="center", fontsize=11.5)
-    image(ax, x, 0.15, y0, 1.3, r"input $\mathbf{x}$")
-    box(ax, 1.8, y0 + 0.25, 1.35, 0.8, "encoder\n(CNN / MLP)")
-    arrow(ax, (1.5, y0 + 0.65), (1.78, y0 + 0.65))
-    box(ax, 3.5, y0 + 0.2, 1.85, 0.9, r"angles $\boldsymbol{\mu}\in[-\pi,\pi]^d$" + "\n" + r"concentration $\kappa$", fs=10)
-    arrow(ax, (3.17, y0 + 0.65), (3.48, y0 + 0.65))
+    # first image: encoder -> angles -> unitary vector
+    image(ax, xa, 0.8, y)
+    ax.text(0.8, y + 0.68, r"$\mathbf{x}_a$", ha="center", va="bottom", fontsize=17.5)
+    arrow(ax, (1.45, y), (1.95, y))
+    network(ax, 2.0, 3.15, y, 1.5, 0.8, ENC, ENC_E, "encoder")
+    arrow(ax, (3.2, y), (3.62, y))
+    l, r = angles(ax, 4.75, y, ta, CA)
+    ax.text(4.75, y - 0.36, r"phases $\theta^a \in (\mathcal{S}^1)^{d-1}$", ha="center", va="top", fontsize=15.0, color=INK)
+    arrow(ax, (r + 0.07, y), (6.95, y))
+    ax.text((r + 0.07 + 6.95) / 2 - 0.08, y + 0.2, r"$\mathcal{F}^{-1}\{e^{i\theta}\}$", ha="center", va="bottom", fontsize=14.5,
+            color=INK)
+    strip(ax, 7.15, y, za)
+    ax.text(7.15, y - 0.87, r"$\mathbf{z}_a$", ha="center", va="top", fontsize=16.5)
 
-    # posterior on the torus: a few circles
-    ax.text(7.05, y0 + 1.45, r"posterior on the Clifford torus $(\mathcal{S}^1)^{d-1}$", ha="center", fontsize=10.5)
-    for cx, th, lab in [(6.05, 0.6, r"$\theta_1$"), (6.95, 2.3, r"$\theta_2$"), (8.05, -1.2, r"$\theta_{d-1}$")]:
-        circle_with_posterior(ax, cx, y0 + 0.65, 0.36, th, 6, lab)
-    ax.text(7.5, y0 + 0.62, r"$\cdots$", fontsize=14, ha="center", va="center")
-    ax.text(7.05, y0 - 0.25, r"power spherical on each $\mathcal{S}^1$, one $\kappa$ per image", ha="center",
-            va="top", fontsize=9.5, color=BLUE)
-    arrow(ax, (5.37, y0 + 0.65), (5.63, y0 + 0.65))
+    # hrr operations on the trained codes
+    arrow(ax, (7.35, y), (8.0, y))
+    op(ax, 8.3, y, "bind")
+    arrow(ax, (8.6, y), (9.2, y))
+    strip(ax, 9.4, y, zab)
+    ax.text(9.4, y - 0.87, r"$\mathbf{z}_a \circledast \mathbf{z}_b$", ha="center", va="top", fontsize=16.5)
+    arrow(ax, (9.6, y), (10.2, y))
+    op(ax, 10.5, y, "unbind")
+    arrow(ax, (10.8, y), (11.4, y))
+    strip(ax, 11.6, y, za)
+    ax.text(11.6, y - 0.87, r"$\mathbf{z}_a$", ha="center", va="top", fontsize=16.5)
 
-    box(ax, 8.95, y0 + 0.05, 2.05, 1.2, "unitary code\n" + r"$\mathbf{z}=\mathcal{F}^{-1}\{e^{i\theta_k}\}\in\mathbb{R}^{2d}$"
-        + "\n" + r"$|\mathcal{F}\{\mathbf{z}\}_k|=1$ for all $k$", fc="#E3F2FD", ec=BLUE, fs=10)
-    arrow(ax, (8.47, y0 + 0.65), (8.93, y0 + 0.65))
-    box(ax, 11.35, y0 + 0.25, 1.2, 0.8, "decoder")
-    arrow(ax, (11.02, y0 + 0.65), (11.33, y0 + 0.65))
-    image(ax, xr, 12.9, y0, 1.3, r"reconstruction $\hat{\mathbf{x}}$")
-    arrow(ax, (12.57, y0 + 0.65), (12.88, y0 + 0.65))
+    # decoder
+    arrow(ax, (11.8, y), (12.3, y))
+    network(ax, 12.35, 13.5, y, 0.8, 1.5, DEC, DEC_E, "decoder")
+    arrow(ax, (13.55, y), (14.05, y))
+    image(ax, xr, 14.7, y)
+    ax.text(14.7, y + 0.68, r"$\hat{\mathbf{x}}_a$", ha="center", va="bottom", fontsize=17.5)
 
-    # ---- bottom row: hrr algebra on the codes
-    y1 = 0.35
-    ax.plot([0.2, 14.2], [y1 + 2.45, y1 + 2.45], color=GREY, lw=0.8, ls=":")
-    ax.text(0.2, y1 + 2.2, "HRR operations on the codes (every code is unitary, so binding is exactly invertible)",
-            fontsize=10.5, weight="bold", va="top")
-    cards = [
-        ("bind", r"$\mathbf{a}\circledast\mathbf{b}$", r"phases add: $\theta^a_k+\theta^b_k$" + "\nstays on the torus (unitary)"),
-        ("unbind", r"$(\mathbf{a}\circledast\mathbf{b})\circledast\mathbf{b}^{*}=\mathbf{a}$",
-         r"involution $\mathbf{b}^{*}$: phases negate" + "\nexact inverse, no clean-up"),
-        ("bundle", r"$\mathbf{R}=\frac{1}{\sqrt{k}}\sum_i \mathbf{r}_i\circledast\mathbf{f}_i$",
-         "sum leaves the torus (not unitary)\n"
-         + r"$\mathbf{R}\circledast\mathbf{r}_i^{*}=\frac{1}{\sqrt{k}}(\mathbf{f}_i+$crosstalk$)$"),
-        ("clean-up", r"$\arg\max_j\ \cos(\mathbf{R}\circledast\mathbf{r}_i^{*},\ \mathbf{m}_j)$",
-         "nearest neighbour in the\nitem memory of encoded images"),
-    ]
-    w = 3.3
-    for i, (title, eq, note) in enumerate(cards):
-        x0 = 0.25 + i * (w + 0.25)
-        ax.add_patch(FancyBboxPatch((x0, y1), w, 1.65, boxstyle="round,pad=0.02,rounding_size=0.08", fc="white",
-                                    ec=BLUE if i < 2 else DARK, lw=1.2))
-        ax.text(x0 + 0.15, y1 + 1.45, title, fontsize=11, weight="bold", va="top")
-        ax.text(x0 + w / 2, y1 + 0.98, eq, fontsize=11.5, ha="center", va="center")
-        ax.text(x0 + w / 2, y1 + (0.33 if note.count("\n") > 1 else 0.38), note, fontsize=9.5, ha="center", va="center", color=DARK)
-        if i < 3:
-            arrow(ax, (x0 + w + 0.02, y1 + 0.82), (x0 + w + 0.23, y1 + 0.82))
-    fig.savefig(a.out, bbox_inches="tight")
-    fig.savefig(os.path.splitext(a.out)[0] + ".png", dpi=200, bbox_inches="tight")
-    print(a.out)
+    # second image through the same encoder; its code feeds both operations
+    image(ax, xb, 0.8, yb)
+    ax.text(0.8, yb + 0.68, r"$\mathbf{x}_b$", ha="center", va="bottom", fontsize=17.5)
+    arrow(ax, (1.45, yb), (1.95, yb))
+    network(ax, 2.0, 3.15, yb, 1.5, 0.8, ENC, ENC_E, "encoder")
+    ax.plot([2.575, 2.575], [yb + 0.6, y - 0.6], color=ENC_E, lw=1.2, ls=(0, (3, 3)), zorder=1)
+    ax.text(2.66, (y + yb) / 2, "shared\nweights", ha="left", va="center", fontsize=13.5, color=GREY, linespacing=1.1)
+    arrow(ax, (3.2, yb), (3.62, yb))
+    l, r = angles(ax, 4.75, yb, tb, CB)
+    ax.text(4.75, yb - 0.36, r"phases $\theta^b$", ha="center", va="top", fontsize=15.0, color=INK)
+    arrow(ax, (r + 0.07, yb), (6.95, yb))
+    strip(ax, 7.15, yb, zb)
+    ax.text(7.15, yb - 0.87, r"$\mathbf{z}_b$", ha="center", va="top", fontsize=16.5)
+    arrow(ax, (7.35, yb + 0.15), (8.3, y - 0.3), color=RED, style="angle3,angleA=0,angleB=90")
+    arrow(ax, (7.35, yb - 0.15), (10.5, y - 0.3), color=RED, style="angle3,angleA=0,angleB=90")
+    ax.text(8.42, 2.0, r"$\mathbf{z}_b$", ha="left", va="center", fontsize=16.0, color=RED)
+    ax.text(10.62, 2.0, r"$\mathbf{z}_b^{*}$", ha="left", va="center", fontsize=16.0, color=RED)
+
+    # groups
+    bracket(ax, 2.0, 7.3, 4.55, "Encoder (trained)")
+    bracket(ax, 7.95, 10.85, 4.55, "HRR operations (after training)", RED)
+    bracket(ax, 12.35, 13.5, 4.55, "Decoder (trained)")
+
+    # inset, bottom right: what binding does on one circle
+    ax.add_patch(Rectangle((11.95, -0.02), 3.45, 2.1, fill=False, ec=GREY, lw=1.1, ls=(0, (4, 3)), zorder=1))
+    cx, cy, t1, t2 = 12.55, 1.02, np.deg2rad(55), np.deg2rad(80)
+    ax.text(13.675, 1.86, "binding adds phases", ha="center", va="center", fontsize=14, color=GREY)
+    dial(ax, cx, cy, t1, CA, r"$\theta^a_i$", r=0.4)
+    ax.text(cx + 0.5625, cy, "+", ha="center", va="center", fontsize=18, color=INK)
+    dial(ax, cx + 1.125, cy, t2, CB, r"$\theta^b_i$", r=0.4)
+    ax.text(cx + 1.6875, cy, "=", ha="center", va="center", fontsize=18, color=INK)
+    dial(ax, cx + 2.25, cy, t1 + t2, CAB, r"$\theta^a_i{+}\theta^b_i$", r=0.4)
+
+    fig.savefig(a.out, bbox_inches="tight", pad_inches=0.03)
+    fig.savefig(os.path.splitext(a.out)[0] + ".png", dpi=200, bbox_inches="tight", pad_inches=0.03)
 
 
 if __name__ == "__main__":

@@ -63,3 +63,10 @@ activate/
 
 # local checks, not shared
 tests/
+
+# paper drafts, exports, pdfs and old material (kept locally, not tracked)
+writing/
+
+# results and checkpoints pulled from the pods (kept locally)
+runs_*/
+checkpoints_best/

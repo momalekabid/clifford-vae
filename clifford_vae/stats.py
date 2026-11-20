@@ -11,11 +11,11 @@ from . import common
 CI, N_BOOT = 0.95, 20000
 
 LABEL = {"N": "Gaussian", "N_L2": "Gaussian (L2)", "S": r"$\mathcal{S}$-PWS", "V": r"$\mathcal{S}$-vMF",
-         "C": "Clifford (Ours)", "ref": "Unitary HRR"}
+         "C": "Clifford (Ours)", "ref": "Unitary HRR", "hrr": "HRR"}
 TEX = {"N": r"$\mathcal{N}$", "N_L2": r"$\mathcal{N}_{L2}$", "S": r"$\mathcal{S}$", "V": r"$\mathcal{V}$",
        "C": r"$\mathcal{C}$ (Ours)"}
-COLOR = {"N": "#9C27B0", "N_L2": "#4CAF50", "S": "#FF9800", "V": "#E91E63", "C": "#2196F3", "ref": "#555555"}
-MARKER = {"N": "D", "N_L2": "^", "S": "s", "V": "v", "C": "o", "ref": "+"}
+COLOR = {"N": "#9C27B0", "N_L2": "#4CAF50", "S": "#FF9800", "V": "#E91E63", "C": "#2196F3", "ref": "#555555", "hrr": "#A1887F"}
+MARKER = {"N": "D", "N_L2": "^", "S": "s", "V": "v", "C": "o", "ref": "+", "hrr": "x"}
 DATASET = {"cifar10": "CIFAR-10", "fashionmnist": "FashionMNIST", "mnist": "MNIST", "celeba": "CelebA",
            "shapes3d": "3D Shapes", "omniglot": "Omniglot"}
 
@@ -46,13 +46,15 @@ def load_runs(root):
 
 
 def knn_value(m, prior, n):
-    """the paper's k-NN number: euclidean for N, cosine for the rest. runs from before the
-    metric was logged both ways stored cosine as acc_n and euclidean as euc_acc_n."""
+    """the paper's k-NN number: cosine distance; for the unnormalised gaussian N, the better of
+    euclidean and cosine for that run (its codes carry information in their length at low d, and
+    cosine serves it better at high d). runs from before both were logged stored cosine as acc_n."""
     k = m.get("knn", {})
-    key = f"euc_acc_{n}" if prior == "N" else f"cos_acc_{n}"
-    if key in k:
-        return k[key]
-    return k.get(f"euc_acc_{n}") if prior == "N" else k.get(f"acc_{n}")
+    cos = k.get(f"cos_acc_{n}", k.get(f"acc_{n}"))
+    if prior != "N":
+        return cos
+    both = [v for v in (k.get(f"euc_acc_{n}"), cos) if v is not None]
+    return max(both) if both else None
 
 
 def values(runs, ds, cell, path):
@@ -73,7 +75,7 @@ def cell(prior, d, beta_max=1.0):
 
 def mark(samples, higher_better, scale=1.0, nd=1):
     """{prior: latex}. bold + underline: best mean with an hdi disjoint from every other entry.
-    underline: the best and every entry whose hdi overlaps it (a tie). decided on raw intervals."""
+    underline: the best and every entry whose hdi overlaps it (a tie). decided on the printed intervals."""
     st = {}
     for p, x in samples.items():
         if len(x):
@@ -82,7 +84,9 @@ def mark(samples, higher_better, scale=1.0, nd=1):
     if not st:
         return {p: "--" for p in samples}
     best = (max if higher_better else min)(st, key=lambda p: st[p][0])
-    tied = {p for p in st if p != best and not (st[p][2] < st[best][1] or st[best][2] < st[p][1])}
+    # intervals are compared as printed (rounded to nd), so the marks agree with the numbers on the page
+    r = {p: (round(st[p][1], nd), round(st[p][2], nd)) for p in st}
+    tied = {p for p in st if p != best and not (r[p][1] < r[best][0] or r[best][1] < r[p][0])}
     out = {}
     for p in samples:
         if p not in st:

@@ -10,7 +10,7 @@ import os
 import numpy as np
 
 from clifford_vae import common
-from clifford_vae.stats import TEX, cell, hdi, load_runs, mark, values
+from clifford_vae.stats import DATASET, TEX, cell, hdi, knn_value, load_runs, mark, values
 from clifford_vae.vsa import K_RANGE
 
 CNN_DIMS = [128, 256, 512, 1024, 2048, 4096]
@@ -39,12 +39,13 @@ def knn(runs, ds, dims, priors, n_runs):
     for d in dims:
         row = []
         for b in budgets:
-            c = mark({p: values(runs, ds, cell(p, d), f"knn.acc_{b}") for p in priors}, True, 100)
+            c = mark({p: np.array([v for m in runs.get((ds, cell(p, d)), []) if (v := knn_value(m, p, b)) is not None])
+                      for p in priors}, True, 100)
             row += [c[p] for p in priors]
         rows.append(rf"$d={d}$ & " + " & ".join(row) + r" \\")
-    cap = (rf"Semi-supervised $k$-NN {what} (\%) on {ds} ({n_runs} runs), mean with the 95\% HDI of the mean "
+    cap = (rf"Semi-supervised $k$-NN {what} (\%, $\uparrow$) on {DATASET.get(ds, ds)} ({n_runs} runs), mean with the 95\% HDI of the mean "
            r"(bootstrap, 20k resamples). $k=5$ neighbours fit on $n_\ell$ labelled training codes, scored on the full "
-           r"test set; euclidean distance for $\mathcal{N}$, cosine for the other priors.")
+           r"test set; cosine distance, and for $\mathcal{N}$ $\max(\mathrm{acc}_{\mathrm{Euclidean}}, \mathrm{acc}_{\mathrm{cosine}})$.")
     return _wrap(cap, f"tab:{ds}_knn", "l|" + "|".join(["c" * nd] * 3), header, rows)
 
 
@@ -54,7 +55,7 @@ def scalar(runs, ds, dims, priors, path, higher, what, label, n_runs, scale=1.0,
     for d in dims:
         c = mark({p: values(runs, ds, cell(p, d), path) for p in priors}, higher, scale, nd)
         rows.append(rf"$d={d}$ & " + " & ".join(c[p] for p in priors) + r" \\")
-    cap = rf"{what} on {ds} ({n_runs} runs), mean with the 95\% HDI of the mean (bootstrap, 20k resamples)."
+    cap = rf"{what} on {DATASET.get(ds, ds)} ({n_runs} runs), mean with the 95\% HDI of the mean (bootstrap, 20k resamples)."
     return _wrap(cap, label, "l" + "c" * len(priors), header, rows, resize=False)
 
 
@@ -73,6 +74,74 @@ def by_cell(runs, ds, cells, cols, what, label):
     return _wrap(cap, label, "l" + "c" * len(cols), header, rows)
 
 
+def shapes3d_summary(runs, beta):
+    """the three held-out-pair scores for every 3d shapes model: the four priors at beta 1, then gaussian and
+    clifford trained as beta-vaes (runs under <root>_betavae)."""
+    comb = dict(runs)
+    comb.update(beta)
+    rows = [("Gaussian", "N-d128"), ("Gaussian (L2)", "N_L2-d128"), ("Power Spherical", "S-d128"), ("Clifford (ours)", "C-d128")]
+    rows += [(rf"{name}, $\beta={b}$", f"{p}-d128-b{b}") for p, name, bs in (("N", "Gaussian", (4, 8, 16)), ("C", "Clifford", (0.5, 4, 8, 16)))
+             for b in bs]
+    rows = [(lab, c) for lab, c in rows if comb.get(("shapes3d", c))]
+    cols = [(r"Binding analogy $\uparrow$", "composition.analogy.hrr"), (r"Vector analogy $\uparrow$", "composition.analogy.vector"),
+            (r"Decoded from own image $\uparrow$", "composition.unseen.attr_acc")]
+    marks = [mark({c: values(comb, "shapes3d", c, path) for _, c in rows}, True, 100, 1) for _, path in cols]
+    n = max(len(comb[("shapes3d", c)]) for _, c in rows)
+    L = [r"\begin{table}[H]", r"\centering",
+         rf"\caption{{3D Shapes: held-out hue $\times$ shape pairs decoded with the right hue and shape (\%), {n} runs, mean with the 95\% HDI.}}",
+         r"\label{tab:shapes3d_summary}", r"\renewcommand{\arraystretch}{1.25}", r"\begin{tabular}{l" + "c" * len(cols) + "}", r"\toprule",
+         " & " + " & ".join(h for h, _ in cols) + r" \\", r"\midrule"]
+    for i, (lab, c) in enumerate(rows):
+        if i == 4:
+            L.append(r"\midrule")
+        L.append(lab + " & " + " & ".join(m[c] for m in marks) + r" \\")
+    return "\n".join(L + [r"\bottomrule", r"\end{tabular}", r"\end{table}"]) + "\n"
+
+
+def shapes3d_disentanglement(runs, beta):
+    """mig and dci on the six ground-truth factors for every 3d shapes model, same rows as shapes3d_summary."""
+    comb = dict(runs)
+    comb.update(beta)
+    rows = [("Gaussian", "N-d128"), ("Gaussian (L2)", "N_L2-d128"), ("Power Spherical", "S-d128"), ("Clifford (ours)", "C-d128")]
+    rows += [(rf"{name}, $\beta={b}$", f"{p}-d128-b{b}") for p, name, bs in (("N", "Gaussian", (4, 8, 16)), ("C", "Clifford", (0.5, 4, 8, 16)))
+             for b in bs]
+    rows = [(lab, c) for lab, c in rows if comb.get(("shapes3d", c))]
+    cols = [(r"MIG $\uparrow$", "composition.mig"), (r"DCI disentanglement $\uparrow$", "composition.dci.disentanglement"),
+            (r"DCI completeness $\uparrow$", "composition.dci.completeness"), (r"DCI informativeness $\uparrow$", "composition.dci.informativeness")]
+    marks = [mark({c: values(comb, "shapes3d", c, path) for _, c in rows}, True, 1, 2) for _, path in cols]
+    n = max(len(comb[("shapes3d", c)]) for _, c in rows)
+    L = [r"\begin{table}[H]", r"\centering",
+         rf"\caption{{3D Shapes: disentanglement scores on the six ground-truth factors, {n} runs, mean with the 95\% HDI. "
+         r"MIG is the mutual information gap \citep{chen2018isolating} and DCI the disentanglement, completeness and informativeness scores \citep{eastwood2018a}, "
+         r"computed from the posterior means of $15{,}000$ images (Clifford: the mean phases).}",
+         r"\label{tab:shapes3d_disentanglement}", r"\renewcommand{\arraystretch}{1.25}", r"\begin{tabular}{l" + "c" * len(cols) + "}", r"\toprule",
+         " & " + " & ".join(h for h, _ in cols) + r" \\", r"\midrule"]
+    for i, (lab, c) in enumerate(rows):
+        if i == 4:
+            L.append(r"\midrule")
+        L.append(lab + " & " + " & ".join(m[c] for m in marks) + r" \\")
+    return "\n".join(L + [r"\bottomrule", r"\end{tabular}", r"\end{table}"]) + "\n"
+
+
+OMNIGLOT_ROWS = [("N", 512, "Gaussian"), ("N_L2", 512, "Gaussian (L2)"), ("C", 256, "Clifford (ours)")]
+OMNIGLOT_PROBLEMS = [(5, 1), (5, 5), (20, 1), (20, 5), (100, 5)]
+
+
+def omniglot_fewshot(runs, suffix, codes, label):
+    """one table per code type (real-valued, bipolar): rows = priors, columns = m-way n-shot problems."""
+    names = [cell(p, d) for p, d, _ in OMNIGLOT_ROWS]
+    marks = [mark({n: values(runs, "omniglot", n, f"fewshot.{m}way{k}shot{suffix}") for n in names}, True, 100, 1)
+             for m, k in OMNIGLOT_PROBLEMS]
+    lines = [r"\begin{table}[H]", r"\centering",
+             rf"\caption{{Omniglot few-shot accuracy (\%, $\uparrow$) with {codes} as keys, {max(len(runs.get(('omniglot', n), [])) for n in names)} runs, "
+             r"mean with the 95\% HDI.}", rf"\label{{{label}}}", r"\renewcommand{\arraystretch}{1.25}",
+             r"\begin{tabular}{l" + "c" * len(OMNIGLOT_PROBLEMS) + "}", r"\toprule",
+             " & " + " & ".join(rf"{m}-way {k}-shot" for m, k in OMNIGLOT_PROBLEMS) + r" \\", r"\midrule"]
+    for (p, d, name), n in zip(OMNIGLOT_ROWS, names):
+        lines.append(name + " & " + " & ".join(mk[n] for mk in marks) + r" \\")
+    return "\n".join(lines + [r"\bottomrule", r"\end{tabular}", r"\end{table}"]) + "\n"
+
+
 def elbo(runs, ds, dims, priors, n_runs):
     header = [" & " + " & ".join(rf"\multicolumn{{3}}{{c}}{{{TEX[p]}}}" for p in priors) + r" \\",
               " & " + " & ".join("Recon & KL & $-$ELBO" for _ in priors) + r" \\"]
@@ -87,7 +156,7 @@ def elbo(runs, ds, dims, priors, n_runs):
                 row.append(rf"\shortstack{{{x.mean():.1f}\\{{\tiny[{lo:.1f},\,{hi:.1f}]}}}}" if len(x) else r"\textit{n.c.}")
             row.append(neg[p])
         rows.append(rf"$d={d}$ & " + " & ".join(row) + r" \\")
-    cap = (rf"ELBO on {ds} ({n_runs} runs), mean with the 95\% HDI of the mean. Recon $=-\log p(\mathbf{{x}}|\mathbf{{z}})$, "
+    cap = (rf"ELBO on {DATASET.get(ds, ds)} ({n_runs} runs), mean with the 95\% HDI of the mean. Recon $=-\log p(\mathbf{{x}}|\mathbf{{z}})$, "
            r"KL against the prior, $-$ELBO = Recon + KL ($\downarrow$).")
     return _wrap(cap, f"tab:{ds}_elbo", "l|" + "|".join(["ccc"] * len(priors)), header, rows)
 
@@ -121,7 +190,7 @@ def vsa_points(runs, ds, dims, priors, refs, tests, n_runs, label, what):
             rows.append(rf" & {{\footnotesize random unitary, length {D}}} & " + " & ".join(cells) + r" \\")
         rows.append(r"\midrule")
     rows.pop()
-    cap = (rf"{what} on {ds} ({n_runs} runs), every prior at latent dimension $d$, mean with the 95\% HDI of the mean. "
+    cap = (rf"{what} on {DATASET.get(ds, ds)} ({n_runs} runs), every prior at latent dimension $d$, mean with the 95\% HDI of the mean. "
            r"Clifford with $d$ angles is a length-$2d$ unitary vector, so the random baseline is unitary at length $2d$.")
     return _wrap(cap, label, "ll" + "c" * len(tests), header, rows)
 
@@ -141,24 +210,36 @@ def cost(runs, ds, dims, priors):
                     x = values(runs, ds, cell(p, d), path.replace("latency.", "cost."))  # older runs
                 cells.append(f"{x.mean() * sc:.{nd}f}" if len(x) else "--")
             rows.append((f"{d}" if i == 0 else "") + f" & {TEX[p]} & " + " & ".join(cells) + r" \\")
-    cap = (rf"Training and inference cost on {ds} (mean over runs). Times from the sweep, where runs shared a gpu; "
+    cap = (rf"Training and inference cost on {DATASET.get(ds, ds)} (mean over runs). Times from the sweep, where runs shared a gpu; "
            r"see timing.py for the clean per-cell numbers.")
     return _wrap(cap, f"tab:{ds}_cost", "ll" + "r" * len(cols), header, rows, resize=False)
 
 
 def timing(path, ds, dims, priors):
+    """cost table. with repeated timings (timing.py --repeats) every entry is the mean with its 95% hdi."""
     t = common.read_json(path)
     if not t:
         return None
-    header = ["$d$ & & s / epoch & peak mem (GB) & encode ms / 1k & decode ms / 1k \\\\"]
-    rows = []
+    header = [r"$d$ & & s / epoch $\downarrow$ & peak mem (GB) $\downarrow$ & encode ms / 1k $\downarrow$ & decode ms / 1k $\downarrow$ \\"]
+    cols = [("s_per_epoch", 1.0, 2), ("peak_mem_mb", 1 / 1024, 2), ("encode_ms_per_1k", 1.0, 2), ("decode_ms_per_1k", 1.0, 2)]
+    rows, reps = [], 0
+
+    def fmt(r, k, sc, nd):
+        v = [x * sc for x in r.get(k + "_runs", [])]
+        if len(v) < 2:
+            return f"{r[k] * sc:.{nd}f}"
+        lo, hi = hdi(v)
+        return rf"\shortstack{{{np.mean(v):.{nd}f}\\{{\tiny[{lo:.{nd}f},\,{hi:.{nd}f}]}}}}"
+
     for d in dims:
         for i, p in enumerate(priors):
             r = t.get(f"{ds}/{cell(p, d)}")
             if r:
-                rows.append((f"{d}" if i == 0 else "") + f" & {TEX[p]} & {r['s_per_epoch']:.1f} & "
-                            f"{r['peak_mem_mb'] / 1024:.2f} & {r['encode_ms_per_1k']:.2f} & {r['decode_ms_per_1k']:.2f} \\\\")
-    cap = rf"Clean training and inference cost on {ds}, one run at a time on an idle {t.get('_gpu', 'gpu')}."
+                reps = max(reps, len(r.get("s_per_epoch_runs", [])))
+                rows.append((f"{d}" if i == 0 else "") + f" & {TEX[p]} & " + " & ".join(fmt(r, *c) for c in cols) + " \\\\")
+    cap = rf"Training and inference cost on {DATASET.get(ds, ds)}, each model timed alone on an idle {t.get('_gpu', 'gpu')}: seconds per training epoch, peak training memory, and time to encode and to decode $1000$ images."
+    if reps > 1:
+        cap += rf" Mean over {reps} repeated timings with the 95\% HDI of the mean."
     return _wrap(cap, f"tab:{ds}_timing", "llrrrr", header, rows, resize=False)
 
 
@@ -194,36 +275,30 @@ def main():
         out[f"{ds}_vsa"] = vsa_points(runs, ds, dims, priors, refs, main_tests, n(ds), f"tab:{ds}_vsa", "VSA benchmarks")
         out[f"{ds}_two_bundle"] = vsa_points(runs, ds, dims, priors, refs, two, n(ds), f"tab:{ds}_two_bundle",
                                              "Appendix: the submission's two-bundle test (chance 0.5)")
+        if any("wason" in m for (d, _), ms in runs.items() if d == ds for m in ms):
+            out[f"{ds}_wason"] = scalar(runs, ds, dims, priors, "wason.transform", True,
+                                        "Wason card task, rules over new concepts solved (\\%, $\\uparrow$; chance 1.5\\%)",
+                                        f"tab:{ds}_wason", n(ds), scale=100)
     betas = (1.0, 4.0)
     if "shapes3d" in present:
         cells = [(p, 128, b) for b in betas for p in ("N", "N_L2", "S", "C")]
         c = "composition."
+        out["shapes3d_summary"] = shapes3d_summary(runs, load_runs(os.path.normpath(a.root) + "_betavae"))
+        out["shapes3d_disentanglement"] = shapes3d_disentanglement(runs, load_runs(os.path.normpath(a.root) + "_betavae"))
         out["shapes3d_composition"] = by_cell(runs, "shapes3d", cells, [
             ("MAE seen", c + "seen.recon_mae", False, 100, 2), ("MAE unseen", c + "unseen.recon_mae", False, 100, 2),
             ("attr.\\ seen", c + "seen.attr_acc", True, 100, 1), ("attr.\\ unseen", c + "unseen.attr_acc", True, 100, 1),
             ("probe hue", c + "probe_acc_hue_unseen", True, 100, 1), ("probe shape", c + "probe_acc_shape_unseen", True, 100, 1),
-            ("HRR analogy", c + "analogy.hrr", True, 100, 1), ("vector analogy", c + "analogy.vector", True, 100, 1)],
+            ("HRR analogy", c + "analogy.hrr", True, 100, 1), ("vector analogy", c + "analogy.vector", True, 100, 1),
+            ("MIG", c + "mig", True, 100, 1), ("DCI dis.", c + "dci.disentanglement", True, 100, 1),
+            ("DCI compl.", c + "dci.completeness", True, 100, 1), ("DCI inf.", c + "dci.informativeness", True, 100, 1)],
             "3D Shapes, held-out object-hue $\\times$ shape pairs: reconstruction MAE ($\\times 100$), hue and shape of "
             "the reconstruction both right (\\%), linear probe fit on seen pairs and scored on unseen ones (\\%), and "
             "unseen pairs built by HRR or vector-arithmetic analogies (\\%)", "tab:shapes3d_composition")
     if "omniglot" in present:
-        lengths = {"N": 512, "N_L2": 512, "C": 256}
-        cells = [(p, lengths[p], b) for b in betas for p in ("N", "N_L2", "C")]
-        fs = []
-        for m, n in ((5, 1), (5, 5), (20, 1), (20, 5), (100, 5)):
-            fs.append((f"{m}-way {n}-shot", f"fewshot.{m}way{n}shot", True, 100, 1))
-        out["omniglot_fewshot"] = by_cell(runs, "omniglot", cells, fs,
-            "Omniglot few-shot classification on the evaluation alphabets with an HRR memory: every support code bound "
-            "to a random unitary label for its class, all pairs bundled into one vector, each query unbound with its "
-            "own code and cleaned up against the labels (every code 512 long), accuracy (\\%)",
-            "tab:omniglot_fewshot")
-        a = "composition.analogy."
-        out["omniglot_composition"] = by_cell(runs, "omniglot", cells, [
-            (f"{k} {s}", a + f"{k}_{s}", s != "mae", 100, 1 if s == "char_acc" else 2)
-            for k in ("hrr", "vector", "copy") for s in ("cos", "mae", "char_acc")],
-            "Omniglot held-out character $\\times$ drawer pairs built from three seen drawings: HRR, vector "
-            "arithmetic, and copying the same character by another drawer. cos to the target's code, image MAE "
-            "($\\times 100$), character accuracy of the decoded image (\\%)", "tab:omniglot_composition")
+        out["omniglot_fewshot_real"] = omniglot_fewshot(runs, "_cos", "real-valued codes", "tab:omniglot_real")
+        out["omniglot_fewshot_bipolar"] = omniglot_fewshot(runs, "_cos_sign", "bipolar codes (the sign of each component)",
+                                                           "tab:omniglot_bipolar")
     for k, t in out.items():
         with open(os.path.join(agg, "tables", f"{k}.tex"), "w") as f:
             f.write(t + "\n")

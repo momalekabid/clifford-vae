@@ -21,15 +21,22 @@ from . import vsa as V
 from .data import CACHE, HELD_OUT, SHAPES3D_SIZES, GpuImages, Split
 
 HUE, SHAPE = 2, 4
-CLS_PATH = os.path.join(CACHE, "shapes3d_factor_net.pt")
+CLS_PATH = os.path.join(CACHE, "shapes3d_factor_net_v2.pt")
+
+
+def _block(i, o):
+    return [nn.Conv2d(i, o, 3, 1, 1), nn.BatchNorm2d(o), nn.ReLU(), nn.Conv2d(o, o, 3, 1, 1), nn.BatchNorm2d(o), nn.ReLU(),
+            nn.MaxPool2d(2)]
 
 
 class FactorNet(nn.Module):
+    # keeps the spatial map (no global pooling): object, floor and wall share one palette, so the
+    # classifier has to know where a colour is
     def __init__(self):
         super().__init__()
-        self.f = nn.Sequential(nn.Conv2d(3, 32, 3, 1, 1), nn.ReLU(), nn.MaxPool2d(2), nn.Conv2d(32, 64, 3, 1, 1), nn.ReLU(),
-                               nn.MaxPool2d(2), nn.Conv2d(64, 128, 3, 1, 1), nn.ReLU(), nn.AdaptiveAvgPool2d(1), nn.Flatten())
-        self.heads = nn.ModuleList([nn.Linear(128, n) for n in SHAPES3D_SIZES])
+        self.f = nn.Sequential(*_block(3, 32), *_block(32, 64), *_block(64, 128), nn.Flatten(), nn.Linear(128 * 16, 256),
+                               nn.ReLU())
+        self.heads = nn.ModuleList([nn.Linear(256, n) for n in SHAPES3D_SIZES])
 
     def forward(self, x):
         h = self.f(x)
@@ -37,8 +44,9 @@ class FactorNet(nn.Module):
 
 
 @torch.enable_grad()  # called from the no_grad test
-def factor_net(all_arrays, dev, n=50000, epochs=5):
-    """trained once on random images of the full grid (held-out pairs included), cached."""
+def factor_net(all_arrays, dev, n=200000, epochs=15):
+    """trained once on random images of the full grid (held-out pairs included), cached with its
+    test accuracy per factor and on hue and shape together (what the analogies are scored on)."""
     net = FactorNet().to(dev)
     if os.path.exists(CLS_PATH):
         net.load_state_dict(torch.load(CLS_PATH, map_location=dev)["state"])
@@ -48,19 +56,24 @@ def factor_net(all_arrays, dev, n=50000, epochs=5):
     tr = GpuImages(Split(all_arrays["x"][idx[:n]]), dev, "cnn")
     lab = torch.from_numpy(all_arrays["labels"][idx]).to(dev)
     opt = torch.optim.Adam(net.parameters(), 1e-3)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
     g = torch.Generator().manual_seed(0)
     for _ in range(epochs):
+        net.train()
         for b in tr.batches(256, g, shuffle=True):
             loss = sum(F.cross_entropy(o, lab[b, j]) for j, o in enumerate(net(tr.get(b))))
             opt.zero_grad()
             loss.backward()
             opt.step()
+        sched.step()
     net.eval()
     te = GpuImages(Split(all_arrays["x"][idx[n:]]), dev, "cnn")
     with torch.no_grad():
-        out = net(te.get(torch.arange(te.n, device=dev)))
+        out = [torch.cat(o) for o in zip(*[net(te.get(b)) for b in te.batches(1000)])]
     acc = [(o.argmax(1) == lab[n:, j]).float().mean().item() for j, o in enumerate(out)]
-    torch.save({"state": net.state_dict(), "test_acc": acc}, CLS_PATH)
+    joint = ((out[HUE].argmax(1) == lab[n:, HUE]) & (out[SHAPE].argmax(1) == lab[n:, SHAPE])).float().mean().item()
+    print(f"factor classifier test accuracy {[round(x, 3) for x in acc]}, hue and shape {joint:.3f}", flush=True)
+    torch.save({"state": net.state_dict(), "test_acc": acc, "hue_shape_acc": joint}, CLS_PATH)
     return net
 
 
@@ -81,7 +94,7 @@ def composition(model, data, dev, seed, n_analogy=2000):
         mae, ok, ok_in = 0.0, 0.0, 0.0
         for b in im.batches(500):
             x = im.get(b)
-            xr = model.decoder(M.mean_code(model, x))
+            xr = M.decode(model, M.mean_code(model, x), M.code_sigma(model, x))
             mae += ((xr - x).abs() / 2).mean((1, 2, 3)).sum().item()
             ok += _hue_shape_ok(net, xr, lab[b]).sum().item()
             ok_in += _hue_shape_ok(net, x, lab[b]).sum().item()
@@ -123,12 +136,95 @@ def composition(model, data, dev, seed, n_analogy=2000):
     lab = torch.from_numpy(alll[tgt]).to(dev)
     res = {"hrr": [], "vector": [], "hrr_mae": [], "vector_mae": []}
     for j in range(0, len(tgt), 500):
-        za, zb, zc = (M.mean_code(model, im(tri[j:j + 500, q])) for q in range(3))
+        xs = [im(tri[j:j + 500, q]) for q in range(3)]
+        za, zb, zc = (M.mean_code(model, x3) for x3 in xs)
+        sig = M.code_sigma(model, torch.cat(xs)).view(3, len(xs[0]), -1).mean(0) if model.prior == "N_L2" else None
         x = im(tgt[j:j + 500])
         for name, z in (("hrr", V.unbind(V.bind(za, zc), zb)), ("vector", za - zb + zc)):
-            xr = model.decoder(z)
+            xr = M.decode(model, z, sig)
             res[name] += _hue_shape_ok(net, xr, lab[j:j + 500]).tolist()
             res[name + "_mae"] += ((xr - x).abs() / 2).mean((1, 2, 3)).tolist()
     out["analogy"] = {k: float(np.mean(v)) for k, v in res.items()}
+    out.update(factor_metrics(model, data.meta["all"], dev, seed))
     return out
+
+
+@torch.no_grad()
+def raw_unseen_grid(model, data, dev, k=6):
+    """images for the held-out-pair figure. k held-out (hue, shape) targets, the same for every run: the three
+    seen images a = (hue, other shape), b = (other hue, other shape), c = (other hue, shape) that share the
+    target's floor, wall, scale and orientation; the target; and three decodings: the hrr analogy
+    unbind(a (*) c, b), the vector analogy a - b + c, and the target's own code."""
+    from .evals import to_uint8
+
+    allx, alll = data.meta["all"]["x"], data.meta["all"]["labels"]
+    ulab = data.meta["unseen"].extra["labels"]
+    held, rng = set(HELD_OUT), np.random.RandomState(0)
+    tri, tgt = [], []
+    for h in range(k):  # one target per held-out hue
+        t = ulab[rng.choice(np.nonzero(ulab[:, HUE] == h)[0])].copy()
+        s = t[SHAPE]
+        opts = [(h2, s2) for h2 in range(10) for s2 in range(4)
+                if h2 != h and s2 != s and not {(h, s2), (h2, s2), (h2, s)} & held]
+        h2, s2 = opts[rng.randint(len(opts))]
+        terms = []
+        for hh, ss in ((h, s2), (h2, s2), (h2, s)):
+            v = t.copy()
+            v[HUE], v[SHAPE] = hh, ss
+            terms.append(np.ravel_multi_index(v, SHAPES3D_SIZES))
+        tri.append(terms)
+        tgt.append(np.ravel_multi_index(t, SHAPES3D_SIZES))
+    tri, tgt = np.array(tri), np.array(tgt)
+    im = lambda idx: torch.from_numpy(allx[idx]).to(dev).float() / 127.5 - 1  # noqa: E731
+    xs = [im(tri[:, q]) for q in range(3)]
+    x = im(tgt)
+    za, zb, zc = (M.mean_code(model, v) for v in xs)
+    sig = M.code_sigma(model, torch.cat(xs)).view(3, k, -1).mean(0) if model.prior == "N_L2" else None
+    out = {"a": allx[tri[:, 0]], "b": allx[tri[:, 1]], "c": allx[tri[:, 2]], "target": allx[tgt]}
+    out["hrr"] = to_uint8(model, M.decode(model, V.unbind(V.bind(za, zc), zb), sig))
+    out["vector"] = to_uint8(model, M.decode(model, za - zb + zc, sig))
+    out["own"] = to_uint8(model, M.decode(model, M.mean_code(model, x), M.code_sigma(model, x)))
+    return out
+
+
+@torch.no_grad()
+def factor_metrics(model, all_arrays, dev, seed, n=15000, n_bins=20):
+    """the usual disentanglement scores on the 6 ground-truth factors, from the encoder's mean latents
+    (clifford: the mean angles, wrapped; for dci each circle enters as cos and sin).
+      mig  mutual information gap (chen et al. 2018): per factor, the gap between the two latents with the
+           highest mutual information, over the factor's entropy; latents in 20 equal-mass bins.
+      dci  eastwood & williams 2018 with random forests: disentanglement, completeness, informativeness
+           (test accuracy), fit on 2/3 of the images."""
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import mutual_info_score
+
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(len(all_arrays["x"]), n, replace=False)
+    lab = all_arrays["labels"][idx]
+    im = GpuImages(Split(all_arrays["x"][idx]), dev, "cnn")
+    z = torch.cat([model.encode_mean(im.get(b)).float() for b in im.batches(1000)]).cpu().numpy()
+    clifford = model.prior in M.CLIFFORD
+    if clifford:
+        z = np.mod(z[:, 1:] + np.pi, 2 * np.pi) - np.pi  # angle 0 is unused
+    d, nf = z.shape[1], lab.shape[1]
+    # mig
+    binned = np.stack([np.searchsorted(np.quantile(z[:, j], np.linspace(0, 1, n_bins + 1)[1:-1]), z[:, j]) for j in range(d)], 1)
+    gaps = []
+    for f in range(nf):
+        mi = np.sort([mutual_info_score(lab[:, f], binned[:, j]) for j in range(d)])[::-1]
+        gaps.append((mi[0] - mi[1]) / mutual_info_score(lab[:, f], lab[:, f]))
+    # dci
+    feats = np.concatenate([np.cos(z), np.sin(z)], 1) if clifford else z
+    ntr = 2 * n // 3
+    R, acc = np.zeros((d, nf)), []
+    for f in range(nf):
+        rf = RandomForestClassifier(50, max_depth=12, n_jobs=-1, random_state=seed).fit(feats[:ntr], lab[:ntr, f])
+        imp = rf.feature_importances_
+        R[:, f] = imp[:d] + imp[d:] if clifford else imp
+        acc.append(rf.score(feats[ntr:], lab[ntr:, f]))
+    ent = lambda p, base: -(p * np.log(p + 1e-12)).sum(-1) / np.log(base)  # noqa: E731
+    rows = R / (R.sum(1, keepdims=True) + 1e-12)
+    dis = float(((1 - ent(rows, nf)) * R.sum(1) / R.sum()).sum())
+    comp = float(np.mean(1 - ent((R / R.sum(0, keepdims=True)).T, d)))
+    return {"mig": float(np.mean(gaps)), "dci": {"disentanglement": dis, "completeness": comp, "informativeness": float(np.mean(acc))}}
 

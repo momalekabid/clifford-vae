@@ -12,6 +12,7 @@
 # optimiser state: a crashed run resumes from it) and <run>_best.pt (val-selected, every test runs
 # on it). each stores its tag, epoch and val elbo; after the evals both are stored as fp16 weights.
 import argparse
+import gc
 import os
 import time
 
@@ -53,7 +54,7 @@ def parser(dataset, dims, priors, overrides=None):
         p.add_argument(f"--{k}", type=type(v), default=v)
     p.add_argument("--kappa_cap", type=float, default=None, help="clifford: max kappa (default 10, inf = no cap)")
     p.add_argument("--kappa_floor", type=float, default=None, help="clifford: min kappa (default 0.01 cnn, 0.03 mlp)")
-    p.add_argument("--kappa_shared", action="store_true", help="clifford: one kappa per image (the submission's setup)")
+    p.add_argument("--kappa_shared", action="store_true", help="clifford: one kappa per image, shared by all circles")
     p.add_argument("--log_every", type=int, default=10, help="steps between curve rows")
     p.add_argument("--skip", default="", help="comma list of evals to skip: knn,vsa,fid,raw")
     p.add_argument("--root", default=None, help="results root (default runs/ or $CVAE_RESULTS)")
@@ -100,14 +101,20 @@ def main(dataset, dims, priors, overrides=None, argv=None):
     state = {"epoch": 0, "step": 0, "best": float("inf"), "best_epoch": -1, "bad": 0, "epoch_times": []}
     half, best = common.ckpt_path(rd, "half"), common.ckpt_path(rd, "best")
     run = os.path.relpath(rd, a.root or common.RESULTS)
-    if os.path.exists(half) and not a.force:
+    # a run whose training ended but whose evals crashed (gpu out of memory) only repeats the evals
+    tdone = os.path.join(rd, "train_done.json")
+    trained = common.read_json(tdone, None) if os.path.exists(best) and not a.force else None
+    if trained:
+        state = trained["loop"]
+        print(f"training already finished at epoch {state['epoch']}: evals only")
+    elif os.path.exists(half) and not a.force:
         ck = torch.load(half, map_location=dev, weights_only=False)
         if "opt" in ck:
             model.load_state_dict(ck["state"])
             opt.load_state_dict(ck["opt"])
             state = ck["loop"]
-            gen.set_state(ck["gen"])
-            torch.set_rng_state(ck["torch_rng"])
+            gen.set_state(ck["gen"].cpu())  # rng states must sit on the cpu (map_location moved them)
+            torch.set_rng_state(ck["torch_rng"].cpu())
             print(f"resumed from {os.path.basename(half)} at epoch {state['epoch']}")
 
     cfg = {"dataset": dataset, "args": vars(a), "run_dir": rd, "n_params": M.n_params(model), "grad_clip": GRAD_CLIP,
@@ -124,8 +131,10 @@ def main(dataset, dims, priors, overrides=None, argv=None):
         wb = wandb.init(project=common.WANDB_PROJECT, name=f"{dataset}-{cell}-s{a.seed}", group=f"{dataset}-{cell}",
                         config=cfg, dir=rd, reinit=True, tags=[dataset, a.prior, f"d{a.d}"])
 
-    tr = D.GpuImages(data.train, dev, data.arch)
-    va = D.GpuImages(data.val, dev, data.arch)
+    tr = va = None
+    if not trained:
+        tr = D.GpuImages(data.train, dev, data.arch)
+        va = D.GpuImages(data.val, dev, data.arch)
     steps = common.CurveLogger(os.path.join(rd, "train_log.csv"),
                                ["step", "epoch", "loss", "recon", "kl", "grad_norm", "lr", "beta"], wb)
     epochs = common.CurveLogger(os.path.join(rd, "epoch_log.csv"),
@@ -134,7 +143,7 @@ def main(dataset, dims, priors, overrides=None, argv=None):
     if dev.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     status, t_train = "done", time.time()
-    for epoch in range(state["epoch"], a.epochs):
+    for epoch in range(a.epochs if trained else state["epoch"], a.epochs):
         t0 = time.time()
         beta = beta_at(epoch, a)
         model.train()
@@ -190,14 +199,33 @@ def main(dataset, dims, priors, overrides=None, argv=None):
             "mean_epoch_time_s": float(np.mean(state["epoch_times"])) if state["epoch_times"] else None,
             "peak_mem_mb": torch.cuda.max_memory_allocated() / 2**20 if dev.type == "cuda" else None,
             "n_params": M.n_params(model)}
+    if trained:
+        cost = trained["cost"]
+    elif status == "done":
+        common.write_json(tdone, {"loop": state, "cost": cost})
+    del tr, va
     metrics = {"status": status, "cost": cost,
                "checkpoints": {t: os.path.basename(p) for t, p in (("best", best), ("half", half)) if os.path.exists(p)}}
     if state["best_epoch"] < 0:
         metrics["status"] = status if status != "done" else "failed_no_checkpoint"
     else:
-        load_weights(model, best)
-        common.seed_everything(a.seed)
-        metrics.update(E.run_all(model, data, rd, a.seed, dev, set(filter(None, a.skip.split(",")))))
+        for attempt in range(30):  # other runs share the gpu: wait for memory instead of losing the run
+            oom = False
+            try:
+                load_weights(model, best)
+                common.seed_everything(a.seed)
+                res = E.run_all(model, data, rd, a.seed, dev, set(filter(None, a.skip.split(","))))
+                break
+            except torch.OutOfMemoryError:
+                if attempt == 29:
+                    raise
+                oom = True
+            if oom:  # outside the handler, so the failed attempt's tensors are released first
+                gc.collect()
+                torch.cuda.empty_cache()
+                print(f"evals: gpu out of memory (attempt {attempt + 1}), retrying in 120 s", flush=True)
+                time.sleep(120)
+        metrics.update(res)
         for p in (best, half):
             _to_fp16(p)
     metrics["time_end"] = time.strftime("%Y-%m-%d %H:%M:%S")
