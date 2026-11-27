@@ -57,8 +57,8 @@ python evaluate.py runs --only vsa,raw --skip_existing
 Analyses behind the appendix figures and the reference checks (run from the repo root, no training):
 
 ```bash
-python analysis/shapes3d_factors.py runs_shapes500 out/suite      # all factor pairs, fixed transforms, cosines
+python analysis/shapes3d_factors.py local/runs_shapes500 out/suite      # all factor pairs, fixed transforms, cosines
 python analysis/shapes3d_factor_figures.py out/suite figs tabs    # their figures and table
-python analysis/wason_unitary.py runs/_aggregate/wason_reference_unitary.json   # wason with random unitary vectors
+python analysis/wason_unitary.py local/runs/_aggregate/wason_reference_unitary.json   # wason with random unitary vectors
 python analysis/schlegel_check.py out/schlegel.json               # hrr, fhrr and real unitary vectors at matched sizes
 ```

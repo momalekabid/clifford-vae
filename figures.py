@@ -63,6 +63,12 @@ PANELS = {
 # it has d components (half that length, the equal-component comparison of schlegel et al. 2022)
 HRR_REFS = {}
 HRR_HALF = False
+# journal figure files: no title inside the image, panels lettered a, b, c, ... (the legend carries the rest)
+JOURNAL = False
+
+
+def _letter(ax, i):
+    ax.text(-0.13, 1.06, "abcdefgh"[i], transform=ax.transAxes, fontsize=17, fontweight="bold", ha="left", va="bottom")
 
 
 def _style(p):
@@ -107,7 +113,9 @@ def vsa_figure(runs, ds, d, priors, refs, names, out):
     else:
         fig, axes = plt.subplots(1, len(names), figsize=(6.2 * len(names), 4.8))
     n_max = max((len(runs.get((ds, cell(p, d)), [])) for p in priors), default=0)
-    for ax, name in zip(axes, names):
+    for i_ax, (ax, name) in enumerate(zip(axes, names)):
+        if JOURNAL:
+            _letter(ax, i_ax)
         for p in priors:
             ms = runs.get((ds, cell(p, d)), [])
             res = [common.get(m, f"vsa.{name}") for m in ms]
@@ -133,11 +141,13 @@ def vsa_figure(runs, ds, d, priors, refs, names, out):
     title = f"{DATASET.get(ds, ds)} --- VSA Operation Benchmarks ($d={d}$)"
     if grid:
         fig.legend(h, l, loc="lower center", ncol=len(l), frameon=False, fontsize=12.5, bbox_to_anchor=(0.5, -0.005))
-        fig.suptitle(title, fontsize=16)
+        if not JOURNAL:
+            fig.suptitle(title, fontsize=16)
         fig.tight_layout(rect=[0, 0.04, 1, 0.98], h_pad=2.0, w_pad=2.0)
     else:
         fig.legend(h, l, loc="lower center", ncol=len(l), frameon=False, bbox_to_anchor=(0.5, -0.02))
-        fig.suptitle(title, fontsize=15)
+        if not JOURNAL:
+            fig.suptitle(title, fontsize=15)
         fig.tight_layout(rect=[0, 0.06, 1, 1])
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
@@ -251,7 +261,7 @@ def composition_figure(runs, root, out):
                hatch=None if b is None else ("..", "//", "//", "//")[b], edgecolor="white", linewidth=0.6,
                yerr=np.abs(ci.T - mean), error_kw=dict(lw=1, capsize=2, ecolor="0.2"))
     ax.set_xticks(range(len(tests)), [t for _, t in tests])
-    ax.set(ylabel="Held-out pairs correct", ylim=(0, 1.05), title="3D Shapes --- Unseen Hue $\\times$ Shape Pairs ($d=128$)")
+    ax.set(ylabel="Held-out pairs correct", ylim=(0, 1.05), title="" if JOURNAL else "3D Shapes --- Unseen Hue $\\times$ Shape Pairs ($d=128$)")
     ax.grid(axis="y", alpha=0.25, lw=0.6)
     ax.legend(loc="upper center", ncol=(len(models) + 1) // 2, frameon=False, fontsize=9.5, bbox_to_anchor=(0.5, -0.2))
     fig.savefig(out, bbox_inches="tight")
@@ -292,6 +302,8 @@ def unseen_grid_figure(runs, seed, out, priors=("C", "N", "N_L2", "S"), cols=(0,
         x0, y0 = (n % 2) * (bw + gx), (n // 2) * (bh + gy)
         # titles sit centred over the image columns, so no title runs past its block
         ax.text(x0 + lab + k / 2, y0 + head / 2, title, ha="center", va="center", fontsize=13.5, fontweight="bold")
+        if JOURNAL:
+            ax.text(x0 + 0.05, y0 + head / 2, "abcd"[n], ha="left", va="center", fontsize=17, fontweight="bold")
         for r, (label, color, imgs) in enumerate(rws):
             y = y0 + head + r
             ax.text(x0 + lab - 0.14, y + 0.5, label, ha="right", va="center", fontsize=13, color=color)
@@ -318,7 +330,9 @@ def wason_figure(runs, agg, out, datasets=("mnist", "fashionmnist", "cifar10")):
     else:
         fig, axs = plt.subplots(1, len(datasets), figsize=(6.2 * len(datasets), 4.8), squeeze=False)
         panels = list(axs[0])
-    for ax, ds in zip(panels, datasets):
+    for i_ax, (ax, ds) in enumerate(zip(panels, datasets)):
+        if JOURNAL:
+            _letter(ax, i_ax)
         dims = DIMS[ds]
         for p in PRIORS.get(ds, CNN_PRIORS):
             xs, mean, lo, hi = [], [], [], []
@@ -353,7 +367,8 @@ def wason_figure(runs, agg, out, datasets=("mnist", "fashionmnist", "cifar10")):
             entries.setdefault(l, h)
     if grid:
         leg.legend(entries.values(), entries.keys(), loc="center", frameon=False, fontsize=13.5, handlelength=3, labelspacing=0.9)
-        fig.suptitle("Wason Card Task --- Rule Transform Applied to Unseen Concepts", fontsize=16)
+        if not JOURNAL:
+            fig.suptitle("Wason Card Task --- Rule Transform Applied to Unseen Concepts", fontsize=16)
         fig.tight_layout(rect=[0, 0, 1, 0.98], h_pad=2.0, w_pad=2.0)
     else:
         fig.legend(entries.values(), entries.keys(), loc="lower center", ncol=len(entries), frameon=False, bbox_to_anchor=(0.5, -0.04))

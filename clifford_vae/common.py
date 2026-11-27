@@ -23,8 +23,10 @@ import torch  # noqa: E402
 torch.set_num_threads(N_THREADS)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESULTS = os.environ.get("CVAE_RESULTS", os.path.join(REPO, "runs"))
-DATA = os.environ.get("CVAE_DATA", os.path.join(REPO, "data"))
+# results and data live in local/ (untracked) when that folder exists, otherwise next to the code
+_HOME = os.path.join(REPO, "local") if os.path.isdir(os.path.join(REPO, "local")) else REPO
+RESULTS = os.environ.get("CVAE_RESULTS", os.path.join(_HOME, "runs"))
+DATA = os.environ.get("CVAE_DATA", os.path.join(_HOME, "data"))
 WANDB_PROJECT = os.environ.get("WANDB_PROJECT", "clifford-vae")
 
 

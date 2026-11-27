@@ -70,3 +70,6 @@ writing/
 # results and checkpoints pulled from the pods (kept locally)
 runs_*/
 checkpoints_best/
+
+# everything that is not code: results, data, checkpoints, paper drafts, talks
+local/
